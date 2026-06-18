@@ -10,6 +10,7 @@ add_fesom_test(test_halo   1)
 add_fesom_test(test_halo   2)
 add_fesom_test(test_halo   8)
 add_fesom_test(test_dump   1)
+add_fesom_test(test_mesh   1)
 
 # dump_diff.py self-check (pure python; no external data needed).
 add_test(NAME dump_diff_selftest

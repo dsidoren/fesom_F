@@ -13,7 +13,11 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   M0.6 ✓ mod_dump (gid-keyed node+elem dump, byte-format-identical to FESOM2
   fesom_dump_shim.F90) + tools/dump_diff.py (first divergent substep, --selftest);
   test_dump + dump_diff_selftest pass.
-- **Current task:** M0.7 (mesh/ — geometry + CW orientation + analytic).
+  M0.7 ✓ mesh/ (mod_mesh_rotate g2r/r2g, mod_mesh_read pi 1-rank reader + topology +
+  CW + vertical, mod_mesh_areas core geometry transcribed from oce_mesh.F90,
+  mod_mesh_analytic Cartesian generator). test_mesh self-consistency passes Intel+GNU.
+  FESOM2 geometry byte-gate DEFERRED to M1 (needs oracle); see LESSONS L5.
+- **Current task:** M0.8 (drivers/fesom_analytic + M0 exit gate).
 - **TODO (oracle-side, when running M1+ byte-gate):** add ELEMENT dump shims to
   FESOM2 `port2/fesom2/src/fesom_dump_shim.F90` (node shim exists; element fields
   uv/UV_rhsAB/Av/pgf_x/pgf_y need new shims, gid set [1000,2000,3000,4000,5000]).

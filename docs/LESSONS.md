@@ -28,6 +28,25 @@ itself a bit-affecting behavior we must match, so keep it. `-init=zero` zeroes l
 (prevents spurious `-fpe0` traps on uninitialised reads). When a real byte-gate runs
 (M0.7+), re-verify the actual FESOM2 build's flags from its build dir, not just the CMake.
 
+## L5 — Mesh geometry (M0.7): ocean-only meshes, units, deferred byte-gate
+
+- **pi is OCEAN-only** (no land elements). Σ elem_area = ocean area ≈ 3.40e14 m² ≈
+  0.67·(4πr²), NOT the full sphere. Don't assert full-sphere area; assert the ocean
+  fraction (~0.5–0.85). pi extent is global (lon 0–360, lat −78..89), nl=48.
+- **FESOM2's geometry convention is radians × r_earth**: coords stored in radians,
+  `elem_area *= r_earth²`. A Cartesian analytic mesh must therefore store coords as
+  *radians-like* (physical metres / r_earth) so the shared pipeline yields physical
+  m². Test a linear field with the physical position = coord·r_earth.
+- **gradient_sca assumes CW node order** — run CW enforcement (test_tri) BEFORE
+  computing geometry, on file AND analytic meshes. (pi files are pre-oriented: 0 swaps.)
+- **FESOM2 geometry byte-gate is DEFERRED to M1**: it needs an instrumented-FESOM2
+  run dumping reference elem_area/gradient_sca/areas, which wasn't producible this
+  session. M0.7 is gated by self-consistency (CW, ocean-area, gradient annihilates
+  constants, gradient reproduces a linear field, adjacency). Deferred geometry not yet
+  transcribed: gradient_vec (M2 momentum), mesh_resolution smoothing (M4 GM), and the
+  multi-rank mesh remap (M2.12). Edge left/right orientation on the analytic mesh is
+  not FESOM2's (analytic only; pi reads edge_tri from file).
+
 ## L4 — Type-design choices (M0.3) deviating from the plan letter
 
 Documented here per the plan's "update scope when implementation deviates":
