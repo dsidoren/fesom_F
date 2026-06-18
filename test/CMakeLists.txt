@@ -3,3 +3,6 @@
 
 add_fesom_test(test_params 1)
 add_fesom_test(test_types  1)
+add_fesom_test(test_partit 1)
+add_fesom_test(test_partit 2)
+add_fesom_test(test_partit 8)

@@ -5,10 +5,13 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 ## Where we are
 
 - **Milestone:** M0 (Foundation, no physics) — in progress.
-- **Done:** M0.1 ✓ build system. M0.2 ✓ params/. M0.3 ✓ types/ (t_mesh, t_partit,
-  t_dyn, t_tracer, t_ice + mod_binary_arrays; DTIO round-trip max|Δ|=0; test_types
-  passes Intel dp+sp, GNU dp). See LESSONS L4 for type-design deviations.
-- **Current task:** M0.4 (infra/mod_partitioning + 1-rank synthesis).
+- **Done:** M0.1 ✓ build. M0.2 ✓ params/. M0.3 ✓ types/. M0.4 ✓ mod_partitioning
+  (par_init/par_ex/set_partition; dist_<NP>/ reader transcribed from oce_mesh.F90;
+  1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
+- **Current task:** M0.5 (infra/mod_halo — generic exchange).
+- **pi mesh:** `/home/a/a270088/port2/fesom2/tests/data/MESHES/pi` (nod2D=3140,
+  elem2D=5839, edge2D=8986; dist_2, dist_8). Nodes unique-owned; elem/edge myDim
+  boundary-redundant (sum > global). com_info/my_list are ASCII free-field, 1-based.
 - **Plan:** `docs/plans/2026-06-18-fesom3-architecture.md` (M0–M2 detailed, M3–M6+ roadmap).
 - **Decisions:** project memory `project-brainstorm-decisions.md` (D0–D9).
 

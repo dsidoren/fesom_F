@@ -87,12 +87,16 @@ set(FESOM3_MPI_LAUNCH_FLAGS "--mca;pml;ob1;--mca;btl;self,vader;--oversubscribe"
     CACHE STRING "Extra mpirun flags for ctest self-tests")
 
 function(add_fesom_test test_name nranks)
-    add_executable(${test_name} ${CMAKE_SOURCE_DIR}/test/${test_name}.F90)
-    apply_fesom_compile_flags(${test_name})
-    target_link_libraries(${test_name} PUBLIC fesom3)
-    set_target_properties(${test_name} PROPERTIES
-        LINKER_LANGUAGE Fortran
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    # Build the executable once; allow registering the same test at several rank
+    # counts (add_fesom_test called multiple times for one test_name).
+    if(NOT TARGET ${test_name})
+        add_executable(${test_name} ${CMAKE_SOURCE_DIR}/test/${test_name}.F90)
+        apply_fesom_compile_flags(${test_name})
+        target_link_libraries(${test_name} PUBLIC fesom3)
+        set_target_properties(${test_name} PROPERTIES
+            LINKER_LANGUAGE Fortran
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    endif()
     add_test(NAME ${test_name}_np${nranks}
              COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np ${nranks}
                      $<TARGET_FILE:${test_name}>)
