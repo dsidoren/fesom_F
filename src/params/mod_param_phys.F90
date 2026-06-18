@@ -1,0 +1,122 @@
+module mod_param_phys
+    ! Write-once physics parameters (decision D4). Declared with FESOM2 defaults,
+    ! populated once by read_param_phys() from namelist.oce, read-only thereafter.
+    !
+    ! Defaults transcribed from FESOM2 v2.7.3 src/oce_modules.F90 (module o_PARAM,
+    ! line cites below). The &oce_dyn namelist group is transcribed in full from a
+    ! real run dir (port2/fesom2/work_linfs_pp/namelist.oce) — every group member
+    ! must be declared or the namelist read fails. Time-stepping/AB2 constants are
+    ! o_PARAM defaults not exposed in the namelist.
+    !
+    ! Note: `epsilon` shadows the Fortran intrinsic of the same name, exactly as in
+    ! FESOM2 o_PARAM:92 — kept faithful so AB2 kernels transcribe verbatim.
+    use mod_precision, only: WP
+    implicit none
+    public
+    save
+
+    ! --- equation of state / general ---
+    integer       :: state_equation = 1            ! oce_modules.F90:21 (1=full EOS, 0=linear)
+
+    ! --- &oce_dyn: basic dynamics ---
+    real(kind=WP) :: C_d        = 0.0025_WP        ! oce_modules.F90:23 bottom drag
+    real(kind=WP) :: A_ver      = 0.001_WP         ! oce_modules.F90:26 background vert. visc.
+    real(kind=WP) :: scale_area = 2.0e8_WP         ! oce_modules.F90:29 ref element area
+
+    ! --- &oce_dyn: salt plume ---
+    logical       :: SPP        = .false.          ! oce_modules.F90:96
+
+    ! --- &oce_dyn: Gent-McWilliams ---
+    logical       :: Fer_GM           = .false.    ! oce_modules.F90:38
+    real(kind=WP) :: K_GM_max         = 3000.0_WP  ! oce_modules.F90:39
+    real(kind=WP) :: K_GM_min         = 2.0_WP     ! oce_modules.F90:40
+    integer       :: K_GM_bvref       = 2          ! oce_modules.F90:41
+    real(kind=WP) :: K_GM_rampmax     = 40.0_WP    ! oce_modules.F90:43
+    real(kind=WP) :: K_GM_rampmin     = 30.0_WP    ! oce_modules.F90:44
+    real(kind=WP) :: K_GM_resscalorder = 2.0_WP    ! oce_modules.F90:42
+    real(kind=WP) :: K_GM_cm          = 1.0_WP     ! oce_modules.F90:45
+    real(kind=WP) :: K_GM_cmin        = 0.5_WP     ! oce_modules.F90:46
+    logical       :: K_GM_Ktaper      = .false.    ! oce_modules.F90:47
+
+    ! --- &oce_dyn: GM scaling ---
+    logical       :: scaling_Ferreira   = .true.   ! oce_modules.F90:49
+    logical       :: scaling_Rossby     = .false.  ! oce_modules.F90:50
+    logical       :: scaling_resolution = .true.   ! oce_modules.F90:51
+    logical       :: scaling_FESOM14    = .false.  ! oce_modules.F90:52
+    logical       :: scaling_GMzexp     = .false.  ! oce_modules.F90:54
+    real(kind=WP) :: GMzexp_zref        = 500.0_WP ! oce_modules.F90:55
+    real(kind=WP) :: GMzexp_smin        = 0.1_WP   ! oce_modules.F90:56
+    logical       :: scaling_GINsea     = .false.  ! oce_modules.F90:59
+    real(kind=WP) :: GINsea_fac         = 2.0_WP   ! oce_modules.F90:60
+
+    ! --- &oce_dyn: Redi ---
+    logical       :: Redi        = .false.         ! oce_modules.F90:62
+    logical       :: Redi_Ktaper = .false.         ! oce_modules.F90:63
+    real(kind=WP) :: Redi_Kmax   = 3000.0_WP       ! oce_modules.F90:64
+    real(kind=WP) :: Redi_Kmin   = 2.0_WP          ! oce_modules.F90:65
+
+    ! --- &oce_dyn: ODM95 / LDD97 tapering ---
+    logical       :: scaling_ODM95 = .true.        ! oce_modules.F90:67
+    real(kind=WP) :: ODM95_Scr     = 1.0e-2_WP     ! oce_modules.F90:68
+    real(kind=WP) :: ODM95_Sd      = 1.0e-3_WP     ! oce_modules.F90:69
+    logical       :: scaling_LDD97 = .false.       ! oce_modules.F90:71
+    real(kind=WP) :: LDD97_c       = 2.0_WP        ! oce_modules.F90:72
+    real(kind=WP) :: LDD97_rmin    = 15.0e3_WP     ! oce_modules.F90:73
+    real(kind=WP) :: LDD97_rmax    = 100.0e3_WP    ! oce_modules.F90:74
+
+    ! --- &oce_dyn: vertical mixing scheme ---
+    real(kind=WP) :: visc_sh_limit = 5.0e-3_WP     ! oce_modules.F90:76
+    character(25) :: mix_scheme    = 'KPP'         ! oce_modules.F90:81 'KPP','PP','TKE'
+    real(kind=WP) :: Ricr          = 0.3_WP        ! oce_modules.F90:83
+    real(kind=WP) :: concv         = 1.6_WP        ! oce_modules.F90:84
+    logical       :: use_global_tides = .false.    ! oce_modules.F90:87
+
+    namelist /oce_dyn/ C_d, A_ver, scale_area, SPP, &
+        Fer_GM, K_GM_max, K_GM_min, K_GM_bvref, K_GM_rampmax, K_GM_rampmin, &
+        K_GM_resscalorder, K_GM_cm, K_GM_cmin, K_GM_Ktaper, &
+        scaling_Ferreira, scaling_Rossby, scaling_resolution, scaling_FESOM14, &
+        scaling_GMzexp, GMzexp_zref, GMzexp_smin, scaling_GINsea, GINsea_fac, &
+        scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97, LDD97_c, LDD97_rmin, LDD97_rmax, &
+        Redi, Redi_Ktaper, Redi_Kmax, Redi_Kmin, &
+        visc_sh_limit, mix_scheme, Ricr, concv, use_global_tides
+
+    ! --- o_PARAM defaults not in &oce_dyn (used by M2 kernels) ---
+    integer       :: mix_scheme_nmb = 1            ! oce_modules.F90:82 (set from mix_scheme)
+    real(kind=WP) :: kappa        = 0.4_WP         ! oce_modules.F90:24 von Karman
+    real(kind=WP) :: mix_coeff_PP = 0.01_WP        ! oce_modules.F90:25 PP mixing coef
+    real(kind=WP) :: K_hor        = 10.0_WP        ! oce_modules.F90:27
+    real(kind=WP) :: K_ver        = 0.00001_WP     ! oce_modules.F90:28
+    real(kind=WP) :: alpha   = 1.0_WP              ! oce_modules.F90:90 elevation implicitness
+    real(kind=WP) :: theta   = 1.0_WP              ! oce_modules.F90:90 divergence implicitness
+    real(kind=WP) :: epsilon = 0.1_WP              ! oce_modules.F90:92 AB2 offset (shadows intrinsic, faithful)
+
+    ! --- N2 smoothing (oce_modules.F90:104-106) ---
+    logical       :: N2smth_v    = .false.
+    logical       :: N2smth_h    = .true.
+    integer       :: N2smth_hidx = 1
+
+contains
+
+    subroutine read_param_phys(nml_path, ierr)
+        ! Read namelist.oce &oce_dyn once. ierr=0 success; >0 error.
+        character(len=*), intent(in)  :: nml_path
+        integer,          intent(out) :: ierr
+        integer :: u, ios
+
+        ierr = 0
+        open(newunit=u, file=trim(nml_path), status='old', action='read', iostat=ios)
+        if (ios /= 0) then
+            write(*,'(a)') 'read_param_phys: cannot open '//trim(nml_path)
+            ierr = 1; return
+        end if
+
+        rewind(u)
+        read(u, nml=oce_dyn, iostat=ios)
+        if (ios > 0) then
+            write(*,'(a)') 'read_param_phys: malformed namelist group &oce_dyn'
+            ierr = 2
+        end if
+        close(u)
+    end subroutine read_param_phys
+
+end module mod_param_phys
