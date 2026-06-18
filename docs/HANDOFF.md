@@ -49,10 +49,26 @@ cd build_intel_dp && ctest --output-on-failure                   # self-tests
 Anchor = Intel + DP + FESOM2-v2.7.3-exact flags (see docs/LESSONS.md L1). Build dirs:
 `build_<compiler>_<precision>/`. Login-node runs of 1–8 ranks are fine for self-tests.
 
+## Oracle — PROVEN RUNNABLE (2026-06-19) ✅
+
+The whole byte-gate pipeline is validated end-to-end:
+- `bin/fesom.x` (FESOM2 v2.7.3, git SHA 9271ae92) is prebuilt. The node dump shim is
+  already wired into `oce_ale.F90`.
+- **`tools/run_oracle_pi.sh [run_dir] [nsteps] [nranks]`** runs pi in ~0.25 s and writes
+  `<prefix>.<rank>` dumps (density/pressure/bvfreq/sw_alpha-beta/Kv/ssh_rhs/d_eta/hbar/
+  eta_n/w/T/S/hnode, substeps 1–16). Quirks it handles: fresh `fesom.clock` = `0 1 1948`
+  twice; `run_length_unit='s'` = steps; absolute ClimateDataPath.
+- The dump byte-format is **identical** to FESOM3 `mod_dump`; `tools/dump_diff.py` parses
+  real FESOM2 dumps (150 records) and self-compares `max|Δ|=0`. A fresh run byte-matches
+  the committed fixture `test/refdata/pi_oracle_default/dump.*` → FESOM2 is deterministic.
+- For M1: add UV/Wvel/del_ttf_advhoriz dump calls to FESOM2 `oce_ale_tracer.F90` advection
+  (node + NEW element shims) and rerun. For M2: use the reduced namelist (see below).
+
 ## Canonical references
 
 - **Algorithm oracle + byte-gate target:** FESOM2 v2.7.3 `/home/a/a270088/port2/fesom2/src/`
   (tag `fesom2.7.3-cport-instr`). Transcribe FROM here, gate `max|Δ|=0` AGAINST here.
+  Run via `tools/run_oracle_pi.sh` (proven).
 - **Structural template (structure only, NOT math/flags):**
   `/home/a/a270088/fesom3/design_refs/tracer_dwarf/lib/`.
 - **Reduced M2 oracle namelist:** `mix_scheme='PP'`, `Fer_GM=.false.`, `Redi=.false.`,

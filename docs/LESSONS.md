@@ -28,6 +28,21 @@ itself a bit-affecting behavior we must match, so keep it. `-init=zero` zeroes l
 (prevents spurious `-fpe0` traps on uninitialised reads). When a real byte-gate runs
 (M0.7+), re-verify the actual FESOM2 build's flags from its build dir, not just the CMake.
 
+## L6 — Oracle is runnable; how to drive it (proven 2026-06-19)
+
+Running the prebuilt instrumented FESOM2 on pi to produce reference dumps works and is
+fast (~0.25 s, 2 steps, 2 ranks). Gotchas, all handled by `tools/run_oracle_pi.sh`:
+- `fesom.clock` must be non-empty even for a fresh start: two lines `0 1 1948` (the
+  forcing year; columns = seconds, day-of-year, year). Empty → `severe (24): end-of-file`.
+- `run_length_unit='s'` means STEPS (not seconds) — set `run_length=2` for a 2-step run.
+- `ClimateDataPath` in the shipped namelist is relative (`..//test/input/global/`); from a
+  scratch run dir it must be absolute. Forcing paths were already absolute.
+- Login-node MPI needs `--mca pml ob1 --mca btl self,vader` (UCX/IB settings fail).
+- A fresh run byte-matches a prior run's dump (`max|Δ|=0`) → FESOM2 is deterministic, so
+  `max|Δ|=0` byte-gating is well-posed. The shipped pi config runs KPP/GM (substep MIXING
+  dumps `Kv`); the **reduced M2 config** (PP, no GM/Redi, linfs, opt_visc=7) is a separate
+  namelist to apply when byte-gating M2.
+
 ## L5 — Mesh geometry (M0.7): ocean-only meshes, units, deferred byte-gate
 
 - **pi is OCEAN-only** (no land elements). Σ elem_area = ocean area ≈ 3.40e14 m² ≈
