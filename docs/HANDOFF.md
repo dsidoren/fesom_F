@@ -8,7 +8,9 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 - **Done:** M0.1 ✓ build. M0.2 ✓ params/. M0.3 ✓ types/. M0.4 ✓ mod_partitioning
   (par_init/par_ex/set_partition; dist_<NP>/ reader transcribed from oce_mesh.F90;
   1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
-- **Current task:** M0.5 (infra/mod_halo — generic exchange).
+  M0.5 ✓ mod_halo (generic exchange_nod/exchange_elem, broadcast-only manual pack,
+  stale-halo probe; test_halo 1/2/8-rank Intel+GNU dp).
+- **Current task:** M0.6 (infra/mod_dump — gid-keyed validation harness).
 - **pi mesh:** `/home/a/a270088/port2/fesom2/tests/data/MESHES/pi` (nod2D=3140,
   elem2D=5839, edge2D=8986; dist_2, dist_8). Nodes unique-owned; elem/edge myDim
   boundary-redundant (sum > global). com_info/my_list are ASCII free-field, 1-based.
