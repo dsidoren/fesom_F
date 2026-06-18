@@ -1,0 +1,20 @@
+# Build artifacts
+build/
+build_*/
+*.o
+*.mod
+*.smod
+*.a
+*.so
+*.x
+
+# External reference clones (cloned design docs / prior ports — not part of this repo)
+design_refs/
+
+# Large ancillary artifacts
+*.zip
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
