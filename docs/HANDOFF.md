@@ -10,7 +10,13 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
   M0.5 ✓ mod_halo (generic exchange_nod/exchange_elem, broadcast-only manual pack,
   stale-halo probe; test_halo 1/2/8-rank Intel+GNU dp).
-- **Current task:** M0.6 (infra/mod_dump — gid-keyed validation harness).
+  M0.6 ✓ mod_dump (gid-keyed node+elem dump, byte-format-identical to FESOM2
+  fesom_dump_shim.F90) + tools/dump_diff.py (first divergent substep, --selftest);
+  test_dump + dump_diff_selftest pass.
+- **Current task:** M0.7 (mesh/ — geometry + CW orientation + analytic).
+- **TODO (oracle-side, when running M1+ byte-gate):** add ELEMENT dump shims to
+  FESOM2 `port2/fesom2/src/fesom_dump_shim.F90` (node shim exists; element fields
+  uv/UV_rhsAB/Av/pgf_x/pgf_y need new shims, gid set [1000,2000,3000,4000,5000]).
 - **pi mesh:** `/home/a/a270088/port2/fesom2/tests/data/MESHES/pi` (nod2D=3140,
   elem2D=5839, edge2D=8986; dist_2, dist_8). Nodes unique-owned; elem/edge myDim
   boundary-redundant (sum > global). com_info/my_list are ASCII free-field, 1-based.
