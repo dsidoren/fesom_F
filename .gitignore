@@ -14,6 +14,10 @@ design_refs/
 # Large ancillary artifacts
 *.zip
 
+# Python
+__pycache__/
+*.pyc
+
 # Editor / OS
 *.swp
 *~
