@@ -5,9 +5,10 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 ## Where we are
 
 - **Milestone:** M0 (Foundation, no physics) — in progress.
-- **Done:** M0.1 ✓ build system. M0.2 ✓ params/ (precision, constants, config,
-  param_phys, hp_math; test_params passes Intel dp+sp and GNU dp).
-- **Current task:** M0.3 (types/).
+- **Done:** M0.1 ✓ build system. M0.2 ✓ params/. M0.3 ✓ types/ (t_mesh, t_partit,
+  t_dyn, t_tracer, t_ice + mod_binary_arrays; DTIO round-trip max|Δ|=0; test_types
+  passes Intel dp+sp, GNU dp). See LESSONS L4 for type-design deviations.
+- **Current task:** M0.4 (infra/mod_partitioning + 1-rank synthesis).
 - **Plan:** `docs/plans/2026-06-18-fesom3-architecture.md` (M0–M2 detailed, M3–M6+ roadmap).
 - **Decisions:** project memory `project-brainstorm-decisions.md` (D0–D9).
 

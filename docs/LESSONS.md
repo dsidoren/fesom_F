@@ -28,7 +28,23 @@ itself a bit-affecting behavior we must match, so keep it. `-init=zero` zeroes l
 (prevents spurious `-fpe0` traps on uninitialised reads). When a real byte-gate runs
 (M0.7+), re-verify the actual FESOM2 build's flags from its build dir, not just the CMake.
 
-## L3 — GNU `-flto` dropped: breaks the lib+exe static-archive link
+## L4 — Type-design choices (M0.3) deviating from the plan letter
+
+Documented here per the plan's "update scope when implementation deviates":
+- **Field names kept FESOM2-verbatim** (`elem2D_nodes`, `nod_in_elem2D`, `nlevels`,
+  `gradient_sca`, ...) so kernels transcribe line-for-line. The plan's `elem_nodes`/
+  `elem_nnodes` naming → realized as `elem2D_nodes(MAX_NV,:)` + new `elem2D_nnodes(:)`.
+- **node→element adjacency is DENSE** (`nod_in_elem2D(MAX_ADJACENT,:)` + `_num`), not
+  CSR as D2 suggested. FESOM2 and the dwarf both use dense; matching it preserves
+  kernel iteration order for byte-identity. (CSR was a memory aspiration, not in the refs.)
+- **Types are lean/growable**: dropped beyond-v1 fields (cavity, iceberg, OASIS, split-
+  explicit `se_*`, backscatter/UKE, energy diagnostics `ke_*`, DVD). Aux 3D WORK fields
+  (density/N²/Kv/Av/hpressure/sw_α-β) are added to `t_dyn_work` at M2.1 with verified
+  FESOM2 names rather than guessed now. GM `fer_uv/fer_w` declared, serialized at M4.
+- **Serialization = derived-type `read/write(unformatted)`** (DTIO) over an `access='stream'`
+  unit; size-prefixed via `mod_binary_arrays`. Only WP-real variants exist — at DP/SP
+  MP==WP so MP mesh arrays serialize through them; HP compiles IO out. Full restart-file
+  orchestration (`mod_io_restart`) deferred to M2.11.
 
 FESOM2's GNU Levante flags include `-flto`, but FESOM2 links one big executable;
 FESOM3 links a static `libfesom3.a` + separate driver/test executables. `-flto` puts
