@@ -15,3 +15,9 @@ add_fesom_test(test_mesh   1)
 # dump_diff.py self-check (pure python; no external data needed).
 add_test(NAME dump_diff_selftest
          COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/dump_diff.py --selftest)
+
+# End-to-end analytic driver (built from src/drivers/). Runs clean on 1 + 2 ranks.
+add_test(NAME fesom_analytic_np1
+         COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np 1 $<TARGET_FILE:fesom_analytic>)
+add_test(NAME fesom_analytic_np2
+         COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np 2 $<TARGET_FILE:fesom_analytic>)

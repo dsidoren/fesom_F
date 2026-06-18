@@ -4,7 +4,8 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 
 ## Where we are
 
-- **Milestone:** M0 (Foundation, no physics) — in progress.
+- **Milestone:** M0 (Foundation) — **COMPLETE ✓** (tag `m0`). 13/13 ctest green on
+  Intel dp + GNU dp; debug build (`-check all`) clean. Next: M1 (tracer advection).
 - **Done:** M0.1 ✓ build. M0.2 ✓ params/. M0.3 ✓ types/. M0.4 ✓ mod_partitioning
   (par_init/par_ex/set_partition; dist_<NP>/ reader transcribed from oce_mesh.F90;
   1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
@@ -13,11 +14,22 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   M0.6 ✓ mod_dump (gid-keyed node+elem dump, byte-format-identical to FESOM2
   fesom_dump_shim.F90) + tools/dump_diff.py (first divergent substep, --selftest);
   test_dump + dump_diff_selftest pass.
-  M0.7 ✓ mesh/ (mod_mesh_rotate g2r/r2g, mod_mesh_read pi 1-rank reader + topology +
-  CW + vertical, mod_mesh_areas core geometry transcribed from oce_mesh.F90,
-  mod_mesh_analytic Cartesian generator). test_mesh self-consistency passes Intel+GNU.
-  FESOM2 geometry byte-gate DEFERRED to M1 (needs oracle); see LESSONS L5.
-- **Current task:** M0.8 (drivers/fesom_analytic + M0 exit gate).
+  M0.7 ✓ mesh/ (rotate, read, areas, analytic; self-consistency gated).
+  M0.8 ✓ step/mod_model (t_model + model_init/step/finalize) + drivers/fesom_analytic;
+  runs end-to-end 1+2 ranks; debug build clean.
+- **Current task:** M1.1 — horizontal tracer advection (upwind + MUSCL).
+
+## M1 entry notes (read before starting)
+
+- M1 = first byte-exact physics slice (tracer advection, FCT, prescribed velocity),
+  gate `max|Δ|=0` vs FESOM2 on pi. **This is the first task whose gate needs the
+  instrumented FESOM2 oracle running** — also closes the M0.7 geometry byte-gate.
+- Oracle prep required: build instrumented FESOM2 v2.7.3 (`port2/fesom2`), add the
+  element dump shims (HANDOFF TODO above), run pi with prescribed UV/Wvel +
+  controlled-input replay, produce reference dumps; compare with `tools/dump_diff.py`.
+- Transcribe math from FESOM2 `oce_adv_tra_{hor,ver,fct}.F90` + `oce_muscl_adv.F90`;
+  structure from dwarf `oce_adv_tra_*`. Geometry needed (elem_area, gradient_sca,
+  edge_cross_dxdy, areas) is in `mod_mesh_areas` — verify it against the oracle here.
 - **TODO (oracle-side, when running M1+ byte-gate):** add ELEMENT dump shims to
   FESOM2 `port2/fesom2/src/fesom_dump_shim.F90` (node shim exists; element fields
   uv/UV_rhsAB/Av/pgf_x/pgf_y need new shims, gid set [1000,2000,3000,4000,5000]).

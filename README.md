@@ -16,15 +16,27 @@ viscosity, **PP / KPP / TKE** vertical mixing, **GM/Redi**, **EVP + mEVP** sea i
 
 ## Status
 
-Architecture brainstorm complete and plan written/reviewed; implementation not yet started.
+**M0 (Foundation) complete** — buildable skeleton + validation harness + mesh/partition/halo
+infrastructure, zero physics. 13/13 self-tests green on Intel and GNU (double precision).
 
-- **Plan:** [`docs/plans/2026-06-18-fesom3-architecture.md`](docs/plans/2026-06-18-fesom3-architecture.md)
-  — M0–M2 detailed into byte-gated tasks, M3–M6+ roadmap.
-- **Design references** (not tracked here): `design_refs/tracer_dwarf` (Fortran structural template),
-  `design_refs/fesom3-design` (FESOMx design docs); `paper/` (the porting-experience paper).
+- **M0.1** CMake build (anchor flags from FESOM2 v2.7.3) · **M0.2** params (precision/constants/
+  config) · **M0.3** types (mesh/partit/dyn/tracer/ice) · **M0.4** partitioning + 1-rank synthesis ·
+  **M0.5** generic halo exchange · **M0.6** gid-keyed dump harness + `dump_diff.py` · **M0.7** mesh
+  geometry + CW + analytic generator · **M0.8** analytic driver + lifecycle.
+- **Plan:** [`docs/plans/2026-06-18-fesom3-architecture.md`](docs/plans/2026-06-18-fesom3-architecture.md).
+  **State/next:** [`docs/HANDOFF.md`](docs/HANDOFF.md). **Gotchas:** [`docs/LESSONS.md`](docs/LESSONS.md).
+- **Design references** (not tracked): `design_refs/tracer_dwarf`, `design_refs/fesom3-design`.
 - **FESOM2 oracle** (transcribe from / byte-gate against): `/home/a/a270088/port2/fesom2/src/`.
+
+## Build
+
+```bash
+./configure.sh --compiler intel --precision dp --clean --build   # anchor
+cd build_intel_dp && ctest --output-on-failure
+```
 
 ## Next step
 
-Begin milestone **M0** (foundation: build system, derived types, MPI/halo infrastructure, and the
-validation harness) per the plan.
+Milestone **M1** — byte-exact tracer advection (FCT) on a prescribed velocity, gated `max|Δ|=0`
+vs instrumented FESOM2. First task requiring the FESOM2 reference oracle (also closes the deferred
+M0.7 geometry byte-gate).
