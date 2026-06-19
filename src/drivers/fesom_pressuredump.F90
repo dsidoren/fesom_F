@@ -1,13 +1,13 @@
 program fesom_pressuredump
-    ! M2.1 pressure/EOS operator byte-gate driver. Loads pi 1-rank with the SAME
-    ! rotation as the FESOM2 pi run (alpha/beta/gamma=50/15/-90, cyclic 360),
-    ! computes geometry, builds the ALE depths Z_3d_n/zbar_3d_n + node thickness
-    ! hnode (linfs full cells; M1.2/M1.3 proved them), PRESCRIBES an analytic T/S
-    ! field (identical formula to the FESOM2 oracle src/fesom_pressure_dump.F90,
-    ! computed from the byte-identical coordinates) + density_ref=density_0, runs
-    ! oce_pressure_bv (once with horizontal N^2 smoothing OFF, once ON), and dumps
-    ! density_m_rho0 / hpressure / bvfreq (raw + smoothed) in the oracle's FADVHDMP
-    ! format. tools/pressure_diff.py then compares for max|delta|=0.
+    ! M2.1 pressure/EOS + M2.2 PGF + M2.3 vel_rhs operator byte-gate driver. Loads pi
+    ! 1-rank with the SAME rotation as the FESOM2 pi run (alpha/beta/gamma=50/15/-90,
+    ! cyclic 360), computes geometry (incl. M2.3 coriolis), builds the ALE depths
+    ! Z_3d_n/zbar_3d_n + node thickness hnode (linfs full cells; M1.2/M1.3 proved
+    ! them), PRESCRIBES analytic T/S + UV/eta_n/UV_rhsAB fields (identical formulas to
+    ! the FESOM2 oracle src/fesom_pressure_dump.F90, from the byte-identical coords),
+    ! then runs oce_pressure_bv (raw + smoothed N^2) -> oce_pgf -> oce_dyn_velrhs and
+    ! dumps density_m_rho0 / hpressure / bvfreq / pgf_x/pgf_y / coriolis / uv_rhs* in
+    ! the oracle's FADVHDMP format. tools/pressure_diff.py compares for max|delta|=0.
     !
     !   FESOM3_MESH_DIR      mesh dir   (default: pi)
     !   FESOM3_PRESSURE_OUT  out path   (default: pressure_f3.bin)
@@ -20,20 +20,40 @@ program fesom_pressuredump
     use mod_partitioning, only: par_init, par_ex
     use mod_mesh_read,    only: read_mesh
     use mod_mesh_areas,   only: compute_geometry
+    use mod_dyn,          only: t_dyn
     use oce_pressure_bv,  only: pressure_bv
     use oce_pgf,          only: pressure_force_4_linfs_fullcell
-    use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r2
+    use oce_dyn_velrhs,   only: compute_vel_rhs
+    use oce_dyn_visc,     only: viscosity_filter
+    use oce_dyn_ivertvisc, only: impl_vert_visc_ale
+    use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3
     implicit none
+
+    ! Pinned shared constant (NOT pi's namelist dt=86400/36=2400 s): the vel_rhs gate
+    ! only needs BOTH codes to use the same dt in the dt*(...)/elem_area scaling.
+    real(kind=WP), parameter :: dt_velrhs = 1800.0_WP
 
     character(len=512) :: mesh_dir, out_path
     type(t_partit)      :: partit
     type(t_mesh)        :: mesh
-    integer :: nsw, n, nz, nl, u, nzmin, nzmax
+    integer :: nsw, n, nz, nl, u, nzmin, nzmax, e
     real(kind=WP) :: lon, lat
     real(kind=MP) :: zbar_srf, zbar_bot
     real(kind=WP), allocatable :: temp(:,:), salt(:,:), density_ref(:,:)
     real(kind=WP), allocatable :: density(:,:), hpressure(:,:), bvfreq(:,:)
     real(kind=WP), allocatable :: bvfreq_raw(:,:), pgf_x(:,:), pgf_y(:,:)
+    ! --- M2.3 vel_rhs (Coriolis + AB2 + PGF + SSH gradient) + M2.4 momentum advection ---
+    type(t_dyn) :: dyn
+    real(kind=WP), allocatable :: uv_in(:,:,:), uv_rhsAB_prev(:,:,:)
+    real(kind=WP), allocatable :: uv_rhs_eul(:,:,:), uv_rhs_ab2(:,:,:), uv_rhsAB_cor(:,:,:)
+    real(kind=WP), allocatable :: uvnode_rhs_dump(:,:,:)   ! M2.4 momadv intermediate
+    ! --- M2.4 biharmonic viscosity (opt_visc=7, visc_filt_bidiff) ---
+    real(kind=WP), allocatable :: uv_rhs_visc(:,:,:), u_c_dump(:,:), v_c_dump(:,:)
+    integer       :: ed, el(2), ndu, ng0, ng1, ng2
+    real(kind=WP) :: du, dumax
+    ! --- M2.5 implicit vertical viscosity (TDMA / Thomas solve, impl_vert_visc_ale) ---
+    real(kind=WP), allocatable :: Av(:,:), stress_surf(:,:), uv_rhs_ivv(:,:,:)
+    integer       :: nwp, nwm
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -61,6 +81,20 @@ program fesom_pressuredump
         do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)-1
             mesh%hnode(nz, n) = mesh%zbar(nz) - mesh%zbar(nz+1)
         end do
+    end do
+
+    ! helem (per-element layer thickness, linfs full cells): helem(nz,e)=zbar(nz)-zbar(nz+1)
+    ! for nz in [ulevels(e), nlevels(e)-1]; the element analog of hnode (M1 advection gate).
+    ! zbar_e_bot (partial-cell bottom depth) = zbar(nlevels(e)) for full cells (FESOM2
+    ! init_bottom_elem_thickness, use_partial_cell=.false.). Both consumed by M2.5
+    ! impl_vert_visc_ale to rebuild the per-column zbar_n/Z_n.
+    allocate(mesh%helem(nl-1, mesh%elem2D)); mesh%helem = 0.0_MP
+    allocate(mesh%zbar_e_bot(mesh%elem2D)); mesh%zbar_e_bot = 0.0_MP
+    do e = 1, mesh%elem2D
+        do nz = mesh%ulevels(e), mesh%nlevels(e)-1
+            mesh%helem(nz, e) = mesh%zbar(nz) - mesh%zbar(nz+1)
+        end do
+        mesh%zbar_e_bot(e) = mesh%zbar(mesh%nlevels(e))
     end do
 
     ! zbar_3d_n / Z_3d_n: per-node ALE interface/mid depths, built exactly as FESOM2
@@ -124,6 +158,159 @@ program fesom_pressuredump
     pgf_x = 0.0_WP; pgf_y = 0.0_WP
     call pressure_force_4_linfs_fullcell(hpressure, mesh, pgf_x, pgf_y)
 
+    ! ============== M2.3 vel_rhs assembly + M2.4 momentum advection ==============
+    ! Coriolis + AB2 + PGF + SSH-gradient + momentum advection (momadv_opt=2). Build a
+    ! t_dyn, prescribe analytic UV (elements) / eta_n (nodes) / previous-step UV_rhsAB +
+    ! w_e (nodes, the explicit vertical velocity momadv reads; all identical to the
+    ! FESOM2 oracle, from the byte-identical coords), copy in the M2.2 pgf_x/pgf_y, and
+    ! run oce_dyn_velrhs TWICE: lfirst=.true. (first Euler step, ff=1.0) then
+    ! lfirst=.false. (AB2 step, ff=ab2=1.6). The oracle drives the REAL FESOM2
+    ! compute_vel_rhs the same way (now with momadv_opt=2 -> momentum_adv_scalar).
+    allocate(dyn%uv(2, nl-1, mesh%elem2D), dyn%uv_rhs(2, nl-1, mesh%elem2D))
+    allocate(dyn%uv_rhsAB(1, 2, nl-1, mesh%elem2D))     ! (AB_order-1, 2, nl-1, elem2D)
+    allocate(dyn%eta_n(mesh%nod2D))
+    allocate(dyn%w_e(nl, mesh%nod2D))                   ! explicit vertical velocity (nodes)
+    allocate(dyn%w_i(nl, mesh%nod2D))                   ! M2.5 implicit vertical velocity (nodes)
+    allocate(dyn%work%uvnode_rhs(2, nl-1, mesh%nod2D))  ! momadv nodal scratch
+    allocate(dyn%work%pgf_x(nl-1, mesh%elem2D), dyn%work%pgf_y(nl-1, mesh%elem2D))
+    allocate(dyn%work%u_c(nl-1, mesh%elem2D), dyn%work%v_c(nl-1, mesh%elem2D))  ! visc scratch
+    allocate(Av(nl, mesh%elem2D), stress_surf(2, mesh%elem2D))  ! M2.5 prescribed inputs
+    dyn%AB_order          = 2
+    dyn%momadv_opt        = 2     ! M2.4: enable momentum_adv_scalar (pi production value)
+    ! M2.4 biharmonic viscosity (opt_visc=7) — pin the pi/reduced-M2 namelist values
+    ! (visc_gamma0=0.003 OVERRIDES the t_dyn default 0.03; gamma_h=0 -> pure biharmonic).
+    ! MUST match the FESOM2 oracle src/fesom_pressure_dump.F90.
+    dyn%opt_visc          = 7
+    dyn%visc_gamma0       = 0.003_WP
+    dyn%visc_gamma1       = 0.1_WP
+    dyn%visc_gamma2       = 0.285_WP
+    dyn%visc_gamma0_h     = 0.0_WP
+    dyn%visc_gamma1_h     = 0.0_WP
+    dyn%w_e               = 0.0_WP
+    dyn%w_i               = 0.0_WP
+    dyn%work%uvnode_rhs   = 0.0_WP
+    dyn%work%u_c          = 0.0_WP
+    dyn%work%v_c          = 0.0_WP
+    dyn%work%pgf_x = pgf_x        ! reuse the proven M2.2 PGF (exact copy)
+    dyn%work%pgf_y = pgf_y
+
+    ! analytic SSH + explicit vertical velocity w_e at nodes (w_e: sign varies in
+    ! space AND depth via cos(0.3*nz) -> non-trivial w*du/dz; MUST match the oracle).
+    ! M2.5 also prescribes the IMPLICIT vertical velocity w_i (nodes): a DISTINCT analytic
+    ! formula (sin(lon)*cos(2*lat)*cos(0.25*nz)) so its sign varies in space AND depth ->
+    ! exercises both the min(0,wu/wd) and max(0,wu/wd) upwind branches of the vertical-
+    ! advection update in impl_vert_visc_ale. MUST match the FESOM2 oracle.
+    do n = 1, mesh%nod2D
+        lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
+        dyn%eta_n(n) = 0.5_WP*cos(lat)*sin(lon) + 0.3_WP*sin(2.0_WP*lat)
+        do nz = 1, nl
+            dyn%w_e(nz,n) = 1.0e-4_WP*sin(2.0_WP*lon)*cos(lat)*cos(0.3_WP*real(nz,WP))
+            dyn%w_i(nz,n) = 2.0e-4_WP*sin(lon)*cos(2.0_WP*lat)*cos(0.25_WP*real(nz,WP))
+        end do
+    end do
+    ! analytic element velocity + previous-step AB array (from element node-1 coords).
+    ! Horizontal amplitude 2.00/1.50 m/s (was 0.10/0.08 at M2.3/M2.4): a strong-current
+    ! stress test so the across-edge velocity jump |du| spans ALL THREE biharmonic-
+    ! viscosity flow-aware branches of max(gamma0, max(gamma1*|du|, gamma2*|du|^2)). With
+    ! the pi gammas the winners cross at |du|=gamma0/gamma1=0.03 (gamma0->gamma1) and
+    ! |du|=gamma1/gamma2=0.35 (gamma1->gamma2), so max|du|~0.71 (~2x the upper crossover)
+    ! exercises gamma0, gamma1 AND gamma2 with a clear margin (L11/L17). The depth terms
+    ! (-0.005*nz / +0.004*nz) cancel in du=UV(el1)-UV(el2). M2.3/M2.4 re-gate with the new
+    ! values (identical formula on both sides). MUST match the FESOM2 oracle.
+    do e = 1, mesh%elem2D
+        lon = mesh%coord_nod2D(1, mesh%elem2D_nodes(1,e))
+        lat = mesh%coord_nod2D(2, mesh%elem2D_nodes(1,e))
+        do nz = 1, nl-1
+            dyn%uv(1,nz,e) =  2.00_WP*cos(lat)*sin(lon)        - 0.005_WP*real(nz,WP)
+            dyn%uv(2,nz,e) = -1.50_WP*sin(lat)*cos(2.0_WP*lon) + 0.004_WP*real(nz,WP)
+            dyn%uv_rhsAB(1,1,nz,e) =  1.0e6_WP*sin(lon)*cos(lat)        + 1.0e4_WP*real(nz,WP)
+            dyn%uv_rhsAB(1,2,nz,e) = -1.0e6_WP*cos(lon)*sin(2.0_WP*lat) - 1.0e4_WP*real(nz,WP)
+        end do
+        ! M2.5 prescribed inputs (elements): Av strictly POSITIVE vertical viscosity
+        ! ([1e-3,1.4e-2] m^2/s, realistic) over all nz=1..nl (the TDMA reads Av(nzmax)),
+        ! stress_surf sign-varying wind stress (~0.1 N/m^2 -> exercises the surface BC for
+        ! both signs). MUST match the FESOM2 oracle.
+        do nz = 1, nl
+            Av(nz,e) = 5.0e-3_WP + 4.0e-3_WP*cos(lat)*cos(lon) + 1.0e-4_WP*real(nz,WP)
+        end do
+        stress_surf(1,e) =  0.10_WP*cos(lat)*sin(lon)
+        stress_surf(2,e) = -0.08_WP*sin(lat)*cos(2.0_WP*lon)
+    end do
+
+    allocate(uv_in(2,nl-1,mesh%elem2D), uv_rhsAB_prev(2,nl-1,mesh%elem2D))
+    allocate(uv_rhs_eul(2,nl-1,mesh%elem2D), uv_rhs_ab2(2,nl-1,mesh%elem2D))
+    allocate(uv_rhsAB_cor(2,nl-1,mesh%elem2D), uvnode_rhs_dump(2,nl-1,mesh%nod2D))
+    allocate(uv_rhs_visc(2,nl-1,mesh%elem2D))
+    allocate(u_c_dump(nl-1,mesh%elem2D), v_c_dump(nl-1,mesh%elem2D))
+    uv_in         = dyn%uv
+    uv_rhsAB_prev = dyn%uv_rhsAB(1,:,:,:)
+
+    dyn%uv_rhs = 0.0_WP
+    call compute_vel_rhs(dyn, mesh, dt_velrhs, lfirst=.true.)    ! Euler start (ff=1.0)
+    uv_rhs_eul      = dyn%uv_rhs
+    uv_rhsAB_cor    = dyn%uv_rhsAB(1,:,:,:)         ! Coriolis + momentum advection (M2.4)
+    uvnode_rhs_dump = dyn%work%uvnode_rhs          ! momadv nodal scratch (post-normalize)
+    call compute_vel_rhs(dyn, mesh, dt_velrhs, lfirst=.false.)   ! AB2 step (ff=ab2)
+    uv_rhs_ab2   = dyn%uv_rhs
+
+    ! M2.4 biharmonic viscosity (opt_visc=7): a SEPARATE operator run AFTER
+    ! compute_vel_rhs (FESOM2 oce_ale.F90:3822). It ADDS the biharmonic increment into
+    ! dyn%uv_rhs (reads dyn%uv only; the incoming uv_rhs=uv_rhs_ab2 is just accumulated
+    ! into). The oracle drives the REAL FESOM2 visc_filt_bidiff the same way.
+    call viscosity_filter(7, dyn, mesh, dt_velrhs)
+    uv_rhs_visc = dyn%uv_rhs                        ! post-viscosity UV_rhs (gate target)
+    u_c_dump    = dyn%work%u_c                       ! first-stage Laplacian (intermediate)
+    v_c_dump    = dyn%work%v_c
+
+    ! gate-strength diagnostic (NOT dumped): over interior edges x levels, which term
+    ! WINS the viscosity coefficient max(gamma0, max(gamma1*|du|, gamma2*|du|^2))? A
+    ! non-zero share for each of gamma0/gamma1/gamma2 confirms all three flow-aware
+    ! branches of visc_filt_bidiff are genuinely selected (L11/L17), not just computed.
+    dumax = 0.0_WP; ndu = 0; ng0 = 0; ng1 = 0; ng2 = 0
+    do ed = 1, mesh%edge2D
+        if (ed > mesh%edge2D_in) cycle
+        el    = mesh%edge_tri(:, ed)
+        nzmin = maxval(mesh%ulevels(el))
+        nzmax = minval(mesh%nlevels(el))
+        do nz = nzmin, nzmax-1
+            du = sqrt((dyn%uv(1,nz,el(1))-dyn%uv(1,nz,el(2)))**2 &
+                    + (dyn%uv(2,nz,el(1))-dyn%uv(2,nz,el(2)))**2)
+            dumax = max(dumax, du); ndu = ndu + 1
+            if (0.003_WP >= max(0.1_WP*du, 0.285_WP*du*du)) then
+                ng0 = ng0 + 1
+            else if (0.1_WP*du >= 0.285_WP*du*du) then
+                ng1 = ng1 + 1
+            else
+                ng2 = ng2 + 1
+            end if
+        end do
+    end do
+    write(*,'(a,es10.3,a,f5.1,a,f5.1,a,f5.1,a)') &
+        'fesom_pressuredump: visc strength: max|du|=', dumax, &
+        ' m/s ; gamma0/gamma1/gamma2 selected on ', &
+        100.0_WP*real(ng0,WP)/real(max(ndu,1),WP), '/', &
+        100.0_WP*real(ng1,WP)/real(max(ndu,1),WP), '/', &
+        100.0_WP*real(ng2,WP)/real(max(ndu,1),WP), '% of edge-levels'
+
+    ! ============== M2.5 implicit vertical viscosity (TDMA / Thomas solve) ==============
+    ! A SEPARATE operator run AFTER viscosity_filter in the timestep (FESOM2
+    ! oce_ale.F90:3874-3876). It CONSUMES the post-viscosity uv_rhs_visc as the explicit
+    ! rhs, solves the per-column tridiagonal (implicit vertical viscosity Av + vertical
+    ! advection w_i + wind-stress top BC + bottom drag), and OVERWRITES dyn%uv_rhs with the
+    ! solution. The oracle drives the REAL FESOM2 impl_vert_visc_ale on the same inputs.
+    allocate(uv_rhs_ivv(2,nl-1,mesh%elem2D))
+    call impl_vert_visc_ale(dyn, mesh, dt_velrhs, Av, stress_surf)
+    uv_rhs_ivv = dyn%uv_rhs                           ! post-TDMA UV_rhs (gate target)
+
+    ! gate-strength diagnostic (NOT dumped): the TDMA must non-trivially change the rhs,
+    ! and w_i must take BOTH signs so both upwind branches of the advection update fire.
+    nwp = count(dyn%w_i >  0.0_WP)
+    nwm = count(dyn%w_i <  0.0_WP)
+    write(*,'(a,es10.3,a,es10.3,a,i0,a,i0)') &
+        'fesom_pressuredump: ivertvisc: max|uv_rhs_ivv|=', maxval(abs(uv_rhs_ivv)), &
+        ' ; max|d(uv_rhs)|=', maxval(abs(uv_rhs_ivv - uv_rhs_visc)), &
+        ' ; w_i>0/<0 = ', nwp, '/', nwm
+
     ! --- dump (same FADVHDMP format / names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'temp',           real(temp,        MP))
@@ -138,6 +325,28 @@ program fesom_pressuredump
     call wr_r2(u, 'bvfreq',         real(bvfreq,             MP))
     call wr_r2(u, 'pgf_x',          real(pgf_x(1:nl-1, :),   MP))
     call wr_r2(u, 'pgf_y',          real(pgf_y(1:nl-1, :),   MP))
+    ! M2.3 vel_rhs + M2.4 momadv: gated coriolis + prescribed inputs (incl. w_e) +
+    ! the momadv nodal intermediate (uvnode_rhs) + the full-assembly outputs.
+    call wr_r1(u, 'coriolis',       real(mesh%coriolis(1:mesh%elem2D), MP))
+    call wr_r1(u, 'eta_n',          real(dyn%eta_n,        MP))
+    call wr_r3(u, 'uv_in',          real(uv_in,            MP))
+    call wr_r3(u, 'uv_rhsAB_prev',  real(uv_rhsAB_prev,    MP))
+    call wr_r2(u, 'w_e',            real(dyn%w_e(1:nl, :), MP))
+    call wr_r3(u, 'uvnode_rhs',     real(uvnode_rhs_dump,  MP))
+    call wr_r3(u, 'uv_rhsAB_cor',   real(uv_rhsAB_cor,     MP))
+    call wr_r3(u, 'uv_rhs_eul',     real(uv_rhs_eul,       MP))
+    call wr_r3(u, 'uv_rhs_ab2',     real(uv_rhs_ab2,       MP))
+    ! M2.4 biharmonic viscosity (opt_visc=7): the first-stage Laplacian intermediate
+    ! u_c/v_c + the post-viscosity UV_rhs (gate target).
+    call wr_r2(u, 'visc_u_c',       real(u_c_dump,         MP))
+    call wr_r2(u, 'visc_v_c',       real(v_c_dump,         MP))
+    call wr_r3(u, 'uv_rhs_visc',    real(uv_rhs_visc,      MP))
+    ! M2.5 implicit vertical viscosity (TDMA): prescribed inputs (Av/stress_surf/w_i) +
+    ! the post-solve UV_rhs (gate target).
+    call wr_r2(u, 'Av',             real(Av(1:nl, :),      MP))
+    call wr_r2(u, 'stress_surf',    real(stress_surf,      MP))
+    call wr_r2(u, 'w_i',            real(dyn%w_i(1:nl, :), MP))
+    call wr_r3(u, 'uv_rhs_ivv',     real(uv_rhs_ivv,       MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_pressuredump: wrote '//trim(out_path)
 

@@ -14,9 +14,20 @@ module mod_advhor_dump
     use mod_precision, only: MP
     implicit none
     private
-    public :: advhor_dump_open, advhor_dump_close, wr_r2, wr_r3, wr_i1, wr_i2
+    public :: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3, wr_i1, wr_i2
 
 contains
+
+    subroutine wr_r1(u, name, a)
+        ! 1-D real array (e.g. per-element coriolis): d1 = size, d2 = 1.
+        integer, intent(in) :: u
+        character(len=*), intent(in) :: name
+        real(kind=MP), intent(in) :: a(:)
+        character(len=24) :: nm
+        nm = name
+        write(u) nm, int(0,int32), int(size(a),int32), int(1,int32)
+        write(u) real(a, real64)
+    end subroutine wr_r1
 
     subroutine advhor_dump_open(u, path, nod2D, elem2D, edge2D, nl)
         integer,          intent(out) :: u

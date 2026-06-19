@@ -47,7 +47,7 @@ module mod_dyn
     type t_dyn
         ! ---- prognostic / state ----
         real(kind=WP), allocatable, dimension(:,:,:)   :: uv, uv_rhs, fer_uv  ! (2,nl-1,elem2D)
-        real(kind=WP), allocatable, dimension(:,:,:,:) :: uv_rhsAB            ! (2,nl-1,elem2D,AB_order)
+        real(kind=WP), allocatable, dimension(:,:,:,:) :: uv_rhsAB            ! (AB_order-1,2,nl-1,elem2D) — FESOM2 order (ab_lvl,comp,nz,elem)
         real(kind=WP), allocatable, dimension(:,:,:)   :: uvnode              ! (2,nl-1,nod2D)
         real(kind=WP), allocatable, dimension(:,:)     :: w, w_e, w_i, w_old, cfl_z, fer_w ! (nl,nod2D)
         real(kind=WP), allocatable, dimension(:)       :: eta_n, d_eta, ssh_rhs, ssh_rhs_old ! (nod2D)
@@ -59,6 +59,10 @@ module mod_dyn
         real(kind=WP) :: visc_gamma0    = 0.03_WP
         real(kind=WP) :: visc_gamma1    = 0.1_WP
         real(kind=WP) :: visc_gamma2    = 0.285_WP
+        ! harmonic (Laplacian) viscosity coefficients for opt_visc=7 (FESOM2 MOD_DYN:
+        ! visc_gamma{0,1}_h). Default 0 -> pure biharmonic (the pi/reduced-M2 config).
+        real(kind=WP) :: visc_gamma0_h  = 0.0_WP
+        real(kind=WP) :: visc_gamma1_h  = 0.0_WP
         logical       :: use_ivertvisc  = .true.
         integer       :: momadv_opt     = 2
         logical       :: use_freeslip   = .false.
@@ -135,7 +139,7 @@ contains
         write(unit, iostat=iostat, iomsg=iomsg) dyn%check_opt_visc, &
             dyn%use_ivertvisc, dyn%use_freeslip, dyn%use_wsplit
         write(unit, iostat=iostat, iomsg=iomsg) dyn%visc_gamma0, dyn%visc_gamma1, &
-            dyn%visc_gamma2, dyn%wsplit_maxcfl
+            dyn%visc_gamma2, dyn%visc_gamma0_h, dyn%visc_gamma1_h, dyn%wsplit_maxcfl
         call dyn%solverinfo%write_si(unit)
         call dyn%work%write_dw(unit)
         call write_bin_array(dyn%uv,          unit, iostat, iomsg)
@@ -163,7 +167,7 @@ contains
         read(unit, iostat=iostat, iomsg=iomsg) dyn%check_opt_visc, &
             dyn%use_ivertvisc, dyn%use_freeslip, dyn%use_wsplit
         read(unit, iostat=iostat, iomsg=iomsg) dyn%visc_gamma0, dyn%visc_gamma1, &
-            dyn%visc_gamma2, dyn%wsplit_maxcfl
+            dyn%visc_gamma2, dyn%visc_gamma0_h, dyn%visc_gamma1_h, dyn%wsplit_maxcfl
         call dyn%solverinfo%read_si(unit)
         call dyn%work%read_dw(unit)
         call read_bin_array(dyn%uv,          unit, iostat, iomsg)

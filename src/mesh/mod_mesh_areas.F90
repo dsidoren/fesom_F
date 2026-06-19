@@ -4,8 +4,9 @@ module mod_mesh_areas
     ! (nv = elem2D_nnodes(elem)); for triangles nv==3 so the anchor is unchanged.
     !
     ! Provides what M1 (tracer advection) needs: elem_cos, metric_factor, elem_area,
-    ! gradient_sca, edge_dxdy, edge_cross_dxdy, area/areasvol(+inv). gradient_vec
-    ! (M2 momentum), coriolis (M2) and mesh_resolution smoothing (M4 GM) are deferred.
+    ! gradient_sca, edge_dxdy, edge_cross_dxdy, area/areasvol(+inv). M2.3 adds
+    ! coriolis (f=2*omega*sin(lat_geo) at elements + nodes). gradient_vec (M2 momentum
+    ! advection) and mesh_resolution smoothing (M4 GM) are still deferred.
     !
     ! BYTE-FAITHFULNESS (M1 geometry byte-gate). FESOM2 splits this work across two
     ! routines whose ORDER of operations the bits depend on:
@@ -21,10 +22,10 @@ module mod_mesh_areas
     !                                             ordering and the elem_center /
     !                                             edge_center wrap arithmetic verbatim.
     use mod_precision,   only: WP, MP
-    use mod_constants,   only: r_earth
+    use mod_constants,   only: r_earth, omega
     use mod_mesh,        only: t_mesh
     use mod_partit,      only: t_partit
-    use mod_mesh_rotate, only: trim_cyclic, get_cyclic_length
+    use mod_mesh_rotate, only: trim_cyclic, get_cyclic_length, r2g
     implicit none
     private
     public :: compute_geometry
@@ -39,11 +40,50 @@ contains
         type(t_partit), intent(in)    :: partit
         logical,        intent(in)    :: cartesian
         call compute_elem_metric(mesh, cartesian)   ! elem_cos, metric_factor
+        call compute_coriolis(mesh, cartesian)      ! coriolis, coriolis_node (M2.3)
         call compute_elem_area(mesh, cartesian)     ! elem_area (UNSCALED radians^2)
         call compute_node_areas(mesh)               ! accumulate area, then scale *r_earth^2
         call compute_edge_geometry(mesh)            ! edge_dxdy, edge_cross_dxdy (uses elem_cos)
         call compute_gradient_sca(mesh)             ! uses SCALED elem_area + elem_cos
     end subroutine compute_geometry
+
+    !--------------------------------------------------------------------------
+    subroutine compute_coriolis(mesh, cartesian)
+        ! Coriolis parameter f = 2*omega*sin(lat_geo) at elements (coriolis) and nodes
+        ! (coriolis_node). FESOM2 mesh_auxiliary_arrays (oce_mesh.F90:2476-2503): the
+        ! geographical latitude is r2g applied to the ROTATED element centroid
+        ! (elem_center) and to the rotated node coordinate. r2g uses the same rotation
+        ! matrix that g2r built coord_nod2D with (geometry-gate-proven), so coriolis
+        ! byte-matches FESOM2 by construction (L9 transitive-gate pattern). M2.3 needs
+        ! coriolis (elements); coriolis_node (nodes) is faithful + cheap, used later.
+        type(t_mesh), intent(inout) :: mesh
+        logical,      intent(in)    :: cartesian
+        integer :: n
+        real(kind=WP) :: ax, ay, lon, lat
+        allocate(mesh%coriolis(mesh%elem2D), mesh%coriolis_node(mesh%nod2D))
+        if (.not. cartesian) then
+            do n = 1, mesh%nod2D
+                call r2g(lon, lat, mesh%coord_nod2D(1, n), mesh%coord_nod2D(2, n))
+                mesh%coriolis_node(n) = 2 * omega * sin(lat)
+            end do
+            do n = 1, mesh%elem2D
+                call elem_center(mesh, n, ax, ay)
+                call r2g(lon, lat, ax, ay)
+                mesh%coriolis(n) = 2 * omega * sin(lat)
+            end do
+        else
+            ! cartesian/analytic mesh (no rotated->geo transform): use the stored
+            ! latitude directly. coriolis is NOT byte-gated on the analytic mesh; this
+            ! is a benign finite fill that avoids r2g/asin on cartesian coords.
+            do n = 1, mesh%nod2D
+                mesh%coriolis_node(n) = 2 * omega * sin(mesh%coord_nod2D(2, n))
+            end do
+            do n = 1, mesh%elem2D
+                call elem_center(mesh, n, ax, ay)
+                mesh%coriolis(n) = 2 * omega * sin(ay)
+            end do
+        end if
+    end subroutine compute_coriolis
 
     !--------------------------------------------------------------------------
     pure subroutine elem_center(mesh, n, cx, cy)

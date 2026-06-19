@@ -89,6 +89,7 @@ module mod_mesh
         real(kind=MP), allocatable, dimension(:,:) :: hnode, hnode_new
         real(kind=MP), allocatable, dimension(:,:) :: zbar_3d_n, Z_3d_n
         real(kind=MP), allocatable, dimension(:,:) :: helem
+        real(kind=MP), allocatable, dimension(:)   :: zbar_e_bot     ! (elem2D) depth of partial-cell bottom (full cells: zbar(nlevels(elem)))
         real(kind=MP), allocatable, dimension(:)   :: dhe, hbar, hbar_old
 
         ! ---- Coriolis ----
@@ -165,6 +166,7 @@ contains
         call write_bin_array(mesh%zbar_3d_n,          unit, iostat, iomsg)
         call write_bin_array(mesh%Z_3d_n,             unit, iostat, iomsg)
         call write_bin_array(mesh%helem,              unit, iostat, iomsg)
+        call write_bin_array(mesh%zbar_e_bot,         unit, iostat, iomsg)
         call write_bin_array(mesh%dhe,                unit, iostat, iomsg)
         call write_bin_array(mesh%hbar,               unit, iostat, iomsg)
         call write_bin_array(mesh%hbar_old,           unit, iostat, iomsg)
@@ -230,6 +232,7 @@ contains
         call read_bin_array(mesh%zbar_3d_n,          unit, iostat, iomsg)
         call read_bin_array(mesh%Z_3d_n,             unit, iostat, iomsg)
         call read_bin_array(mesh%helem,              unit, iostat, iomsg)
+        call read_bin_array(mesh%zbar_e_bot,         unit, iostat, iomsg)
         call read_bin_array(mesh%dhe,                unit, iostat, iomsg)
         call read_bin_array(mesh%hbar,               unit, iostat, iomsg)
         call read_bin_array(mesh%hbar_old,           unit, iostat, iomsg)

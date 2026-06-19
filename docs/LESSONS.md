@@ -387,3 +387,224 @@ M2.2 (`oce_pgf.F90` `pressure_force_4_linfs_fullcell`: the `gradient_sca` contra
   field, you are running a Debug binary — check `CMAKE_BUILD_TYPE` in the build dir's CMakeCache.txt and
   the binary mtime/size (Debug `fesom_advhordump` ~3.1 MB vs Release ~1.75 MB) BEFORE suspecting a code
   regression. (The real M2.2 gates, run against the restored Release anchor, are all `max|Δ|=0`.)
+
+## L15 — Partial vel_rhs (M2.3): the Debug `-check all` catches what Release + a passing gate hide
+
+M2.3 (`compute_vel_rhs` Coriolis + AB2 + PGF + SSH-gradient, the non-advection part; momentum
+advection deferred to M2.4) byte-matched FESOM2 `max|Δ|=0` on the FIRST Release gate run (19 fields).
+But the Release gate PASSED **with a latent non-conformance** that only the Debug `-check all` run
+exposed — the single most reusable lesson here:
+
+- **`elem2D_nodes` is `(MAX_NV=4, elem2D)` in FESOM3 (quad-capable, L4), `(3, elem2D)` in FESOM2.**
+  The faithful-looking transcription `elnodes = mesh%elem2D_nodes(:,elem)` (FESOM2 writes exactly
+  that) assigns a 4-extent RHS into the 3-extent `elnodes(3)`. In **Release** ifort silently copies
+  the LHS extent (3) — reading `elem2D_nodes(1:3)`, the correct triangle nodes — so the gate is
+  `max|Δ|=0`. In **Debug** (`-check all`) it traps: `severe (408) Shape mismatch: extent of dim 1 of
+  ELNODES is 3 and ... MESH is 4`. **Fix:** slice explicitly `elem2D_nodes(1:3,elem)` (what `oce_pgf`
+  already did). Lesson: a green Release byte-gate does NOT prove conformance; ALWAYS run the Debug
+  `-check all` pass (L10/L13/L14 said so for OOB/FPE — add *array-shape* to that list). Any FESOM2
+  `(:,elem)` on `elem2D_nodes`/`gradient_sca`/other `MAX_NV`-dim arrays must become `(1:3,elem)` in
+  FESOM3.
+
+- **`coriolis` byte-matches via `r2g` transitively — a NEW geometry field gated for free (L9 again).**
+  `coriolis(elem)=2·omega·sin(lat_geo)` where `lat_geo` is `r2g` applied to the rotated element
+  centroid (`elem_center`). The geometry gate proved `coord_nod2D` (built by `g2r` with the rotation
+  matrix), and `r2g` reuses the SAME matrix with the inverse operations — so `coriolis` is `max|Δ|=0`
+  by construction, no new transcendental risk. `elem_center` uses the same literal `/3.0_WP` (L7) it
+  uses for `elem_cos`. Guard the cartesian/analytic path (no `r2g` on cartesian coords → asin>1 NaN
+  under `-fpe0`): for `cartesian=.true.` fill from the stored lat directly (ungated, benign).
+
+- **Two-call gate covers BOTH AB ff branches.** `compute_vel_rhs` has a `save :: lfirst`; the first
+  call uses `ff=1.0` (Euler start, `lfirst .and. .not. r_restart`), every later call `ff=ab2=1.6`.
+  Driving the REAL routine TWICE in the shim (dump `uv_rhs_eul` then `uv_rhs_ab2`) exercises both —
+  they differ over 66% of entries, so the ff selection is non-vacuous. The 2nd call naturally consumes
+  the 1st call's `UV_rhsAB` (= Coriolis) as its "previous", a self-consistent step (no reset needed).
+  FESOM3 takes `lfirst` as an explicit argument (`.true.` then `.false.`) since it has no `save` state;
+  `r_restart` is folded into it (v1 has no restart — M2.11).
+
+- **Forcing the gated config in the shim: three knobs that bite.** (1) `dynamics%ldiag_ke` **defaults
+  to `.true.`** in FESOM2 `MOD_DYN` — leave it and `compute_vel_rhs` writes the `ke_*_AB` diag arrays
+  (extra work, and FESOM3 has no `ke_*`); force `.false.`. (2) `momadv_opt` is `2` on pi (calls
+  `momentum_adv_scalar`); force `0` so the partial gate isolates Coriolis+AB2+PGF (the FESOM3 kernel
+  simply omits the momadv call). (3) `dt` is pinned to a shared constant (`1800.0_WP`) in BOTH codes,
+  **not** pi's namelist `dt=86400/36=2400 s` — the gate only needs both sides equal in the final
+  `dt*(…)/elem_area` scaling, and pinning removes the namelist dependency (L9).
+
+- **The `use_pice=0` path lets a minimal fake `ice` satisfy the real routine.** `compute_vel_rhs`
+  unconditionally associates `m_ice => ice%data(2)%values` / `m_snow => ice%data(3)%values` at entry,
+  but with `which_ale='linfs'` → `use_pice=0` they are never read. `ice_setup` runs AFTER `ocean_setup`
+  (where the shim fires), so no live `ice` exists yet — the shim builds a throwaway `type(t_ice)` with
+  just `data(2:3)%values` allocated. The pointer targets exist; the values are irrelevant. (FESOM3 v1
+  has no ice at all, so its kernel drops the `p_ice` term entirely — byte-identical since p_ice=0.)
+
+- **Same transitive-gate reason M2.3 "just worked":** every operand was already byte-pinned —
+  `coriolis` (r2g/geometry), `elem_area`/`gradient_sca` (geometry gate), `pgf_x`/`pgf_y` (M2.2),
+  `ab_epsilon`-derived `ab1=-0.6`/`ab2=1.6` (L12 fold-safe), and the runtime `/elem_area` divisor is
+  byte-identical on both sides (L7/L10/L14). The only genuinely new arithmetic is the AB blend and the
+  SSH-gradient `sum(gradient_sca·(-g·eta))`, both simple `+`/`*`/`sum` — fold-safe.
+
+## L16 — Momentum advection (M2.4): the full UV_rhs gate; OpenMP-off oracle; gate the intermediate, not the perturbation (PASSED first try)
+
+M2.4 (`momentum_adv_scalar` → the FULL `UV_rhs`: Coriolis + AB2 + PGF + SSH-grad + momentum advection)
+byte-matched FESOM2 `max|Δ|=0` on the FIRST Release gate run (21 fields), like all of M1 + M2.1–M2.3.
+`momentum_adv_scalar` lives in `src/oce/oce_dyn_velrhs.F90` (private, called by `compute_vel_rhs` when
+`momadv_opt==2` — mirroring FESOM2's own `oce_ale_vel_rhs.F90` layout, NOT the plan's separate
+`oce_dyn_momadv.F90`). Reusable specifics:
+
+- **The FESOM2 oracle is built `ENABLE_OPENMP=OFF`, so momadv's `omp_set_lock(partit%plock)` +
+  `!$OMP ORDERED` paths compile OUT.** momadv is the FIRST gated kernel with OpenMP locks/ordered
+  reductions (the M1/M2.3 kernels had `!$OMP DO` but no locks). With OpenMP off they are dead code and
+  the per-node edge-scatter runs SERIALLY in natural edge order (1..edge2D) — which is exactly FESOM3's
+  serial loop. So the order-sensitive accumulation matches by construction (the L8/L9 argument: edges
+  order is geometry-gate-proven, `nod_in_elem2D` order is area-gate-proven). Check `ENABLE_OPENMP` in
+  the oracle `build/CMakeCache.txt` before trusting a parallel-reduction kernel's serial transcription;
+  if it were ON with `__openmp_reproducible`, the `!$OMP ORDERED` would still serialize, but plain
+  OpenMP would reorder → ULP diffs (re-gate would need the reproducible build or 1-thread).
+
+- **Gate the operator's own intermediate, not just its (small) contribution to the dominant field.**
+  momadv adds only ~`elem_area·avg(uvnode_rhs)` ≈ 8 to a Coriolis `UV_rhsAB` of ≈1e4 (≈0.07%), and ~1%
+  of the final `uv_rhs`. A small perturbation to a dominant field is a WEAK gate *if you only watch the
+  dominant field*. Fix: dump `uvnode_rhs` (the post-`areasvol_inv` nodal advection) as its OWN record —
+  it is 68.9% non-zero with BOTH signs (the edge-scatter `+nod(1)` / `−nod(2)` branches), gated at its
+  native ~1e-6 magnitude. So a bug in EITHER the vertical (`w·du/dz`) OR horizontal (`u·du/dx`) pass
+  shows in `uvnode_rhs` directly, independent of how little it moves `uv_rhs`. (The EXACT `max|Δ|=0`
+  gate would catch any ULP diff regardless — but the separate intermediate LOCALISES it, the L9/L13
+  "gate every intermediate" rule.) And because the gate runs the REAL FESOM2 vertical+horizontal passes,
+  FESOM3 matching `uvnode_rhs` proves BOTH passes byte-identical *by construction* (a no-op vertical
+  pass would leave `uvnode_rhs` horizontal-only ≠ FESOM2 → FAIL).
+
+- **Prescribe the velocity fully-defined on `1:nl-1` to keep the `0·below-bottom` products clean.** The
+  horizontal scatter reads `un2(nz)*UV(:,nz,el2)` for `nz` up to `max(nl1,nl2)` — i.e. BELOW el2's
+  bottom, where `un2(nz)=0` (zero-filled) but `UV(:,nz,el2)` is whatever sits there. `0·finite=0`
+  (clean) but `0·NaN=NaN`. The driver/shim prescribe `UV` for ALL `nz=1..nl-1` (every element, every
+  level), so the below-bottom reads are finite zeros-of-the-analytic-formula, never uninitialised heap →
+  no NaN under `-fpe0`. (Same defensive-prescription reason M1.2 set `wvel` on the full column.)
+
+- **`w_e` prescribed like M1.2's `wvel`** — `1e-4·sin(2·lon)·cos(lat)·cos(0.3·nz)`, sign varying in
+  space AND depth so the `w·du/dz` finite difference `wu(nz)−wu(nz+1)` is non-trivial. Dumped as an
+  input record (`w_e`) so the prescription itself is gated, like `wvel`/`uv_in`.
+
+- **The momadv divisors follow the established rules.** `/(3._WP·hnode(nz,n))` is a RUNTIME divisor but
+  byte-identical operands on both sides → reciprocal matches (L7/L10). The vertice→element `/3.0_WP` is
+  a LITERAL divisor (exact 1/3 fold, byte-safe; triangles only — the L7 arity caveat). `elem2D_nodes`
+  accessed PER-COMPONENT (`(1,el)`/`(2,el)`/`(3,el)`, scalar) not as a `(:,el)` slice → no MAX_NV=4-vs-3
+  shape mismatch (the L15 trap; Debug `-check all` confirmed clean).
+
+## L17 — Biharmonic viscosity (M2.4, opt_visc=7): no new geometry; large |du| to exercise the flow-aware max (PASSED first try)
+
+M2.4 biharmonic viscosity (`viscosity_filter(7)` → `visc_filt_bidiff`, FESOM2 `oce_dyn.F90:591-744`)
+byte-matched FESOM2 `max|Δ|=0` on the FIRST Release gate run (24 fields now), like all of M1 + M2.1-M2.4.
+It lives in `src/oce/oce_dyn_visc.F90` (mirroring FESOM2's `oce_dyn.F90` — a SEPARATE file/operator run
+AFTER `compute_vel_rhs`, NOT inside it like momadv). Reusable specifics:
+
+- **opt_visc=7 needs NO new geometry — the HANDOFF's `gradient_vec` worry was unfounded for THIS scheme.**
+  `visc_filt_bidiff` is a pure edge-based ∇² applied TWICE (a biharmonic): pass 1 scatters the across-edge
+  velocity jump `u1=UV(el1)-UV(el2)` × a flow-aware coeff into the element field `U_c`/`V_c`; pass 2
+  scatters the across-edge jump of `U_c` into `UV_rhs/elem_area`. It reads only `edge_tri`, `elem_area`,
+  `ulevels`/`nlevels`, `edge2D_in` (+ `dynamics%uv`/`uv_rhs`/`work%u_c`/`v_c`) — every one already gated.
+  `gradient_vec` is still deferred but is NOT required here (it would be for a vector-Laplacian scheme; the
+  edge-difference biharmonic sidesteps it). So the L9 transitive-gate pattern again → `max|Δ|=0` first run.
+
+- **First gated kernel to use `edge2D_in` (interior-edge-only loop; free slip on boundary edges).** FESOM2
+  `if(myList_edge2D(ed)>edge2D_in) cycle`. At 1-rank `myList_edge2D` is identity AND the mesh orders interior
+  edges first (`1..edge2D_in`, boundary `edge2D_in+1..edge2D` — `fvom_init` writes them so, line 554-555), so
+  the lift is `do ed=1,edge2D; if(ed>edge2D_in) cycle`. `edge2D_in` is byte-pinned transitively: same
+  `edgenum.out` (FESOM3 reads line 2), same edge ordering proven by the geometry gate (`edge_tri`/
+  `edge_cross_dxdy` were `max|Δ|=0`). For interior edges BOTH `edge_tri(1/2,ed)>0`, so no `el2<0` guard is
+  needed (unlike momadv, which looped ALL edges). `edge_tri(:,ed)` is the size-2 left/right slot — NOT a
+  MAX_NV dim, so no L15 shape trap, and `elem2D_nodes` is never touched. Debug `-check all` EXIT 0.
+
+- **The biharmonic is TWO SEPARATE edge loops with `U_c`/`V_c` between — the serial structure replaces the
+  `!$OMP BARRIER`.** Pass 1 must FULLY fill `U_c` before pass 2 reads `U_c(el1)-U_c(el2)`; FESOM2 enforces
+  this with an `!$OMP BARRIER` between the loops, FESOM3's two sequential `do ed` loops get it for free.
+  `exchange_elem(U_c/V_c)` between them is a 1-rank no-op (lifted at M2.12). `U_c`/`V_c` are zeroed over all
+  elements first. The OpenMP-off oracle (L16, re-confirmed `ENABLE_OPENMP=OFF` in the oracle CMakeCache)
+  compiles out the `omp_set_lock`/`!$OMP ORDERED` scatter → serial edge order → matches FESOM3's serial loop.
+
+- **Gate STRENGTH: the flow-aware coeff `max(γ0, max(γ1·|du|, γ2·|du|²))` needs LARGE |du|, or only γ0 fires.**
+  The pi gammas are `γ0=0.003` (background; OVERRIDES the `t_dyn` default 0.03 — pin the namelist value!),
+  `γ1=0.1`, `γ2=0.285`, `γ0_h=γ1_h=0` (pure biharmonic). The winners cross at `|du|=γ0/γ1=0.03` (γ0→γ1) and
+  `|du|=γ1/γ2=0.351` (γ1→γ2). At pi-realistic velocities (~0.1 m/s) `|du|≲0.02` so ONLY γ0 (background) is
+  ever selected → the γ1/γ2 branches are computed-but-not-selected, masking a transcription bug there (the
+  L11 weak-gate trap). Fix: bump the SHARED prescribed `UV` amplitude to 2.0/1.5 m/s (a strong-current
+  stress test; the operator gate has no stability constraint) so `|du|` spans all three — measured
+  selection **γ0/γ1/γ2 = 20.4/78.6/1.0%** of edge-levels (γ2 on ~2000 levels, a clear margin). A
+  driver-side, NON-gated diagnostic counts the actual `max` winner to verify this. NOTE: γ2 is a near-dead
+  path in PRODUCTION pi (the namelist even labels γ2 "only used for opt_visc=5/8") — it fires only on
+  synthetic |du|>0.351; the gate exercises it deliberately. Bumping UV re-gated M2.3/M2.4 with new values
+  (automatic — identical formula on both sides; all prior fields stayed `max|Δ|=0`).
+
+- **Gate the operator's own intermediate (the L16 rule).** Dump `visc_u_c`/`visc_v_c` (the first-stage
+  Laplacian, the element field pass 1 builds) as their OWN records, so a pass-1 bug localises there while a
+  pass-2 bug shows in `uv_rhs_visc`-but-not-`visc_u_c`. The post-viscosity `uv_rhs_visc` is the gate target;
+  viscosity only READS `UV` and ADDS its increment into the incoming `uv_rhs` (= `uv_rhs_ab2`, already gated),
+  so running it after the 2nd `compute_vel_rhs` is well-defined.
+
+- **The viLapl (harmonic-addition) term is transcribed but contributes 0 on pi (γ_h=0) — a deferred sub-gate.**
+  `viLapl=dt·max(γ0_h, γ1_h·|du|)·len`; with γ0_h=γ1_h=0 it is exactly 0 (no FPE: `0·sqrt(...)`=0). The
+  γ_h>0 combined harmonic+biharmonic path is ungated on pi (like the cavity/zstar/use_density_ref deferrals);
+  re-gate it when a config with γ_h>0 is exercised. All divisors follow the established rules: `len=
+  sqrt(sum(elem_area))`, `-dt·sqrt(...)`, final `/elem_area(el)` are RUNTIME divisors byte-identical on both
+  sides (L7/L10/L14). Local intermediates are `real(WP)`; FESOM2 hard-codes them `real(kind=8)` — byte-equal
+  at the DP anchor (WP=8), a deferred SP-precision nuance.
+
+## L18 — Implicit vertical viscosity (M2.5): a sequential TDMA byte-matches by pure transitivity (PASSED first try)
+
+M2.5 implicit vertical viscosity (`impl_vert_visc_ale`, FESOM2 `oce_ale.F90:3315-3526`) byte-matched FESOM2
+`max|Δ|=0` on the FIRST Release gate run (28 fields now), like all of M1 + M2.1-M2.4. It lives in a new
+`src/oce/oce_dyn_ivertvisc.F90`, a SEPARATE operator run AFTER `viscosity_filter` (FESOM2 `oce_ale.F90:3874`).
+Reusable specifics:
+
+- **A tridiagonal Thomas solve is a strictly SEQUENTIAL recurrence — there is NO summation/scatter order
+  ambiguity to defend (unlike the edge/node scatters of M2.4/M2.4-visc).** Per element the column is
+  independent; forward elimination then back substitution are recurrences with one well-defined order. So the
+  gate reduces ENTIRELY to "are the operands byte-identical?" — and they are: `UV`, the incoming `uv_rhs` (=
+  the M2.4-visc-gated `uv_rhs_visc`), the prescribed `w_i`/`Av`/`stress_surf`, the geometry-proven
+  `helem`/`zbar_e_bot`/`ulevels`/`nlevels`, and `C_d`/`density_0`/`dt`. The L9 transitive-gate pattern again →
+  `max|Δ|=0` first run. The many runtime divisors (`zinv`, the Z/zbar differences, the Thomas `1/b`, `1/m`)
+  are byte-identical operands on both sides, so the `-no-prec-div` reciprocal matches (L7/L10/L14).
+
+- **Inputs not yet produced by the core (`Av` from PP mixing M2.8, `stress_surf` from forcing M2.10) → pass
+  as EXPLICIT dummy args, not as type fields.** Honest about provenance, minimal diff, defers the
+  type-placement decision; when M2.8/M2.10 land the caller just sources them (`dyn%work%Av`, `forcing%...`) and
+  the kernel is unchanged. FESOM2 pulls both from `o_ARRAYS`; the shim sets those module arrays directly.
+  Prescribe `Av` STRICTLY POSITIVE (a real viscosity: `[1e-3,1.4e-2]` m²/s here) over all `nz=1..nl` (the TDMA
+  reads `Av(nzmax)`), and `stress_surf` sign-varying (~0.1 N/m², both signs → the surface BC is exercised
+  fully).
+
+- **New mesh field `zbar_e_bot` + the (missing) `helem` — both full-cell trivial; serialization is
+  unallocated-safe.** The pressure driver built `hnode` but NOT `helem`; M2.5 needs both. Full cells (pi,
+  `use_partial_cell=.false.`): `helem(nz,e)=zbar(nz)-zbar(nz+1)` (the element analog of `hnode`),
+  `zbar_e_bot(e)=zbar(nlevels(e))` (FESOM2 `init_bottom_elem_thickness`). The kernel rebuilds the per-column
+  `zbar_n`/`Z_n` bottom-up from these. Added `zbar_e_bot` to `t_mesh` + write/read serialization;
+  `write_bin_array` writes `0` for an unallocated array and `read_bin_array` leaves it unallocated, so the
+  ctest mesh round-trip (where `zbar_e_bot` is never built) stays green — 13/13.
+
+- **The single-layer-column OOB is a REAL benign-OOB in FESOM2 that pi avoids — CHECK THE MESH (`elvls.out`)
+  before assuming `-check all` clean.** For `nlevels(elem)==2` the "last row" reads `Z_n(nzmax-2)=Z_n(0)` and
+  `UV(:,nzmax-2)=UV(:,0)` — values that are overwritten by the "first row" block / multiplied by `a(top)=0`,
+  so the Release result is byte-correct (FESOM2's Release oracle tolerates it), but `-check all` would TRAP.
+  pi has NO such columns (min element `nlevels=5` per `elvls.out` — i.e. ≥4 layers), so the EXACT transcription
+  is both byte-identical AND `-check all` clean (EXIT 0, confirmed). A `nlevels==2` shelf column (CORE2) needs
+  a guard matched to FESOM2's behaviour — deferred to M2.11. Determining this up front (read `elvls.out`)
+  avoided a guess.
+
+- **`w_i` (implicit vertical velocity) prescribed sign-varying to exercise both upwind branches; the TDMA must
+  be shown NON-vacuous.** A DISTINCT analytic formula from `w_e` (`sin(lon)·cos(2·lat)·cos(0.25·nz)`) so its
+  sign varies in space AND depth → `min(0,wu)`/`max(0,wu)` (+ the `wd` pair) all fire. Driver diagnostic
+  (non-gated): `w_i>0/<0 = 75360/75360` (both signs) and `max|d(uv_rhs)|=0.985` (the solve substantially
+  transforms the rhs, not a near-identity) — the L11 weak-gate guard.
+
+- **No auto-generated `*_interface` module for `impl_vert_visc_ale` (only the `_vtransp` variant) → declare an
+  explicit interface block in the shim.** FESOM2's interface-gen tool skips it because it is declared in an
+  explicit interface block inside `oce_ale.F90:269`; the other gated routines (`pressure_bv`,
+  `compute_vel_rhs`, `visc_filt_bidiff`) DO get `<name>_interface.mod`. So the shim copies the interface block
+  verbatim. Pin `C_d=0.0025` in the shim (the routine reads it from `o_PARAM`; matches the FESOM3
+  `mod_param_phys` default).
+
+- **Gate target is `UV_rhs`, NOT `UV`.** The routine OVERWRITES `UV_rhs` with the Thomas solution; `UV` is
+  read-only (the velocity update `UV += UV_rhs` happens later in the timestep). The HANDOFF "post-solve UV"
+  note was imprecise — the dumped gate target is `uv_rhs_ivv`. Out-of-pi branches dropped: `ldiag_ke`
+  `ke_wind`/`ke_drag` (no `ke_*` in FESOM3 `t_dyn`, as `compute_vel_rhs`), and the `toy_ocean`
+  dbgyre/neverworld2/soufflet constant-`C_d` friction (pi `toy_ocean=.false.` → quadratic bottom drag
+  `-C_d·|UV_bottom|`).

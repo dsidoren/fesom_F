@@ -15,10 +15,23 @@ The gated outputs are:
   bvfreq_raw      N^2 squared                     (before horizontal smoothing) M2.1
   bvfreq          N^2 squared                     (after smooth_nod, N2smth_hidx=1) M2.1
   pgf_x, pgf_y    pressure gradient force         (gradient_sca . hpressure / rho0) M2.2
-The inputs are dumped too (temp, salt, density_ref, zbar_3d_n, Z_3d_n, hnode) so any
-divergence is localised: a wrong EOS shows in density/bvfreq_raw, a wrong integration
-in hpressure only, a wrong smoother in bvfreq-but-not-bvfreq_raw, a wrong PGF
-contraction in pgf_x/pgf_y only (hpressure being clean).
+  coriolis        f = 2*omega*sin(lat_geo)        (geometry field, via r2g)  M2.3
+  uvnode_rhs      momentum advection on nodes     (w*du/dz + u*du/dx, post-normalize) M2.4
+  uv_rhsAB_cor    Coriolis + momentum advection   (this-step AB array)       M2.3/M2.4
+  uv_rhs_eul      full vel_rhs, first Euler step (ff=1.0)                    M2.3/M2.4
+  uv_rhs_ab2      full vel_rhs, AB2 step (ff=ab2=1.6)                        M2.3/M2.4
+  visc_u_c        biharmonic viscosity 1st Laplacian (visc_filt_bidiff pass 1) M2.4-visc
+  visc_v_c        biharmonic viscosity 1st Laplacian (V component)            M2.4-visc
+  uv_rhs_visc     post-viscosity UV_rhs (opt_visc=7 increment added)          M2.4-visc
+  uv_rhs_ivv      post-TDMA UV_rhs (impl_vert_visc_ale Thomas solve)          M2.5
+The inputs are dumped too (temp, salt, density_ref, zbar_3d_n, Z_3d_n, hnode for the
+EOS path; eta_n, uv_in, uv_rhsAB_prev, w_e for vel_rhs/momadv; Av, stress_surf, w_i for
+the implicit vertical viscosity) so any divergence is localised: a wrong EOS shows in
+density/bvfreq_raw, a wrong integration in hpressure only, a wrong smoother in
+bvfreq-but-not-bvfreq_raw, a wrong PGF contraction in pgf_x/pgf_y only, a wrong Coriolis
+in coriolis, a wrong momentum advection in uvnode_rhs, a wrong AB blend in
+uv_rhs_eul/uv_rhs_ab2, a wrong biharmonic-viscosity 1st Laplacian in visc_u_c/visc_v_c, a
+wrong 2nd pass in uv_rhs_visc-but-not-visc_u_c, a wrong Thomas solve in uv_rhs_ivv.
 
 Usage:  pressure_diff.py <fesom2.bin> <fesom3.bin> [--signal 0.0]
 Exit 0 iff every common field matches within the signal threshold (default 0 ==
@@ -112,8 +125,8 @@ def main():
     if extra3:
         print(f"\n(only in FESOM3, ignored: {extra3})")
 
-    print("\n" + ("PRESSURE/EOS/N2/PGF BYTE-GATE (M2.1 density_m_rho0 + hpressure + bvfreq; M2.2 pgf_x/pgf_y): PASS (max|delta|=0)" if ok else
-                  "PRESSURE/EOS/N2/PGF BYTE-GATE (M2.1 density_m_rho0 + hpressure + bvfreq; M2.2 pgf_x/pgf_y): FAIL"))
+    print("\n" + ("PRESSURE/EOS/N2/PGF/VELRHS/VISC/IVERTVISC BYTE-GATE (M2.1 density+hpressure+bvfreq; M2.2 pgf; M2.3 coriolis+vel_rhs; M2.4 momentum advection -> full UV_rhs + biharmonic viscosity opt_visc=7; M2.5 implicit vertical viscosity TDMA): PASS (max|delta|=0)" if ok else
+                  "PRESSURE/EOS/N2/PGF/VELRHS/VISC/IVERTVISC BYTE-GATE (M2.1 density+hpressure+bvfreq; M2.2 pgf; M2.3 coriolis+vel_rhs; M2.4 momentum advection -> full UV_rhs + biharmonic viscosity opt_visc=7; M2.5 implicit vertical viscosity TDMA): FAIL"))
     sys.exit(0 if ok else 1)
 
 

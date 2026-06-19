@@ -359,28 +359,48 @@ in the D6 sequence + the oracle's SW_AB dump).
 - [x] **Gate:** operator-diff `max|Δ|=0` on `pgf_x`/`pgf_y` — PASS first run (pgf 66% non-zero, ~1e-5 m/s²;
       `tools/run_pressure_gate.sh`, 12 fields). Debug `-check all` clean; M1 advhor + 13/13 ctest still green.
 
-#### Task M2.3: vel_rhs — Coriolis + AB2 + PGF (partial assembly)
-**Files:** Create: `src/oce/oce_dyn_velrhs.F90`
-- [ ] AB2 **actual** coefficients `ab1=-(0.5+ε)`, `ab2=(1.5+ε)` with **`epsilon=0.1`** (the dt=1800
-      trap; cite `o_PARAM` / `oce_ale_vel_rhs.F90:98–99`) — the `-0.5/1.5` base is only ε=0
-- [ ] **first-step Euler start:** reproduce `if (lfirst .and. .not. r_restart) ff=1.0_WP`
-      (`oce_ale_vel_rhs.F90:287–290`) — omitting it diverges the step-1 byte-gate
-- [ ] Coriolis init of `UV_rhsAB(1,1,…)` + AB2 blend of the previous-step array; add PGF/SSH-gradient
-- [ ] **Gate (partial):** operator-diff `max|Δ|=0` on the AB2-blend + Coriolis + PGF pieces. The FULL
-      `UV_rhs` gate is at M2.4 (because `momentum_adv_scalar` adds into the same slot before the blend)
+#### Task M2.3: vel_rhs — Coriolis + AB2 + PGF (partial assembly) — ✅ DONE (max|Δ|=0)
+**Files:** Create: `src/oce/oce_dyn_velrhs.F90`; `compute_coriolis` in `src/mesh/mod_mesh_areas.F90`
+- [x] AB2 **actual** coefficients `ab1=-(0.5+ε)`, `ab2=(1.5+ε)` with **`epsilon=0.1`** (`ab_epsilon`
+      from M1.4; `oce_ale_vel_rhs.F90:98–99`) — the `-0.5/1.5` base is only ε=0
+- [x] **first-step Euler start:** reproduce `if (lfirst .and. .not. r_restart) ff=1.0_WP`
+      (`oce_ale_vel_rhs.F90:287–290`) — `lfirst` passed as an explicit arg; gated BOTH ff=1.0 and ff=ab2
+- [x] Coriolis init of `UV_rhsAB(1,1,…)` + AB2 blend of the previous-step array; add PGF/SSH-gradient.
+      Added the `coriolis`/`coriolis_node` geometry field (`2·omega·sin(lat_geo)` via `r2g`)
+- [x] **Gate (partial):** operator-diff `max|Δ|=0` on the AB2-blend + Coriolis + PGF + SSH-gradient
+      pieces — 7 new records in `run_pressure_gate.sh` (19 fields total), the shim drives the REAL
+      `compute_vel_rhs` twice with `momadv_opt=0`. FULL `UV_rhs` gate (incl. `momentum_adv_scalar`) → M2.4
 
-#### Task M2.4: Momentum advection + biharmonic viscosity
-**Files:** Create: `src/oce/oce_dyn_momadv.F90`, `src/oce/oce_dyn_visc.F90`
-- [ ] `momentum_adv_scalar` (`momadv_opt` per run namelist) — note it is **called from inside
-      `compute_vel_rhs`** (`oce_ale_vel_rhs.F90:273`), adding into the same `UV_rhsAB(1,1,…)` slot as
-      Coriolis *before* the AB2 blend; wire accordingly
-- [ ] **biharmonic viscosity `opt_visc=7`** (pin to run namelist, not default 5)
-- [ ] **Gate:** operator-diff `max|Δ|=0` on the **complete `UV_rhs`** (Coriolis+advection+PGF) and on viscosity
+#### Task M2.4: Momentum advection (✅ DONE) + biharmonic viscosity (✅ DONE)
+**Files:** momadv ported into `src/oce/oce_dyn_velrhs.F90` (NOT a separate `oce_dyn_momadv.F90` —
+matches FESOM2's `oce_ale_vel_rhs.F90` layout); viscosity → `src/oce/oce_dyn_visc.F90` (created)
+- [x] `momentum_adv_scalar` (`momadv_opt==2`) — **called from inside `compute_vel_rhs`**
+      (`oce_ale_vel_rhs.F90:271-273`), ADDING `w·du/dz`+`u·du/dx` into the same `UV_rhsAB(1,1:2,…)`
+      slot as Coriolis *before* the AB2 blend; wired accordingly. **Gate:** operator-diff `max|Δ|=0`
+      on the **complete `UV_rhs`** (Coriolis+advection+PGF+SSH) + the `uvnode_rhs` intermediate + `w_e`
+      input — 4 new records → **21 fields** in `run_pressure_gate.sh`. Debug `-check all` clean. (L16)
+- [x] **biharmonic viscosity `opt_visc=7`** (pinned to the pi namelist `visc_gamma0=0.003`, not the
+      type default 0.03) — `viscosity_filter`→`visc_filt_bidiff` (`src/oce/oce_dyn_visc.F90`), a SEPARATE
+      operator run AFTER `compute_vel_rhs`. A biharmonic = edge-based ∇² applied TWICE over INTERIOR edges
+      only; NO new geometry (`edge_tri`/`elem_area`/`ulevels`/`nlevels`/`edge2D_in`, all gated; the
+      `gradient_vec` worry was unfounded for opt_visc=7). **Gate:** operator-diff `max|Δ|=0` on
+      `visc_u_c`/`visc_v_c` (pass-1 Laplacian) + the post-viscosity `uv_rhs_visc` — 3 new records →
+      **24 fields**. UV bumped to 2.0/1.5 m/s so all three flow-aware `max(γ0,γ1,γ2)` branches fire
+      (20.4/78.6/1.0%). Debug `-check all` clean. (L17)
 
-#### Task M2.5: Implicit vertical viscosity (TDMA)
-**Files:** Create: `src/oce/oce_dyn_ivertvisc.F90`
-- [ ] Thomas solver; wind stress top BC + bottom drag
-- [ ] **Gate:** operator-diff `max|Δ|=0`
+#### Task M2.5: Implicit vertical viscosity (TDMA) — ✅ DONE (max|Δ|=0)
+**Files:** Created: `src/oce/oce_dyn_ivertvisc.F90`; `zbar_e_bot` added to `t_mesh`
+- [x] `impl_vert_visc_ale` per-element tridiagonal (Thomas) solve — implicit vertical viscosity `Av`
+      + vertical advection (`w_i` upwind) + wind-stress top BC + quadratic bottom drag; OVERWRITES
+      `UV_rhs` with the solution (`UV` read-only). A SEPARATE operator AFTER `viscosity_filter`
+      (FESOM2 `oce_ale.F90:3874`). `Av`/`stress_surf` passed as explicit args (M2.8 mixing / M2.10
+      forcing not yet ported → prescribed analytically for the gate). `helem`+`zbar_e_bot` built in
+      the driver (full cells). (L18)
+- [x] **Gate:** operator-diff `max|Δ|=0` on the post-solve `uv_rhs_ivv` + prescribed inputs
+      (`Av`/`stress_surf`/`w_i`) — 4 new records → **28 fields** in `run_pressure_gate.sh`. TDMA is a
+      sequential recurrence → byte-matches by pure L9 transitivity (PASSED first run). Non-vacuous
+      (`max|d(uv_rhs)|=0.985`, `w_i>0/<0` both fire). Debug `-check all` clean (pi min nlevels=5 → no
+      single-layer OOB). (L18)
 
 #### Task M2.6: SSH — stiffness, ssh_rhs, CG solve
 **Files:** Create: `src/oce/oce_ssh_rhs.F90`, `src/oce/oce_ssh_solve.F90`

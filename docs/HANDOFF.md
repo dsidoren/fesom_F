@@ -5,11 +5,17 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 ## Where we are
 
 - **Milestone:** M2 (minimal ocean dynamical core) — **IN PROGRESS.** **M2.1 `pressure_bv` +
-  M2.2 hydrostatic PGF COMPLETE ✓** (M2.1: EOS split-form `density_m_rho0` + top-down `hpressure` +
-  N²/`bvfreq` raw+smoothed; M2.2: `gradient_sca`-contraction `pgf_x`/`pgf_y`; all `max|Δ|=0` vs FESOM2
-  on pi 1-rank; one gate `tools/run_pressure_gate.sh`, 12 fields). **Next: M2.3** (`oce_dyn_velrhs.F90`,
-  Coriolis + AB2 + PGF, partial vel_rhs assembly). M1 (tracer advection) — **COMPLETE ✓ at the 1-rank
-  anchor** (tag `m1`).
+  M2.2 hydrostatic PGF + M2.3 vel_rhs + M2.4 momentum advection (FULL `UV_rhs`) + M2.4 biharmonic
+  viscosity + M2.5 implicit vertical viscosity (TDMA) COMPLETE ✓** (M2.1: EOS split-form
+  `density_m_rho0` + top-down `hpressure` + N²/`bvfreq` raw+smoothed; M2.2: `gradient_sca`-contraction
+  `pgf_x`/`pgf_y`; M2.3: `coriolis` geometry field + `compute_vel_rhs` Coriolis+AB2+PGF+SSH-gradient;
+  M2.4: `momentum_adv_scalar` (w·du/dz + u·du/dx) ADDED into the same `UV_rhsAB(1,1:2,·)` slot → the
+  FULL `UV_rhs`, THEN `viscosity_filter(7)` `visc_filt_bidiff` biharmonic viscosity as a SEPARATE
+  operator on the post-`compute_vel_rhs` `UV_rhs`; M2.5: `impl_vert_visc_ale` per-element tridiagonal
+  Thomas solve [implicit `Av` + vertical advection `w_i` + wind-stress/bottom-drag BCs] OVERWRITING
+  `UV_rhs`, a SEPARATE operator after `viscosity_filter`; all `max|Δ|=0` vs FESOM2 on pi 1-rank; one
+  gate `tools/run_pressure_gate.sh`, **28 fields**). **Next: M2.6 SSH — stiffness matrix + `ssh_rhs` +
+  CG solve.** M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
   (decision 2026-06-19): a multi-rank advection byte-gate needs the local-mesh remap
@@ -104,11 +110,72 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   non-zero at ~1e-5 m/s² (non-vacuous); Debug `-check all` clean; M1 advhor gate + 13/13 ctest still
   green. **Also fixed a `configure.sh` footgun** (`--debug` was clobbering the Release `build_intel_dp`;
   now goes to `build_intel_dp_debug`). See LESSONS L14.
-- **Current task:** M2.3 — `compute_vel_rhs` Coriolis + AB2 + PGF partial assembly (`oce_dyn_velrhs.F90`):
-  AB2 actual coeffs `ab1=-(0.5+ε)`/`ab2=(1.5+ε)`, ε=0.1 (dt=1800 trap); first-step Euler `ff=1.0`;
-  Coriolis init of `UV_rhsAB(1,1,·)` + AB2 blend + add the M2.2 PGF / SSH-gradient. **Partial gate**
-  `max|Δ|=0` on the AB2-blend + Coriolis + PGF pieces (the FULL `UV_rhs` gate is M2.4, after
-  `momentum_adv_scalar` adds into the same slot). M1's multi-rank advection gate rides M2.12.
+- **M2.3 partial `compute_vel_rhs` byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2 on the
+  Coriolis + AB2 + PGF + SSH-gradient assembly: the new geometry field `coriolis`
+  (`2·omega·sin(lat_geo)` via `r2g`, both hemispheres ±1.4e-4), the Coriolis term `uv_rhsAB_cor`
+  (`UV·coriolis·elem_area`, ±8.8e6), AND the partial `UV_rhs` for BOTH the first-step Euler path
+  (`uv_rhs_eul`, ff=1.0) and the AB2-steady path (`uv_rhs_ab2`, ff=ab2=1.6) — they differ over 66% of
+  entries, so the ff branch is genuinely exercised. Built `src/oce/oce_dyn_velrhs.F90`
+  (`compute_vel_rhs`, the non-advection part) + `compute_coriolis` in `src/mesh/mod_mesh_areas.F90`.
+  Same gate `tools/run_pressure_gate.sh` (now **19 fields**): the FESOM2 shim drives the REAL
+  `compute_vel_rhs` TWICE (lfirst Euler → AB2) with `momadv_opt=0` (skip `momentum_adv_scalar`),
+  `ldiag_ke=.false.` (pi default is `.true.`!), a minimal fake `ice` (use_pice=0 on linfs → never
+  dereferenced), `dt`/`r_restart` pinned. Momentum advection is **M2.4**. PASSED first run; Debug
+  `-check all` caught a real `elnodes` shape-mismatch (`elem2D_nodes` is `MAX_NV=4` → slice `(1:3)`),
+  fixed; M1 advhor gate + 13/13 ctest still green. See LESSONS L15.
+- **M2.4 momentum advection / FULL `UV_rhs` byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2
+  on the new `uvnode_rhs` (the momentum-advection nodal intermediate, `w·du/dz` + `u·du/dx` post-
+  normalize: 68.9% non-zero, both signs → both edge-scatter branches exercised) AND the re-gated
+  `uv_rhsAB_cor`/`uv_rhs_eul`/`uv_rhs_ab2` (now Coriolis + momadv = the FULL `UV_rhs`), plus the
+  prescribed input `w_e`. Ported `momentum_adv_scalar` (`oce_ale_vel_rhs.F90:335-589`) into
+  `src/oce/oce_dyn_velrhs.F90` (3 passes: vertical `w·du/dz` on scalar CVs averaging elemental `UV`
+  to prism faces ×`elem_area`×`w_e`, horizontal `u·du/dx` over edges via `edge_cross_dxdy`, then
+  `×areasvol_inv` + 1-rank `exchange_nod` no-op + vertice→element `/3` ADD into `UV_rhsAB(1,1:2,·)`)
+  and wired it into `compute_vel_rhs` at the `momadv_opt==2` site (FESOM2 :271-273, AFTER the
+  Coriolis/PGF elem loop, BEFORE the AB blend). Same gate `tools/run_pressure_gate.sh` (now **21
+  fields**; the shim flips `momadv_opt` 0→2 + prescribes `dynamics%w_e`, the FESOM3 driver allocates
+  `dyn%w_e`/`dyn%work%uvnode_rhs` + prescribes the identical analytic `w_e`). PASSED first run (L9
+  transitive-gate: every operand — `UV`/`elem_area`/`hnode`/`areasvol_inv`/`edge_cross_dxdy` +
+  `nod_in_elem2D` & `edges` accumulation order — already byte-pinned). Debug `-check all` clean (the
+  L15 trap avoided: `elem2D_nodes(1:3,el)` accessed per-component, no MAX_NV shape mismatch); M1
+  advhor gate + 13/13 ctest still green. See LESSONS L16.
+- **M2.4 biharmonic viscosity (`opt_visc=7`) byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2
+  on the first-stage Laplacian intermediate `visc_u_c`/`visc_v_c` (the element field `visc_filt_bidiff`
+  pass 1 builds) AND the post-viscosity `uv_rhs_visc` (the gate target). Built `src/oce/oce_dyn_visc.F90`
+  (`viscosity_filter` dispatcher + `visc_filt_bidiff` — a biharmonic = edge-based ∇² applied TWICE over
+  INTERIOR edges only, free slip on the boundary; the FESOM2 `oce_dyn.F90:591-744` non-subcycl branch),
+  a SEPARATE operator run AFTER `compute_vel_rhs` (FESOM2 `oce_ale.F90:3822`, NOT inside it like momadv).
+  Added `visc_gamma0_h`/`visc_gamma1_h` to `t_dyn` (default 0 → pure biharmonic). **NO new geometry**
+  (the `gradient_vec` worry was unfounded for opt_visc=7 — it reads only the geom/area-gated `edge_tri`/
+  `elem_area`/`ulevels`/`nlevels`/`edge2D_in`). First gated kernel to use `edge2D_in` (interior-edge
+  filter, byte-pinned transitively). Same gate `tools/run_pressure_gate.sh` (now **24 fields**); the shim
+  forces `opt_visc=7` + pi gammas (`visc_gamma0=0.003` OVERRIDES the type default 0.03; `gamma_h=0`) and
+  calls the REAL `visc_filt_bidiff`. **Bumped the shared prescribed `UV` to 2.0/1.5 m/s** so `|du|` spans
+  all three flow-aware branches `max(γ0,γ1,γ2)` (selected on **20.4/78.6/1.0%** of edge-levels — a
+  driver-side diagnostic verifies; γ2 is a near-dead production path, exercised synthetically). M2.3/M2.4
+  re-gated `max|Δ|=0` with the new UV. PASSED first run (L9 transitive). Debug `-check all` clean (no L15
+  trap — `edge_tri(:,ed)` is a size-2 slot, `elem2D_nodes` untouched); M1 advhor gate + 13/13 ctest still
+  green. See LESSONS L17.
+- **M2.5 implicit vertical viscosity (TDMA) byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2 on the
+  post-solve `uv_rhs_ivv` (the gate target) AND the prescribed inputs (`Av`/`stress_surf`/`w_i`). Built
+  `src/oce/oce_dyn_ivertvisc.F90` (`impl_vert_visc_ale` — a per-element tridiagonal Thomas solve: implicit
+  vertical viscosity `Av` + vertical advection [`w_i` upwind] + wind-stress top BC + quadratic bottom drag,
+  OVERWRITING `UV_rhs` with the solution; `UV` is read-only). A SEPARATE operator run AFTER
+  `viscosity_filter` (FESOM2 `oce_ale.F90:3874`, the `use_ssh_se_subcycl=.false.` branch). **The TDMA is a
+  strictly SEQUENTIAL recurrence (forward+backward) → no summation/scatter order ambiguity → byte-matches by
+  pure L9 transitivity** (every operand already pinned: `UV`/post-visc `UV_rhs`/`helem`/`zbar_e_bot`/levels +
+  prescribed `w_i`/`Av`/`stress_surf`). Added `zbar_e_bot` to `t_mesh` (+ serialization; `helem` also now
+  built in the driver, full cells). `Av`/`stress_surf` are passed as **explicit kernel args** (PP mixing M2.8 /
+  forcing M2.10 not yet ported → prescribed analytically for this gate; when they land the caller sources
+  them, kernel unchanged). Same gate `tools/run_pressure_gate.sh` (now **28 fields**); the shim pins
+  `C_d=0.0025`, prescribes `Av`/`stress_surf`/`w_i`, and calls the REAL `impl_vert_visc_ale` (via an explicit
+  interface block — no auto-gen `*_interface` module exists for it). PASSED first run; non-vacuous
+  (`max|d(uv_rhs)|=0.985`, `w_i>0/<0` both branches fire). Debug `-check all` clean — pi has NO single-layer
+  columns (min elem `nlevels=5`) so the FESOM2 single-layer `Z_n(0)`/`UV(:,0)` benign-OOB never triggers
+  (deferred to M2.11 CORE2 shelf columns). M1 advhor gate + 13/13 ctest still green. See LESSONS L18.
+- **Current task:** M2.6 SSH — stiffness matrix + `ssh_rhs` + CG solve (`oce_ale_ssh_splitexpl_*` / the
+  implicit-SSH solver path). First M2 kernel that runs PAST forcing → assemble the reduced-M2 namelist
+  (PP/no-GM/no-Redi/linfs/opt_visc=7) from `work_pi/namelist.*`. M1's multi-rank advection gate still rides M2.12.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -244,7 +311,7 @@ The whole byte-gate pipeline is validated end-to-end:
   2022.0.1 + openmpi 4.1.2-intel; gcc 11.2.0 + openmpi 4.1.2-gcc. netCDF loaded (only
   needed M2.10+). Login `gfortran` is 8.5.0 with no MPI — always build via `configure.sh`.
 
-## M2.1 pressure/EOS/N² + M2.2 PGF byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.3+)
+## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.6+)
 
 Same end-of-`ocean_setup` 1-rank shim pattern as the M1 advection gate, the FIRST dynamics
 kernel. `pressure_bv` runs DURING the timestep but 1-rank forcing hangs on the login node (L8),
@@ -277,33 +344,74 @@ FESOM2 code:
   `gradient_sca`·`hpressure`/density_0 contraction — same shape as M1.1's tracer_gradient_elements,
   both operands already gated, so `max|Δ|=0` first run. See LESSONS L14 (+ the configure.sh
   `--debug` Release-clobber footgun fixed there).
+- **M2.3 extension (DONE):** the SAME gate now also covers the partial vel_rhs. The geometry step grew
+  `compute_coriolis` (`coriolis`/`coriolis_node` = `2·omega·sin(lat_geo)` via `r2g` on the rotated
+  centroid/node; byte-matches because `r2g` reuses the g2r-proven rotation matrix — L9 transitive).
+  Both the shim and the FESOM3 driver prescribe analytic `uv`(elements)/`eta_n`(nodes)/`uv_rhsAB`(prev),
+  copy in the live `pgf_x`/`pgf_y`, and run `compute_vel_rhs` TWICE (lfirst Euler ff=1.0 → AB2 ff=ab2);
+  the shim forces `momadv_opt=0`/`ldiag_ke=.false.`/`use_ssh_se_subcycl=.false.`, pins `dt`/`r_restart`,
+  and passes a minimal fake `ice` (`use_pice=0` on linfs → `m_ice`/`m_snow` associated but never read).
+  7 new records (coriolis, eta_n, uv_in, uv_rhsAB_prev, uv_rhsAB_cor, uv_rhs_eul, uv_rhs_ab2);
+  `pressure_diff.py` picks them up automatically (19 fields). `max|Δ|=0` first run. See LESSONS L15.
+- **M2.4 extension (DONE):** the SAME gate now also covers momentum advection → the FULL `UV_rhs`.
+  `momentum_adv_scalar` lives in `src/oce/oce_dyn_velrhs.F90` (a private routine called by
+  `compute_vel_rhs` when `momadv_opt==2`, mirroring FESOM2's own file layout). Both the shim and the
+  FESOM3 driver prescribe an analytic `w_e`(nodes) `=1e-4·sin(2·lon)·cos(lat)·cos(0.3·nz)` (sign varies
+  in space AND depth → non-trivial `w·du/dz`; the shim flips `momadv_opt` 0→2). 2 new records: `w_e`
+  (input) + `uvnode_rhs` (the post-normalize momadv nodal intermediate); `uv_rhsAB_cor`/`uv_rhs_eul`/
+  `uv_rhs_ab2` now carry momadv. `pressure_diff.py` picks them up automatically (**21 fields**). The
+  momadv operator is non-vacuous (uvnode_rhs 68.9% non-zero, both signs); since the gate runs the REAL
+  FESOM2 vertical+horizontal passes, FESOM3's transcription byte-matches BOTH by construction. Same L9
+  transitive reason as all prior — `max|Δ|=0` first run. See LESSONS L16.
+- **M2.4-visc extension (DONE):** the SAME gate now also covers biharmonic viscosity (`opt_visc=7`), a
+  SEPARATE operator run AFTER the two `compute_vel_rhs` calls (FESOM2 `oce_ale.F90:3822`). FESOM3
+  `src/oce/oce_dyn_visc.F90` (`viscosity_filter`→`visc_filt_bidiff`); the shim calls the REAL FESOM2
+  `visc_filt_bidiff` (the leaf; the `viscosity_filter` dispatcher is pure branching, like M2.2). Both
+  force `opt_visc=7` + pi gammas (`visc_gamma0=0.003`, `gamma_h=0`) and the shared `UV` is bumped to
+  2.0/1.5 m/s (so `|du|` spans all three `max(γ0,γ1,γ2)` branches — selected 20.4/78.6/1.0%; a driver
+  diagnostic prints it). 3 new records: `visc_u_c`/`visc_v_c` (the pass-1 Laplacian intermediate) +
+  `uv_rhs_visc` (the gate target). `pressure_diff.py` picks them up automatically (**24 fields**). NO new
+  geometry; `edge2D_in` (interior-edge filter) is byte-pinned transitively. `max|Δ|=0` first run; Debug
+  `-check all` clean. See LESSONS L17.
+- **M2.5-ivertvisc extension (DONE):** the SAME gate now also covers the implicit vertical viscosity TDMA, a
+  SEPARATE operator run AFTER `visc_filt_bidiff` (FESOM2 `oce_ale.F90:3874`, the `use_ssh_se_subcycl=.false.`
+  branch → `impl_vert_visc_ale`). FESOM3 `src/oce/oce_dyn_ivertvisc.F90` (`impl_vert_visc_ale`); the shim calls
+  the REAL FESOM2 `impl_vert_visc_ale` via an **explicit interface block** (no auto-gen `*_interface` module
+  exists for it — only `_vtransp` does). Both prescribe `Av` (strictly-positive vertical viscosity, all
+  `nz=1..nl`), `stress_surf` (sign-varying wind stress) and `dynamics%w_i` (implicit vertical velocity, a
+  DISTINCT sign-varying formula from `w_e`), and pin `C_d=0.0025`. `Av`/`stress_surf` are FESOM3 **explicit
+  kernel args** (M2.8/M2.10 not ported); the driver builds `helem`+`zbar_e_bot` (full cells). 4 new records:
+  `Av`/`stress_surf`/`w_i` (inputs) + `uv_rhs_ivv` (the post-solve gate target). `pressure_diff.py` picks them
+  up automatically (**28 fields**). The TDMA is a strictly sequential Thomas recurrence (no order ambiguity),
+  so `max|Δ|=0` first run by pure L9 transitivity; non-vacuous (`max|d(uv_rhs)|=0.985`, `w_i>0/<0` both fire).
+  Debug `-check all` clean (pi min `nlevels=5` → the single-layer `Z_n(0)` benign-OOB never triggers). See
+  LESSONS L18.
 
 ## Next task
 
-M2.3 — `compute_vel_rhs`: Coriolis + AB2 + PGF (partial vel_rhs assembly). Create
-`src/oce/oce_dyn_velrhs.F90` transcribing FESOM2 `compute_vel_rhs` (`oce_ale_vel_rhs.F90:35`), the
-non-advection part: Coriolis init of `UV_rhsAB(1,1,·)`, the AB2 blend of the previous-step `UV_rhsAB`,
-and adding the M2.2 PGF (`pgf_x`/`pgf_y`) + the SSH-gradient. **Byte-traps the plan flags:**
-- **AB2 ACTUAL coeffs** `ab1=-(0.5_WP+epsilon)`, `ab2=(1.5_WP+epsilon)` with **`epsilon=0.1`**
-  (`oce_ale_vel_rhs.F90:98-99`) — the `-0.5/1.5` base is only ε=0. (Same `ab_epsilon=0.1` already in
-  mod_config from M1.4; reuse it. L12 proved `1.5+0.1→1.6` is fold-safe, but gate it.)
-- **First-step Euler start** `if (lfirst.and.(.not.r_restart)) ff=1.0_WP` (`:287-289`) — omitting it
-  diverges the step-1 gate. `lfirst` is a `save` var; the gate must drive the FIRST call.
-- **`momentum_adv_scalar` is called from INSIDE `compute_vel_rhs`** (`:273`), adding into the SAME
-  `UV_rhsAB(1,1,·)` slot as Coriolis BEFORE the AB2 blend — so M2.3 ports compute_vel_rhs WITHOUT the
-  momadv call (or with `momadv_opt` set to skip), and the **partial** gate targets only the
-  Coriolis+AB2+PGF pieces. The FULL `UV_rhs` gate (incl. momentum advection) is **M2.4**.
+M2.6 SSH — stiffness matrix + `ssh_rhs` + CG solve (plan Task M2.6). FESOM2 `oce_ale.F90` SSH path:
+build `ssh_stiff` (CSR; negative factor `-g·dt·α·hbar`), assemble `ssh_rhs`, then the CG solve
+(`soltol=1e-5`, `maxiter`). **Approach:**
+- **This is the FIRST M2 kernel that runs PAST forcing** (the prior M2.1–M2.5 kernels depend only on
+  prescribed T/S/UV/eta/w_e/w_i/Av/stress_surf + mesh, so the end-of-`ocean_setup` shim — which STOPS
+  before forcing — sufficed). The CG solve needs the assembled stiffness matrix + `ssh_rhs`; decide
+  whether the same prescribe-inputs-at-end-of-`ocean_setup` shim still works (prescribe `eta`/`d_eta`/
+  `UV`/`hbar` and drive the REAL `ssh` assembly + CG) OR whether it needs the **reduced-M2 namelist**
+  (PP/no-GM/no-Redi/linfs/opt_visc=7) assembled from `work_pi/namelist.*` to run the timestep further.
+  Prefer the prescribe-and-stop shim if the SSH assembly + CG can be driven standalone.
+- **Gate:** operator-diff `max|Δ|=0` on `ssh_rhs` / the CG solution / `d_eta`; plus the
+  **`Σ ssh_rhs` over owned nodes telescopes to ~1e-13** consistency check (plan M2.6). The CG iteration
+  is a sequence of dot-products + SpMVs — like the TDMA a deterministic recurrence given byte-identical
+  operands, BUT the reduction order in the dot-products is the new bit-identity risk (1-rank: a single
+  serial sum, so order-stable; the multi-rank reduction order is an M2.12 concern).
+- **Watch:** the CSR stiffness matrix construction (sparsity pattern + values) is new structure; the
+  `pcg` preconditioner choice; `g`/`alpha`/`hbar` operands. The L15 `elem2D_nodes(1:3,·)` MAX_NV-slice
+  trap on any new element-indexed code.
 
-**Gate (partial):** operator-diff `max|Δ|=0` on the AB2-blend + Coriolis + PGF contributions vs FESOM2.
-Same 1-rank end-of-`ocean_setup` shim recipe: extend the FESOM2 pressure shim (or a new vel_rhs shim)
-to PRESCRIBE `UV`/`eta_n`/previous `UV_rhsAB` and call the REAL `compute_vel_rhs` (it already has live
-`pgf_x`/`pgf_y` from the M2.2 pass + the geometry `coriolis`/`metric_factor`); the FESOM3 driver runs
-oce_pressure_bv → oce_pgf → oce_dyn_velrhs. Needs `coriolis` (verify it's a geometry-gated mesh field;
-add it if M0.7 didn't dump it) and the SSH `gradient` operator on `eta_n`.
-- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1/M2.2 (EOS + PGF
-  depend only on T/S/Z + hpressure). M2.3 vel_rhs is still forcing-independent IF the shim prescribes
-  UV/eta (Coriolis+AB2+PGF read only mesh + prescribed state); assemble the reduced namelist from
-  `work_pi/namelist.*` once a kernel that runs PAST forcing (PP mixing, SSH CG) needs it (M2.5+).
+- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.5 (EOS + PGF +
+  vel_rhs + momadv + viscosity + ivertvisc depend only on prescribed T/S/UV/eta/w_e/w_i/Av/stress_surf +
+  mesh). Assemble it from `work_pi/namelist.*` if/when a kernel that runs PAST forcing (PP mixing, SSH CG)
+  needs the full timestep (M2.6+).
 
 **M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
 numbering/connectivity/`nod_in_elem2D` order/geometry, com-structs) needed for ANY multi-rank
@@ -316,10 +424,13 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 
 ## Open notes / risks
 
-- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1/M2.2 pressure/EOS/
-  N²/PGF gates all `max|Δ|=0`). Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the
-  proven 1-rank end-of-`ocean_setup` shim pattern (`fesom_pressure_dump.F90` now drives both
-  `pressure_bv` and `pressure_force_4_linfs_fullcell`); M2.3 extends it again — see "Next task".
+- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.5
+  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc gates all `max|Δ|=0`, 28 fields). Self-tests
+  run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-`ocean_setup` shim
+  pattern (`fesom_pressure_dump.F90` now drives `pressure_bv` + `pressure_force_4_linfs_fullcell` + the
+  REAL `compute_vel_rhs` with `momadv_opt=2` → `momentum_adv_scalar` + the REAL `visc_filt_bidiff` with
+  `opt_visc=7` + the REAL `impl_vert_visc_ale` on the post-`viscosity_filter` `UV_rhs`); the next gate
+  (M2.6 SSH stiffness/`ssh_rhs`/CG) is the FIRST that may need to run PAST forcing — see "Next task".
 - **M2.12 is now heavy** (the local-mesh remap + the folded M1 advection multi-rank gate + the
   whole-model multi-rank byte-match + the deferred cavity/CW-swap caveats). Consider splitting the
   local-mesh remap into its own early-M2 task once a dynamics kernel first needs halos at multi-rank.
