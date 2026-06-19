@@ -13,7 +13,14 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   ⚠️ **Caveat:** pi has 0/5839 CW swaps, so the `enforce_cw_orientation` vertex-reorder
   path is byte-identical-by-construction to FESOM2 `test_tri` but NOT yet empirically
   gated (soufflet=228/5700, CORE2 will have swaps). Confirm at the M2.11 CORE2 gate or on
-  soufflet. See LESSONS L8. **Next: M1.1** (oce_adv_tra_hor + oce_muscl_adv).
+  soufflet. See LESSONS L8.
+- **M1.1 horizontal tracer advection byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs
+  FESOM2 on every field: `del_ttf_advhoriz` (the gate target) AND `adv_flux_hor` for BOTH
+  upwind (UPW1) and MUSCL, plus every intermediate (helem, nboundary_lay, edge_up_dn_tri,
+  tr_xy, edge_up_dn_grad). Run it: `tools/run_advhor_gate.sh`. Built: `src/oce/`
+  oce_tracer_grad (tr_xy), oce_muscl_adv (nboundary_lay/edge_up_dn_tri/edge_up_dn_grad),
+  oce_adv_tra_hor (upw1/muscl/mfct), oce_adv_tra_flux (scatter). **Next: M1.2**
+  (vertical advection — oce_adv_tra_ver, QR4C; watch the D=2 shallow-column double-write).
 - **Done:** M0.1 ✓ build. M0.2 ✓ params/. M0.3 ✓ types/. M0.4 ✓ mod_partitioning
   (par_init/par_ex/set_partition; dist_<NP>/ reader transcribed from oce_mesh.F90;
   1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
@@ -26,8 +33,10 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   M0.8 ✓ step/mod_model (t_model + model_init/step/finalize) + drivers/fesom_analytic;
   runs end-to-end 1+2 ranks; debug build clean.
   M0.7-geom ✓ (closed in M1) mesh geometry byte-matches FESOM2 on pi 1-rank.
-- **Current task:** M1.1 — horizontal tracer advection (oce_adv_tra_hor + oce_muscl_adv);
-  operator-diff `max|Δ|=0` on `del_ttf_advhoriz` vs FESOM2 with a prescribed velocity.
+  M1.1 ✓ horizontal tracer advection (upw1 + MUSCL): operator-diff `max|Δ|=0` on
+  `del_ttf_advhoriz` + `adv_flux_hor` + all intermediates vs FESOM2 on pi 1-rank.
+- **Current task:** M1.2 — vertical tracer advection (oce_adv_tra_ver: upwind + QR4C);
+  operator-diff `max|Δ|=0` on `del_ttf_advvert` (oce_ale_tracer.F90:240) vs FESOM2.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -49,6 +58,29 @@ The first true byte-gate vs the live oracle. Reusable for ALL M1+ kernel gates.
   the pi namelist (alpha/beta/gamma=50/15/-90, cyclic 360, force_rotation).
 - **Run:** `tools/run_geom_gate.sh` → PASS. Individually: `tools/run_geomdump_pi.sh`
   (FESOM2) then `fesom_geomdump` (FESOM3) then `geom_diff.py`.
+
+## M1.1 advection byte-gate (CLOSED ✓) — the kernel-gate recipe (reusable for M1.2+)
+
+Same 1-rank oracle as geometry, but the FESOM2 dump fires LATER (end of `ocean_setup`,
+after `init_thickness_ale` builds `helem` + `muscl_adv_init` builds nboundary_lay/
+edge_up_dn_tri), still BEFORE forcing (the 1-rank hang). The dump PRESCRIBES analytic
+inputs and drives the REAL FESOM2 kernels, so it gates actual FESOM2 code:
+- **FESOM2 side:** `src/fesom_advhor_dump.F90` (NEW), wired at end of `ocean_setup`
+  (`oce_setup_step.F90`), env-gated `FESOM_ADVHOR_DUMP`, npes==1, STOPS after dumping.
+  It sets `ttf`(nodes)/`vel`(elements) from an analytic formula of the rotated coords,
+  then calls FESOM2's own `tracer_gradient_elements`→`fill_up_dn_grad`→`adv_tra_hor_upw1`/
+  `_muscl`→`oce_tra_adv_flux2dtracer`. Built into `build/` (proven oracle `bin/*.proven`
+  UNTOUCHED). dt=1800, num_ord=0.75 are pinned constants shared with FESOM3.
+- **FESOM3 side:** `src/drivers/fesom_advhordump.F90` + `src/infra/mod_advhor_dump.F90`
+  (FADVHDMP format, adds a 3-D-array writer). Same analytic prescription (byte-identical
+  coords ⇒ byte-identical `ttf`/`vel`), same transcribed kernels.
+- **Inputs that had to match:** `helem` (linfs/zstar agree at init since hbar=eta=0:
+  `helem(nz,e)=zbar(nz)-zbar(nz+1)`), `areasvol` (geom-proven), and — crucially —
+  `nod_in_elem2D` ORDERING, which the area gate already proved transitively (see L9).
+- **Run:** `tools/run_advhor_gate.sh` → PASS. Individually: `tools/run_advhordump_pi.sh`
+  (FESOM2) then `fesom_advhordump` (FESOM3) then `advhor_diff.py`.
+- **For M1.2/M1.3:** extend `fesom_advhor_dump.F90` (+ FESOM3 driver) to also call
+  `adv_tra_ver_*` / `oce_tra_adv_fct` and dump `del_ttf_advvert` / the FCT fields.
 
 ## M1 entry notes (read before starting)
 
@@ -113,12 +145,15 @@ The whole byte-gate pipeline is validated end-to-end:
 
 ## Next task
 
-M1.1 — horizontal tracer advection. Transcribe `oce_adv_tra_hor.F90` (adv_tra_hor_upw1
-/ _muscl / _mfct) + `oce_muscl_adv.F90` (muscl_adv_init / find_up_downwind_triangles /
-fill_up_dn_grad) + the `tr_xy` elemental gradient (oce_tracer_mod.F90:181-182) into
-`src/oce/`. Oracle prep: add UV/del_ttf_advhoriz dump calls to FESOM2 advection (node +
-NEW element shims) under controlled-input replay with a prescribed velocity, then gate
-`del_ttf_advhoriz` `max|Δ|=0`. The geometry it needs is now byte-proven (above).
+M1.2 — vertical tracer advection. Transcribe `oce_adv_tra_ver.F90` (`adv_tra_ver_upw1`,
+`adv_tra_ver_qr4c`; watch the D=2 shallow-column double-write) into `src/oce/`. Reuse the
+M1.1 oracle: extend `fesom_advhor_dump.F90` (+ the FESOM3 driver) to also prescribe a
+vertical velocity `Wvel`, call `adv_tra_ver_*` → `adv_flux_ver`, scatter via the vertical
+branch of `oce_tra_adv_flux2dtracer` (already transcribed in `oce_adv_tra_flux.F90`), and
+gate `del_ttf_advvert` (`oce_ale_tracer.F90:240`) `max|Δ|=0`. The horizontal kernels +
+scatter + `tr_xy`/MUSCL setup it shares are now byte-proven (M1.1, above). NOTE: the
+vertical scatter uses `areasvol` (geom-proven) + `dt`; QR4C needs `Z`/`zbar` (vertical
+geometry — verify against the oracle as part of this gate, like helem was in M1.1).
 
 ## Open notes / risks
 

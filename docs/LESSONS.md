@@ -142,3 +142,33 @@ FESOM2 relies on `-r8`/`-fdefault-real-8`: unsuffixed literals like `1.0` are **
 Transcribe literals verbatim (keep unsuffixed where FESOM2 leaves them unsuffixed) AND build
 with `-r8`, or the bits differ. The cpp define `USE_SINGLE_PRECISION` (sets `WP=4`) and the
 `-r4` flag are flipped together by `configure.sh --precision sp`. `MP = max(WP,4)`.
+
+## L9 — Prior gates validate hidden orderings; the kernel-gate recipe (M1.1, PASSED first try)
+
+M1.1 (horizontal tracer advection: upw1 + MUSCL + scatter) hit `max|Δ|=0` vs FESOM2 on
+the FIRST gate run — no bug-hunt. Two reasons, both reusable:
+
+- **A passing gate transitively proves orderings the next gate depends on.** M1.1's
+  `find_up_downwind_triangles` picks a triangle by `atan2` comparisons, and `fill_up_dn_grad`
+  area-weight-AVERAGES `tr_xy` over `nod_in_elem2D(:,node)` — both sensitive to the ORDER of
+  `nod_in_elem2D`. That order was never dumped directly, but the **geometry gate's `area`
+  match (`area(nz,n)=Σ_k elem_area(nod_in_elem2D(k,n))/3`, an FP sum) already pinned it**:
+  if the k-order differed, `area` would have differed. So `edge_up_dn_tri` (integer indices)
+  and `edge_up_dn_grad` matched by construction. Lesson: when designing a gate, list the
+  order-sensitive inputs and check whether an earlier `max|Δ|=0` already constrains them —
+  it often does, and that's why faithful transcription "just works."
+
+- **The kernel-gate oracle recipe** (now proven, reuse for M1.2+): wire an env-gated,
+  npes==1 dump shim into FESOM2 at the LATEST setup point that has what you need but is
+  still before the 1-rank forcing hang (M1.1 = end of `ocean_setup`, after
+  `init_thickness_ale`). The shim PRESCRIBES analytic inputs from the byte-proven coords
+  (so FESOM2 and FESOM3 generate identical `ttf`/`vel` independently — no captured-input
+  file) and calls the **real FESOM2 kernels**, then STOPS. Gate every intermediate, not
+  just the final target, so a divergence localises itself. Pin scalar knobs (dt, num_ord)
+  as shared constants in BOTH codes, not from a namelist.
+
+- **`helem` at init is `which_ale`-independent.** Both linfs and zstar `init_thickness_ale`
+  reduce to `helem(nz,e)=zbar(nz)-zbar(nz+1)` (full cells) at the initial state because
+  `hbar=eta=0` there. So a kernel gate that dumps at init can compute `helem` from `zbar`
+  directly without importing ALE thickness evolution (deferred to M2.7). Verify it as a
+  dumped field anyway (M1.1 did — `max|Δ|=0`), since partial cells/cavity would break it.

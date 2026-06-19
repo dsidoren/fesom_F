@@ -254,17 +254,26 @@ vs FESOM2 on `pi` with a *prescribed* velocity field. Proves types→halo→edge
 end-to-end and byte-gates the polygon-agnostic edge-FV scatter (the tri→quad core). Structure per
 dwarf `oce_adv_tra_*`; **math from FESOM2** `oce_adv_tra_*.F90`.
 
-#### Task M1.1: Horizontal advection (upwind + MUSCL)
+#### Task M1.1: Horizontal advection (upwind + MUSCL) — ✅ DONE (max|Δ|=0)
 
 **Files:**
 - Create: `src/oce/oce_adv_tra_hor.F90`, `src/oce/oce_muscl_adv.F90`
+- ➕ Also created (needed to produce the gate target `del_ttf_advhoriz`):
+  `src/oce/oce_tracer_grad.F90` (`tracer_gradient_elements` → `tr_xy`),
+  `src/oce/oce_adv_tra_flux.F90` (`oce_tra_adv_flux2dtracer` scatter; M1.4 driver will `use` it),
+  plus the gate harness: `src/infra/mod_advhor_dump.F90`, `src/drivers/fesom_advhordump.F90`,
+  FESOM2 `src/fesom_advhor_dump.F90` (wired into `ocean_setup`), `tools/{advhor_diff.py,
+  run_advhordump_pi.sh,run_advhor_gate.sh}`.
 
-- [ ] transcribe from FESOM2 `oce_adv_tra_hor.F90` + `oce_muscl_adv.F90` (cite line refs); edge-FV
-      flux → scatter to `edge_tri` neighbors
-- [ ] operator-diff harness: oracle = FESOM2's advection kernel under **controlled-input replay** with
-      the SAME prescribed velocity (a plain FESOM2 run uses its own velocity, won't match); compare
-      `del_ttf_advhoriz` (`oce_ale_tracer.F90:232`)
-- [ ] **Gate:** operator-diff `max|Δ|=0` vs FESOM2 on `pi`
+- [x] transcribe from FESOM2 `oce_adv_tra_hor.F90` (upw1/muscl/mfct) + `oce_muscl_adv.F90`
+      (muscl_adv_init/find_up_downwind_triangles/fill_up_dn_grad) + `tr_xy`
+      (oce_tracer_mod.F90:181-182) (cite line refs); edge-FV flux → scatter to `edge_tri` neighbors
+- [x] operator-diff harness: oracle = FESOM2's REAL kernels under **controlled-input replay** with
+      an analytic prescribed velocity+tracer (computed from byte-proven coords in both codes); compare
+      `del_ttf_advhoriz` (`oce_ale_tracer.F90:232`) — `tools/run_advhor_gate.sh`
+- [x] **Gate:** operator-diff `max|Δ|=0` vs FESOM2 on `pi` — PASS on `del_ttf_advhoriz` +
+      `adv_flux_hor` (upw1 + muscl) AND every intermediate (helem, nboundary_lay, edge_up_dn_tri,
+      tr_xy, edge_up_dn_grad). ctest 13/13 (Intel+GNU dp); Intel sp + geom gate still green. See L9.
 
 #### Task M1.2: Vertical advection (upwind + QR4C)
 
