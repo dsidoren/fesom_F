@@ -27,6 +27,54 @@ Codified in `cmake/fesom_flags.cmake`. `-fpe0` implies flush-to-zero (FTZ) of de
 itself a bit-affecting behavior we must match, so keep it. `-init=zero` zeroes locals
 (prevents spurious `-fpe0` traps on uninitialised reads). When a real byte-gate runs
 (M0.7+), re-verify the actual FESOM2 build's flags from its build dir, not just the CMake.
+**VERIFIED at the M1 geometry gate:** both build with ifort 2021.5.0 via the same mpif90,
+and the FESOM2 build flags (`build/src/CMakeFiles/fesom.dir/flags.make`) are byte-for-byte
+the anchor list above. Same compiler + same flags ⇒ scalar SVML transcendentals match.
+
+## L7 — `-no-prec-div`: divide by a LITERAL, not a runtime `real(nv)` (arity trap)
+
+The single hardest bug in the M1 geometry gate. The anchor flag `-no-prec-div` lets ifort
+implement `x/y` as `x * recip(y)`. For a **compile-time constant** divisor (`x/3.0_WP`)
+ifort folds an exact `1/3` and the result is one value; for a **runtime** divisor
+(`x/real(nv,WP)`, nv from `elem2D_nnodes`) it emits a hardware reciprocal approximation
+that differs by **1 ULP**. That 1 ULP in a centroid latitude `sum(lat)/3` flowed into
+`cos`/`tan` (steep near the rotated pole → up to ~25% of elements differ), then
+`elem_area`, `gradient_sca`, `area`, `edge_cross_dxdy` — the whole geometry failed the
+gate. **Fix:** divide by the literal `3.0_WP`/`3.0_MP` (what FESOM2 writes), NOT
+`real(nv,WP)`. This is the plan's arity caveat made concrete: the `/3 → /n_vert`
+generalization is NOT universally bit-safe. v1 is triangles only (nv==3); quad support
+must branch on nv and divide by the matching literal. **Non-causes ruled out** (cost a
+day if not): the intrinsic `sum()` vs an explicit accumulation loop are bit-identical here;
+auto-vectorization of `cos` was NOT the cause (`!DIR$ NOVECTOR` had zero effect — removed);
+coords + `elem2D_nodes` were proven `max|Δ|=0` first, which is what localised it to the
+divide. Lesson: when a geometry byte-gate shows ~1-ULP transcendental diffs, suspect a
+runtime divisor under `-no-prec-div` before anything else.
+
+## L8 — 1-rank FESOM2 oracle (hand-crafted dist_1) + geometry byte-faithfulness
+
+To byte-gate anything that accumulates per node/element (`area`, later FCT scatter), the
+oracle must run **1-rank**, because FESOM2 builds `nod_in_elem2D` in LOCAL element order
+(oce_mesh.F90 find_neighbors), so a multi-rank run reorders the per-node `Σ elem_area/3`
+→ ULP diffs vs FESOM3's global order. METIS can't produce `dist_1`; hand-craft it
+(see HANDOFF "Geometry byte-gate"). FESOM2's reader accepts blank lines for zero-size
+halo arrays (zero-trip `read(*,*)` skips a record). 1-rank forcing init hangs on a login
+node — irrelevant: dump geometry at `mesh_setup` and STOP before forcing.
+Geometry transcription gotchas the gate caught (all now `max|Δ|=0`):
+- `elem_center`/`edge_center` wrap arithmetic must be VERBATIM (FESOM2 wraps each lon vs
+  `amin`; edge_center shifts a(1)/b(1) asymmetrically). An "equivalent" rewrite diverged.
+- **Vertex (CW) order — gated only on the 0-swap case so far.** pi has 0/5839 elements
+  needing the clockwise swap (it's pre-oriented), so the geometry gate did NOT exercise
+  `enforce_cw_orientation`'s reorder path. soufflet has 228/5700, CORE2 ~certainly >0.
+  Within-element node order is FP-order-sensitive (centroid `sum(lat)/3`; `gradient_sca`
+  column→vertex map; elem_area is swap-invariant). FESOM3 `enforce_cw_orientation` is
+  byte-identical to FESOM2 runtime `test_tri` (oce_mesh.F90:1706-1726: same b/c, same
+  `trim_cyclic` on comp 1, same `r=b1*c2-b2*c1`, same `r>0`→swap 2,3) operating on the
+  same elem2d.out + byte-proven coords ⇒ identical swaps by construction. **But empirically
+  confirm on a swap mesh (soufflet, or the M2.11 single-rank CORE2 gate) before trusting it.**
+- `elem_area`/`area`/`areasvol` accumulate UNSCALED then `*r_earth²` ONCE at the end
+  (a single deferred scaling), matching mesh_areas — not per-element scaling.
+- `edge_tri.out` stores **-999** for boundary (no 2nd triangle); FESOM2 `load_edges`
+  does `where(edge_tri<0) edge_tri=0`. Replicate, or the boundary marker leaks.
 
 ## L6 — Oracle is runnable; how to drive it (proven 2026-06-19)
 

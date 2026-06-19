@@ -1,0 +1,94 @@
+module mod_geom_dump
+    ! Write FESOM3's computed mesh geometry in the SAME self-describing binary
+    ! format as the FESOM2 oracle's src/fesom_geom_dump.F90, so tools/geom_diff.py
+    ! compares them field-by-field for the M1 geometry byte-gate (closes deferred
+    ! M0.7). Single-rank only (local == global), matching FESOM2's 1-rank geom run.
+    !
+    ! Format (stream, little-endian):
+    !   char8  "FGEOMDMP" | int32 nod2D,elem2D,edge2D,nl
+    !   records: char24 name | int32 dtype(0=r64,1=i32) | int32 d1,d2 | data
+    use, intrinsic :: iso_fortran_env, only: int32, real64
+    use mod_precision, only: WP, MP
+    use mod_mesh,      only: t_mesh
+    implicit none
+    private
+    public :: geom_dump_write
+
+contains
+
+    subroutine geom_dump_write(mesh, path)
+        type(t_mesh),     intent(in) :: mesh
+        character(len=*), intent(in) :: path
+        integer :: u, ios, ne, nn, n2, nl
+        ne = mesh%elem2D; nn = mesh%nod2D; n2 = mesh%edge2D; nl = mesh%nl
+        open(newunit=u, file=trim(path), status='replace', form='unformatted', &
+             access='stream', action='write', iostat=ios)
+        if (ios /= 0) then
+            write(*,'(a)') 'geom_dump_write: cannot open '//trim(path); error stop 1
+        end if
+        write(u) 'FGEOMDMP'
+        write(u) int(nn,int32), int(ne,int32), int(n2,int32), int(nl,int32)
+        call wr_r2(u, 'coord_nod2D',       mesh%coord_nod2D(1:2, 1:nn))
+        call wr_r2(u, 'geo_coord_nod2D',   mesh%geo_coord_nod2D(1:2, 1:nn))
+        call wr_i2(u, 'elem2D_nodes',      mesh%elem2D_nodes(1:3, 1:ne))
+        call wr_r1(u, 'elem_area',         mesh%elem_area(1:ne))
+        call wr_r1(u, 'elem_cos',          mesh%elem_cos(1:ne))
+        call wr_r1(u, 'metric_factor',     mesh%metric_factor(1:ne))
+        call wr_r2(u, 'gradient_sca',      mesh%gradient_sca(1:6, 1:ne))
+        call wr_r2(u, 'edge_dxdy',         mesh%edge_dxdy(1:2, 1:n2))
+        call wr_r2(u, 'edge_cross_dxdy',   mesh%edge_cross_dxdy(1:4, 1:n2))
+        call wr_r2(u, 'area',              mesh%area(1:nl, 1:nn))
+        call wr_r2(u, 'areasvol',          mesh%areasvol(1:nl, 1:nn))
+        call wr_r2(u, 'area_inv',          mesh%area_inv(1:nl, 1:nn))
+        call wr_r2(u, 'areasvol_inv',      mesh%areasvol_inv(1:nl, 1:nn))
+        call wr_i2(u, 'edges',             mesh%edges(1:2, 1:n2))
+        call wr_i2(u, 'edge_tri',          mesh%edge_tri(1:2, 1:n2))
+        call wr_i1(u, 'nlevels',           mesh%nlevels(1:ne))
+        call wr_i1(u, 'ulevels',           mesh%ulevels(1:ne))
+        call wr_i1(u, 'nlevels_nod2D',     mesh%nlevels_nod2D(1:nn))
+        call wr_i1(u, 'nlevels_nod2D_min', mesh%nlevels_nod2D_min(1:nn))
+        close(u)
+        write(*,'(a)') 'geom_dump_write: wrote '//trim(path)
+    end subroutine geom_dump_write
+
+    subroutine wr_r1(u, name, a)
+        integer, intent(in) :: u
+        character(len=*), intent(in) :: name
+        real(kind=MP), intent(in) :: a(:)
+        character(len=24) :: nm
+        nm = name
+        write(u) nm, int(0,int32), int(size(a),int32), int(1,int32)
+        write(u) real(a, real64)
+    end subroutine wr_r1
+
+    subroutine wr_r2(u, name, a)
+        integer, intent(in) :: u
+        character(len=*), intent(in) :: name
+        real(kind=MP), intent(in) :: a(:,:)
+        character(len=24) :: nm
+        nm = name
+        write(u) nm, int(0,int32), int(size(a,1),int32), int(size(a,2),int32)
+        write(u) real(a, real64)
+    end subroutine wr_r2
+
+    subroutine wr_i1(u, name, a)
+        integer, intent(in) :: u
+        character(len=*), intent(in) :: name
+        integer, intent(in) :: a(:)
+        character(len=24) :: nm
+        nm = name
+        write(u) nm, int(1,int32), int(size(a),int32), int(1,int32)
+        write(u) int(a, int32)
+    end subroutine wr_i1
+
+    subroutine wr_i2(u, name, a)
+        integer, intent(in) :: u
+        character(len=*), intent(in) :: name
+        integer, intent(in) :: a(:,:)
+        character(len=24) :: nm
+        nm = name
+        write(u) nm, int(1,int32), int(size(a,1),int32), int(size(a,2),int32)
+        write(u) int(a, int32)
+    end subroutine wr_i2
+
+end module mod_geom_dump

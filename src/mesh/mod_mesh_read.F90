@@ -82,6 +82,9 @@ contains
             read(u,*) mesh%edge_tri(1, i), mesh%edge_tri(2, i)
         end do
         close(u)
+        ! Boundary edges store -999 (no 2nd triangle) on disk; FESOM2 load_edges
+        ! (oce_mesh.F90:1885-1887) zeroes the negatives. el(2)==0 marks a boundary edge.
+        where (mesh%edge_tri < 0) mesh%edge_tri = 0
 
         ! ---- vertical level counts: elvls.out (elem), nlvls.out (node) ----
         allocate(mesh%nlevels(mesh%elem2D), mesh%nlevels_nod2D(mesh%nod2D))

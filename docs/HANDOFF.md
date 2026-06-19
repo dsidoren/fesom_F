@@ -5,7 +5,15 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 ## Where we are
 
 - **Milestone:** M0 (Foundation) — **COMPLETE ✓** (tag `m0`). 13/13 ctest green on
-  Intel dp + GNU dp; debug build (`-check all`) clean. Next: M1 (tracer advection).
+  Intel dp + GNU dp; debug build (`-check all`) clean.
+- **M1 in progress.** **Geometry byte-gate CLOSED ✓ (on pi)** — FESOM3 mesh geometry is
+  `max|Δ|=0` vs FESOM2 on pi (1-rank): elem_area, elem_cos, metric_factor, gradient_sca,
+  edge_dxdy, edge_cross_dxdy, area/areasvol(+inv), coord_nod2D, elem2D_nodes, edges,
+  edge_tri, all level arrays. Run it: `tools/run_geom_gate.sh`.
+  ⚠️ **Caveat:** pi has 0/5839 CW swaps, so the `enforce_cw_orientation` vertex-reorder
+  path is byte-identical-by-construction to FESOM2 `test_tri` but NOT yet empirically
+  gated (soufflet=228/5700, CORE2 will have swaps). Confirm at the M2.11 CORE2 gate or on
+  soufflet. See LESSONS L8. **Next: M1.1** (oce_adv_tra_hor + oce_muscl_adv).
 - **Done:** M0.1 ✓ build. M0.2 ✓ params/. M0.3 ✓ types/. M0.4 ✓ mod_partitioning
   (par_init/par_ex/set_partition; dist_<NP>/ reader transcribed from oce_mesh.F90;
   1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
@@ -17,7 +25,30 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   M0.7 ✓ mesh/ (rotate, read, areas, analytic; self-consistency gated).
   M0.8 ✓ step/mod_model (t_model + model_init/step/finalize) + drivers/fesom_analytic;
   runs end-to-end 1+2 ranks; debug build clean.
-- **Current task:** M1.1 — horizontal tracer advection (upwind + MUSCL).
+  M0.7-geom ✓ (closed in M1) mesh geometry byte-matches FESOM2 on pi 1-rank.
+- **Current task:** M1.1 — horizontal tracer advection (oce_adv_tra_hor + oce_muscl_adv);
+  operator-diff `max|Δ|=0` on `del_ttf_advhoriz` vs FESOM2 with a prescribed velocity.
+
+## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
+
+The first true byte-gate vs the live oracle. Reusable for ALL M1+ kernel gates.
+- **FESOM2 must run 1-rank** (so per-node `area`/`nod_in_elem2D` accumulation order ==
+  FESOM3 global order; multi-rank reorders → ULP diffs). METIS can't make `dist_1`, so
+  it is HAND-CRAFTED in `port2/fesom2/tests/data/MESHES/pi/dist_1/` (mirrors
+  `save_dist_mesh` for np=1: `rpart.out` = npes/counts/identity node→contiguous map;
+  `my_list00000.out` = identity lists; `com_info00000.out` = empty com_structs with
+  BLANK lines for the zero-size halo arrays, which the reader's zero-trip `read(*,*)`
+  skips). FESOM2's reader accepts it (validated).
+- **FESOM2 geom dump:** `src/fesom_geom_dump.F90` (NEW), wired at end of `mesh_setup`
+  (oce_mesh.F90), env-gated `FESOM_GEOM_DUMP`, npes==1 only, writes full arrays and
+  STOPS before forcing (1-rank forcing init hangs on login node — irrelevant, geometry
+  is complete at mesh_setup). Rebuilt: `build/bin/fesom.x` + `build/lib64/libfesom.so`
+  (the proven oracle `bin/fesom.x`+`lib64/` is UNTOUCHED; backups `.proven` exist).
+- **FESOM3 side:** `src/infra/mod_geom_dump.F90` + driver `src/drivers/fesom_geomdump.F90`
+  (same binary format) + `tools/geom_diff.py` (field-by-field max|Δ|). Rotation matches
+  the pi namelist (alpha/beta/gamma=50/15/-90, cyclic 360, force_rotation).
+- **Run:** `tools/run_geom_gate.sh` → PASS. Individually: `tools/run_geomdump_pi.sh`
+  (FESOM2) then `fesom_geomdump` (FESOM3) then `geom_diff.py`.
 
 ## M1 entry notes (read before starting)
 
@@ -82,8 +113,12 @@ The whole byte-gate pipeline is validated end-to-end:
 
 ## Next task
 
-M0.2 — `params/`: `mod_precision`, `mod_constants` (cite FESOM2 `oce_modules.F90` lines),
-`mod_config` + `mod_param_phys` (namelist read-once), `hp_math_intrinsics`; `test_params`.
+M1.1 — horizontal tracer advection. Transcribe `oce_adv_tra_hor.F90` (adv_tra_hor_upw1
+/ _muscl / _mfct) + `oce_muscl_adv.F90` (muscl_adv_init / find_up_downwind_triangles /
+fill_up_dn_grad) + the `tr_xy` elemental gradient (oce_tracer_mod.F90:181-182) into
+`src/oce/`. Oracle prep: add UV/del_ttf_advhoriz dump calls to FESOM2 advection (node +
+NEW element shims) under controlled-input replay with a prescribed velocity, then gate
+`del_ttf_advhoriz` `max|Δ|=0`. The geometry it needs is now byte-proven (above).
 
 ## Open notes / risks
 

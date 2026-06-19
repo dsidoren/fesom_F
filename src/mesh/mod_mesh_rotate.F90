@@ -7,7 +7,7 @@ module mod_mesh_rotate
     use mod_constants, only: rad
     implicit none
     private
-    public :: init_mesh_rotation, g2r, r2g, trim_cyclic
+    public :: init_mesh_rotation, g2r, r2g, trim_cyclic, get_cyclic_length
 
     real(kind=WP), save :: r2g_matrix(3,3) = 0.0_WP
     real(kind=WP), save :: cyclic_length_rad = 6.283185307179586_WP  ! 2*pi default
@@ -70,5 +70,11 @@ contains
         if (b >  0.5_WP*cyclic_length_rad) b = b - cyclic_length_rad
         if (b < -0.5_WP*cyclic_length_rad) b = b + cyclic_length_rad
     end subroutine trim_cyclic
+
+    pure real(kind=WP) function get_cyclic_length()
+        ! cyclic_length (radians) for the elem_center/edge_center wraps, which use
+        ! FESOM2's own >=/< comparisons against cyclic_length/2 (NOT trim_cyclic).
+        get_cyclic_length = cyclic_length_rad
+    end function get_cyclic_length
 
 end module mod_mesh_rotate
