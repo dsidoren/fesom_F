@@ -114,7 +114,7 @@ Every task lists its gate as explicit checklist item(s); **the gate must pass be
 > "Roadmap"); they are detailed into tasks when their predecessor's gate passes, since their detail
 > depends on earlier results.
 
-### MILESTONE 0 — Foundation (no physics)
+### MILESTONE 0 — Foundation (no physics) — ✅ COMPLETE (tag `m0`)
 
 Goal: a buildable skeleton + the full validation harness + mesh/partition/halo infrastructure, able
 to load `pi`, synthesize a 1-rank partition, read `dist_N`, pass a halo-identity self-test, and
@@ -126,13 +126,13 @@ round-trip the dump — with **zero physics**.
 - Create: `CMakeLists.txt`, `configure.sh`, `env.sh`, `cmake/` (port `apply_fesom_compile_flags`)
 - Create: `.gitignore`, `README.md`, `docs/LESSONS.md`, `docs/HANDOFF.md`
 
-- [ ] port the dwarf's CMake (`design_refs/tracer_dwarf/CMakeLists.txt`, `cmake/`, `configure.sh`):
+- [x] port the dwarf's CMake (`design_refs/tracer_dwarf/CMakeLists.txt`, `cmake/`, `configure.sh`):
       per-compiler/precision flags (GNU/Intel), options `USE_SINGLE_PRECISION`/`USE_HALF_PRECISION`,
       `build_<compiler>_<precision>/` dirs
-- [ ] define the **anchor build**: Intel + DP + `-fp-model precise` + no-reassoc (match FESOM2 v2.7.3)
-- [ ] record Levante env in `env.sh` (`module --force purge`; Intel/GNU + OpenMPI + serial netCDF)
-- [ ] `git init`; commit skeleton
-- [ ] **Gate:** empty library + a hello-MPI driver build cleanly in `intel_dp` and `gnu_dp`; runs on
+- [x] define the **anchor build**: Intel + DP + `-fp-model precise` + no-reassoc (match FESOM2 v2.7.3)
+- [x] record Levante env in `env.sh` (`module --force purge`; Intel/GNU + OpenMPI + serial netCDF)
+- [x] `git init`; commit skeleton
+- [x] **Gate:** empty library + a hello-MPI driver build cleanly in `intel_dp` and `gnu_dp`; runs on
       1 and 2 ranks on a login node
 
 #### Task M0.2: `params/` — precision, constants, write-once config
@@ -144,12 +144,12 @@ round-trip the dump — with **zero physics**.
 - Create: `src/params/hp_math_intrinsics.F90` (port dwarf; inert unless HP)
 - Create: `test/test_params.F90`
 
-- [ ] `mod_precision`: two-tier WP/MP (D3); `MPI_WP` selects `MPI_DOUBLE_PRECISION`/`MPI_REAL`
-- [ ] `mod_constants`: **cite `oce_modules.F90` line for each constant**; truncated π exactly
-- [ ] `mod_config`/`mod_param_phys`: namelist read at init, then read-only; per-entity config rides
+- [x] `mod_precision`: two-tier WP/MP (D3); `MPI_WP` selects `MPI_DOUBLE_PRECISION`/`MPI_REAL`
+- [x] `mod_constants`: **cite `oce_modules.F90` line for each constant**; truncated π exactly
+- [x] `mod_config`/`mod_param_phys`: namelist read at init, then read-only; per-entity config rides
       in data types (not here)
-- [ ] write tests: constants equal FESOM2 values bit-for-bit; namelist parse (accept + reject)
-- [ ] **Gate:** `test_params` passes; builds in all precision variants (WP=MP=8 path is byte-trivial)
+- [x] write tests: constants equal FESOM2 values bit-for-bit; namelist parse (accept + reject)
+- [x] **Gate:** `test_params` passes; builds in all precision variants (WP=MP=8 path is byte-trivial)
 
 #### Task M0.3: `types/` — data types (no behavior)
 
@@ -159,65 +159,65 @@ round-trip the dump — with **zero physics**.
   `src/types/mod_ice.F90`
 - Create: `src/infra/mod_io_restart.F90` (+ `MOD_READ/WRITE_BINARY_ARRAYS` port), `test/test_types.F90`
 
-- [ ] `t_mesh`: cell-vertex; **`elem_nnodes(:)` + `elem_nodes(max_nv=4,:)`** (arity, D2); `edges`,
+- [x] `t_mesh`: cell-vertex; **`elem_nnodes(:)` + `elem_nodes(max_nv=4,:)`** (arity, D2); `edges`,
       `edge_tri`; CSR `nod_in_elem_ptr/nod_in_elem`; `gradient_sca(2*max_nv,:)`; geometry;
       integer level bounds `nlevels/ulevels/nlevels_nod2D[_min]`; `hnode/hnode_new/helem`; `ssh_stiff`
-- [ ] `t_partit`: `myDim/eDim/eXDim`, `myList_*`, `com_struct` (rPE/rptr/rlist, sPE/sptr/slist,
+- [x] `t_partit`: `myDim/eDim/eXDim`, `myList_*`, `com_struct` (rPE/rptr/rlist, sPE/sptr/slist,
       1-based-cumulative), precompiled mpitypes
-- [ ] evolving types split **prognostic** (restartable) vs **work** (recomputed): `t_dyn`
+- [x] evolving types split **prognostic** (restartable) vs **work** (recomputed): `t_dyn`
       (uv/uv_rhsAB/w/eta_n/d_eta/ssh_rhs + `t_dyn_work` for density/N²/Kv/Av/hpressure/sw_alpha-beta/GM
       slopes + `t_solverinfo`); `t_tracer` (`t_tracer_data(:)` + `t_tracer_work`); `t_ice`
       (a_ice/m_ice/m_snow/uice/vice + **σ11/σ12/σ22 prognostic** + `t_ice_work`)
-- [ ] SoA, level-contiguous `(nl, n_entity)`; **tracer stride = nl** (allocation shape, not loop range)
-- [ ] generic `read(unformatted)`/`write(unformatted)` bindings per type (round-trip serialization is
+- [x] SoA, level-contiguous `(nl, n_entity)`; **tracer stride = nl** (allocation shape, not loop range)
+- [x] generic `read(unformatted)`/`write(unformatted)` bindings per type (round-trip serialization is
       needed now for type tests + the dump; full restart-file orchestration deferred to M2.11/M5)
-- [ ] write tests: allocate/deallocate all; serialize→deserialize round-trip `max|Δ|=0`
-- [ ] **Gate:** `test_types` passes in all variants
+- [x] write tests: allocate/deallocate all; serialize→deserialize round-trip `max|Δ|=0`
+- [x] **Gate:** `test_types` passes in all variants
 
 #### Task M0.4: `infra/mod_partitioning` — partition + 1-rank synthesis
 
 **Files:**
 - Create: `src/infra/mod_partitioning.F90`, `test/test_partit.F90`
 
-- [ ] `par_init`/`par_ex`/`init_mpi_types` (port structure from FESOM2 `gen_modules_partitioning.F90`)
-- [ ] read `dist_<NP>/` (rpart.out, my_list, com_info), 1-based on disk → shift ids only
-- [ ] **1-rank synthesis** (D7): `npes==1` ⇒ identity local↔global, `myDim`=global, `eDim=eXDim=0`,
+- [x] `par_init`/`par_ex`/`init_mpi_types` (port structure from FESOM2 `gen_modules_partitioning.F90`)
+- [x] read `dist_<NP>/` (rpart.out, my_list, com_info), 1-based on disk → shift ids only
+- [x] **1-rank synthesis** (D7): `npes==1` ⇒ identity local↔global, `myDim`=global, `eDim=eXDim=0`,
       empty `com_struct`, no neighbors, **no file read**
-- [ ] write tests: synthesize 1-rank on `pi`; read `dist_2`/`dist_8`; assert `Σ myDim_nod2D == nod2D`;
+- [x] write tests: synthesize 1-rank on `pi`; read `dist_2`/`dist_8`; assert `Σ myDim_nod2D == nod2D`;
       elements/edges redundant at boundaries (`Σ myDim_elem2D ≥ elem2D`)
-- [ ] **Gate:** `test_partit` passes 1/2/8-rank
+- [x] **Gate:** `test_partit` passes 1/2/8-rank
 
 #### Task M0.5: `infra/mod_halo` — generic exchange
 
 **Files:**
 - Create: `src/infra/mod_halo.F90`, `test/test_halo.F90`
 
-- [ ] generic `exchange_nod`/`exchange_elem` (overloaded 2D/3D/multi-field/int; nl vs nl-1) +
+- [x] generic `exchange_nod`/`exchange_elem` (overloaded 2D/3D/multi-field/int; nl vs nl-1) +
       `*_begin`/`*_end` split; `luse_g2g` arg present-but-inert (structure from dwarf `gen_halo_exchange.F90`)
-- [ ] pack→`MPI_Isend`/`Irecv`→unpack via `com_struct`; **broadcast-only** (owner→halo, NO additive);
+- [x] pack→`MPI_Isend`/`Irecv`→unpack via `com_struct`; **broadcast-only** (owner→halo, NO additive);
       `MPI_WP` datatype
-- [ ] exchange-and-compare **stale-halo probe** (copy, exchange copy, diff at halo)
-- [ ] write tests: **halo-identity** (set field=global id, exchange, assert halo==owner id) on
+- [x] exchange-and-compare **stale-halo probe** (copy, exchange copy, diff at halo)
+- [x] write tests: **halo-identity** (set field=global id, exchange, assert halo==owner id) on
       `dist_2`/`dist_8`; probe detects an injected stale halo
-- [ ] **Gate:** `test_halo` passes multi-rank
+- [x] **Gate:** `test_halo` passes multi-rank
 
 #### Task M0.6: `infra/mod_dump` — gid-keyed validation harness
 
 **Files:**
 - Create: `src/infra/mod_dump.F90`, `tools/dump_diff.py`, `test/test_dump.F90`
 
-- [ ] per-substep dump: named node **and element** arrays at probe gids after each substep, keyed by
+- [x] per-substep dump: named node **and element** arrays at probe gids after each substep, keyed by
       1-based global id (rank-order independent), **FESOM2 binary layout**; env-gated (`FESOM_*_DUMP_DIR`),
       compiled-inert when off. **Element fields needing NEW shims in the oracle** (node fields already
       exist): `uv`, `UV_rhs`/`UV_rhsAB`, `Av`, `pgf_x`/`pgf_y` — element gid-keyed. The M2.2–M2.5
       element-path gates use controlled-input replay against these (so they don't block on later tasks
       like M2.8's `Av`).
-- [ ] `dump_diff.py`: per-step/point/column `|Δ|` histogram; names the **first divergent substep**;
+- [x] `dump_diff.py`: per-step/point/column `|Δ|` histogram; names the **first divergent substep**;
       SIGNAL threshold separating real divergence from FP noise
-- [ ] add the matching dump gates to the FESOM2 oracle tree where missing (reuse existing
+- [x] add the matching dump gates to the FESOM2 oracle tree where missing (reuse existing
       kpp/ale/evp/tke shims from `port2/fesom2`)
-- [ ] write tests: dump round-trip; `dump_diff.py` flags an injected diff, passes identical files
-- [ ] **Gate:** `test_dump` + a `dump_diff.py` self-check pass
+- [x] write tests: dump round-trip; `dump_diff.py` flags an injected diff, passes identical files
+- [x] **Gate:** `test_dump` + a `dump_diff.py` self-check pass
 
 #### Task M0.7: `mesh/` — geometry + CW orientation + analytic generator
 
@@ -225,27 +225,27 @@ round-trip the dump — with **zero physics**.
 - Create: `src/mesh/mod_mesh_read.F90`, `src/mesh/mod_mesh_areas.F90`, `src/mesh/mod_mesh_aux.F90`,
   `src/mesh/mod_mesh_analytic.F90`
 
-- [ ] read partitioned mesh into `t_mesh`; build `edges`/`edge_tri`/CSR `nod_in_elem`
-- [ ] **enforce CW element orientation at load** (`test_tri` analog); abort loudly if violated; count swaps
-- [ ] compute geometry **transcribed from FESOM2 `oce_mesh.F90`** (elem_area, area/areasvol,
+- [x] read partitioned mesh into `t_mesh`; build `edges`/`edge_tri`/CSR `nod_in_elem`
+- [x] **enforce CW element orientation at load** (`test_tri` analog); abort loudly if violated; count swaps
+- [x] compute geometry **transcribed from FESOM2 `oce_mesh.F90`** (elem_area, area/areasvol,
       gradient_sca, edge_cross_dxdy, metric_factor, zbar/Z, nlevels/ulevels, nlevels_nod2D[_min]) —
       generalize `1/3`→`1/n_vert` (inert for triangles; match FESOM2's exact divide-vs-multiply form
       per site — see Development Approach arity caveat)
-- [ ] analytic generator (port dwarf `analytic_mesh.F90`): in-memory tri mesh, closed + doubly-periodic
-- [ ] write tests/gate: load `pi`; **dump geometry arrays, `max|Δ|=0` vs FESOM2 mesh diagnostics**;
+- [x] analytic generator (port dwarf `analytic_mesh.F90`): in-memory tri mesh, closed + doubly-periodic
+- [x] write tests/gate: load `pi`; **dump geometry arrays, `max|Δ|=0` vs FESOM2 mesh diagnostics**;
       CW swap count matches FESOM2; analytic mesh builds + geometry self-consistent
-- [ ] **Gate:** geometry byte-matches FESOM2 on `pi` (1-rank)
+- [x] **Gate:** geometry byte-matches FESOM2 on `pi` (1-rank)
 
 #### Task M0.8: `drivers/fesom_analytic` — end-to-end wiring (no physics)
 
 **Files:**
 - Create: `src/drivers/fesom_analytic.F90`, `src/step/mod_model.F90` (`t_model` + lifecycle stubs)
 
-- [ ] `t_model` aggregate; `model_init`/`model_step`(empty)/`model_finalize`
-- [ ] wire: MPI init → partit → analytic mesh → allocate types → (no physics) → finalize
-- [ ] write tests/gate: runs clean on analytic mesh 1-rank + multi-rank; allocations balanced
+- [x] `t_model` aggregate; `model_init`/`model_step`(empty)/`model_finalize`
+- [x] wire: MPI init → partit → analytic mesh → allocate types → (no physics) → finalize
+- [x] write tests/gate: runs clean on analytic mesh 1-rank + multi-rank; allocations balanced
       (no leaks under a debug build)
-- [ ] **Gate:** `fesom_analytic` runs end-to-end; **M0 exit gate** — all M0 self-tests green; tag `m0`
+- [x] **Gate:** `fesom_analytic` runs end-to-end; **M0 exit gate** — all M0 self-tests green; tag `m0`
 
 ### MILESTONE 1 — Tracer advection (FCT) on prescribed velocity
 
@@ -275,18 +275,18 @@ dwarf `oce_adv_tra_*`; **math from FESOM2** `oce_adv_tra_*.F90`.
       `adv_flux_hor` (upw1 + muscl) AND every intermediate (helem, nboundary_lay, edge_up_dn_tri,
       tr_xy, edge_up_dn_grad). ctest 13/13 (Intel+GNU dp); Intel sp + geom gate still green. See L9.
 
-#### Task M1.2: Vertical advection (upwind + QR4C)
+#### Task M1.2: Vertical advection (upwind + QR4C) — ✅ DONE (max|Δ|=0)
 
 **Files:** Create: `src/oce/oce_adv_tra_ver.F90`
-- [ ] transcribe from FESOM2 `oce_adv_tra_ver.F90` (QR4C; watch the D=2 shallow-column double-write)
-- [ ] **Gate:** operator-diff `max|Δ|=0`
+- [x] transcribe from FESOM2 `oce_adv_tra_ver.F90` (QR4C; watch the D=2 shallow-column double-write)
+- [x] **Gate:** operator-diff `max|Δ|=0`
 
-#### Task M1.3: FCT limiter (Zalesak)
+#### Task M1.3: FCT limiter (Zalesak) — ✅ DONE (max|Δ|=0)
 
 **Files:** Create: `src/oce/oce_adv_tra_fct.F90`
-- [ ] transcribe from FESOM2 `oce_adv_tra_fct.F90`; `flux_eps=1e-16` flooring; low-order + clipped
+- [x] transcribe from FESOM2 `oce_adv_tra_fct.F90`; `flux_eps=1e-16` flooring; low-order + clipped
       antidiffusive flux; halo writes for `fct_ttf_max/min` over `myDim+eDim` (faithful loop bounds)
-- [ ] **Gate:** operator-diff `max|Δ|=0`
+- [x] **Gate:** operator-diff `max|Δ|=0`
 
 #### Task M1.4: Advection driver + dispatch + integration
 

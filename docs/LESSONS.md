@@ -172,3 +172,89 @@ the FIRST gate run — no bug-hunt. Two reasons, both reusable:
   `hbar=eta=0` there. So a kernel gate that dumps at init can compute `helem` from `zbar`
   directly without importing ALE thickness evolution (deferred to M2.7). Verify it as a
   dumped field anyway (M1.1 did — `max|Δ|=0`), since partial cells/cavity would break it.
+
+## L10 — Vertical advection (M1.2): QR4C wants ALE 3D depths, not static Z/zbar (PASSED first try)
+
+M1.2 (vertical advection: upw1 + QR4C + scatter) hit `max|Δ|=0` vs FESOM2 on the FIRST gate
+run, like M1.1. Reusable specifics:
+
+- **QR4C divides by the *per-node ALE* mid-depths `Z_3d_n`/`zbar_3d_n`, NOT the static 1-D
+  `Z`/`zbar`.** FESOM2 builds them in `init_ale` (oce_ale.F90:531-566). At the initial state
+  (no cavity, full cells) they reduce to: `zbar_3d_n(nz,n)=zbar(nz)` for all nz; interior
+  `Z_3d_n(nz,n)=Z(nz)`; and the surface/bottom interfaces use
+  `Z_3d_n(nzmin)=zbar(nzmin)+(zbar(nzmin+1)-zbar_n_srf)/2` and
+  `Z_3d_n(nzmax-1)=zbar(nzmax-1)+(zbar_n_bot-zbar(nzmax-1))/2` with `zbar_n_srf=zbar(nzmin)`,
+  `zbar_n_bot=zbar(nzmax)`. The FESOM2 shim used the LIVE `mesh%Z_3d_n` (init_ale ran earlier
+  in ocean_setup); the FESOM3 driver REPLICATES that formula. Both `zbar_3d_n` and `Z_3d_n`
+  were dumped as gated fields (`max|Δ|=0`) so the replication is proven, not assumed. NOTE the
+  geom gate did NOT cover `Z`/`zbar` (it dumps level *counts* only); the advhor gate now does
+  (via the 3-D arrays). FESOM3 `read_mesh` builds `Z=0.5*(zbar(k)+zbar(k+1))` in ONE step vs
+  FESOM2's two steps (`Z=zbar(k)+zbar(k+1); Z=0.5*Z`) — byte-identical because ×0.5 is exact.
+
+- **`/2` is byte-exact under `-no-prec-div`; `/3` is not (cf. L7).** The boundary `Z_3d_n`
+  `/2` and the QR4C `/3.0_WP` literal divisors fold to exact/identical constants. And QR4C's
+  `qc/qu/qd = (ttf diff)/(Z_3d_n(k)-Z_3d_n(k+1))` are RUNTIME divisors — fine here because
+  BOTH codes divide by the *same* runtime operand (byte-identical `Z_3d_n`), so the reciprocal
+  approximation matches. L7's trap was a runtime-vs-LITERAL *mismatch* between the two codes,
+  not runtime division per se. Transcribe the divisor expression verbatim and operands match.
+
+- **The "D=2 shallow-column double-write" is moot on pi** (its min column is `nlevels_nod2D=5`
+  = 4 layers; `sort -n nlvls.out | head -1`). The QR4C 2-layer double-write (2nd-layer and
+  bottom-1 both hitting interface `nzmin+1`, which nets the flux there to ~0) only triggers at
+  `nlevels_nod2D=3`; a 1-layer column (`=2`) would read `ttf(0)` OOB. pi has neither, so
+  faithful statement-order transcription is automatically correct. Confirmed with a Debug
+  (`-check all`) run of `fesom_advhordump` (EXIT 0, no OOB/FPE). Re-examine for meshes with
+  shallower minima (soufflet, CORE2) — there the double-write/OOB order matters and must match.
+
+- **Debug build is NOT byte-comparable to the Release oracle.** A `-check all` (`-O0`, no
+  `-no-prec-div`) FESOM3 dump differs from the `-O3` FESOM2 oracle on EVERY FP-computed field
+  (horizontal too, and even `area` at ~3.7e-4) — a uniform flag effect, not a bug. Use Debug
+  ONLY to catch OOB/uninit/FPE; byte-gate Release-vs-Release (anchor flags both sides, L1).
+
+## L11 — FCT (M1.3): config knobs, the ttf-gradient quirk, the bignumber bottom-fill (PASSED first try)
+
+M1.3 (FCT/Zalesak limiter `oce_tra_adv_fct` + the `use_lo` scatter) hit `max|Δ|=0` vs FESOM2 on
+the FIRST gate run, like M1.1/M1.2. The 15 new fields (fct_LO, clipped adf_h/adf_v, fct_ttf_max/
+min, fct_plus/minus, del_ttf_*_fct, hnode/hnode_new, standalone MFCT) all matched. Specifics:
+
+- **The pi FCT config is MFCT/QR4C/FCT with `opth=0.0`, `optv=1.0`** (namelist.tra tracer 1/2:
+  `1,'MFCT','QR4C','FCT ',0.,1.` → hor.Ord=0 ⇒ 3rd-order MFCT, vert.Ord=1 ⇒ 4th-order QR4C), NOT
+  the `num_ord=0.75` M1.1/M1.2 used for the standalone MUSCL/QR4C dumps. Pin opth/optv as shared
+  constants in BOTH codes. The blended num_ord term is already proven (M1.1 MUSCL@0.75); a
+  standalone `adv_flux_hor_mfct`@0.75 dump finally gates the MFCT kernel (no-clamp variant) fully.
+
+- **`edge_up_dn_grad` is the gradient of `values` (ttf), NOT `valuesAB` (ttfAB).** FESOM2
+  `init_tracers_AB` (oce_tracer_mod.F90:126-127) has the `valuesAB` gradient call COMMENTED OUT
+  and uses `values`; then `do_oce_adv_tra` reconstructs `valuesAB` (ttfAB) in MUSCL/MFCT/QR4C
+  using that ttf-gradient (note line 131 "WHY NOT AB HERE? DSIDOREN!"). So the gate reuses
+  `eudg=grad(ttf)` (already built for M1.1) for the `MFCT(ttfAB)` call — do NOT recompute
+  grad(ttfAB). LO fluxes use ttf, HO fluxes use ttfAB, both with eudg=grad(ttf).
+
+- **The `a2` bignumber fill clobbers EVERY element's bottom layer.** `do nz=nu1,nl1-1` (real
+  bounds) then `if(nl1<=nl-1) do nz=nl1,nl-1` with `nl1=nlevels(elem)-1`, so layer
+  `nlevels(elem)-1` (the element's own bottom layer) is set to ∓bignumber, leaving the deepest
+  node layer's admissible increment unconstrained. An off-by-one (`nl1` vs `nl1-1`) here would
+  diverge — pi has shallow elements so the fill is exercised and gated.
+
+- **AUX scratch: FESOM2 reuses `edge_up_dn_grad`; FESOM3 uses a LOCAL.** Byte-identical on pi
+  because `a2` writes `AUX(1:2, ulevels(elem):nl-1, elem)` for every element and (with
+  ulevels==1, no cavity) `a3` only reads written entries — the uninitialised local never reaches
+  a result. On a CAVITY mesh `a3` reads `AUX(:,nz,elem)` at `nz<ulevels(elem)` (FESOM2 = stale
+  edge_up_dn_grad there); unreproducible with a fresh array → **re-gate FCT on a cavity mesh
+  (M2+).** In the SHIM, pass a SEPARATE `aux_scratch` (not edge_up_dn_grad) to the real
+  `oce_tra_adv_fct` so edge_up_dn_grad survives intact for its own dump record. `dmax1/dmin1`→
+  generic `max/min` (identical IEEE at WP=8). exchange_nod(fct_plus,fct_minus) is a 1-rank no-op.
+
+- **`hnode/hnode_new` at init = `zbar(nz)-zbar(nz+1)`** (node analog of helem, full cells;
+  `hnode_new=hnode`, oce_ale.F90:1217), built like helem and gated. Used by the LO vertical
+  update, the b2 limiter divisor, and the `use_lo` scatter reconstruction. Runtime divisors
+  `areasvol`/`hnode_new` match FESOM2 (same byte-identical operands; cf. L7/L10).
+
+- **A strong FCT gate needs ttfAB sharp+large vs the smooth ttf, or the limiter never clips.**
+  The b2 increment is `flux·dt/(areasvol·hnode_new)` with `dt/(areasvol·hnode_new) ~ 1.8e-10` on
+  pi, so for smooth realistic-magnitude fields the antidiffusive increment sits far below the
+  admissible bound ⇒ `ae≡1` ⇒ b1/b2/b3 are computed but multiplied by 1, masking transcription
+  bugs in the limiting *selection*. A high-wavenumber, amplitude-20/10 ttfAB (vs amplitude-1 ttf)
+  drove clipping at ~41% of nodes (fct_plus/minus min=0), changing ~14% of the antidiffusive
+  fluxes — so the sign-based clip selection was genuinely exercised. Verify clipping fraction
+  post-run (count fct_plus<1); byte-identity holds regardless, but gate STRENGTH needs it.

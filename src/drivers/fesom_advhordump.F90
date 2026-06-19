@@ -25,24 +25,39 @@ program fesom_advhordump
     use mod_tracer,       only: t_tracer_work
     use oce_tracer_grad,  only: tracer_gradient_elements
     use oce_muscl_adv,    only: muscl_adv_init, fill_up_dn_grad
-    use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl
+    use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
+    use oce_adv_tra_ver,  only: adv_tra_ver_upw1, adv_tra_ver_qr4c
     use oce_adv_tra_flux, only: oce_tra_adv_flux2dtracer
+    use oce_adv_tra_fct,  only: oce_tra_adv_fct
     use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r2, wr_r3, wr_i1, wr_i2
     implicit none
 
     ! Controlled-input parameters (must equal the FESOM2 oracle's)
     real(kind=WP), parameter :: dt      = 1800.0_WP   ! time step [s]
-    real(kind=WP), parameter :: num_ord = 0.75_WP     ! MUSCL 4th-order fraction (exercises both terms)
+    real(kind=WP), parameter :: num_ord = 0.75_WP     ! MUSCL/QR4C/MFCT 4th-order fraction (exercises both terms)
+    real(kind=WP), parameter :: opth    = 0.0_WP      ! MFCT 4th-order fraction in the pi FCT config (hor.Ord=0 -> 3rd order)
+    real(kind=WP), parameter :: optv    = 1.0_WP      ! QR4C 4th-order fraction in the pi FCT config (vert.Ord=1 -> 4th order)
 
     character(len=512) :: mesh_dir, out_path
     type(t_partit)      :: partit
     type(t_mesh)        :: mesh
     type(t_tracer_work) :: twork
-    integer :: nsw, e, n, nz, nl, u
+    integer :: nsw, e, n, nz, nl, u, nzmin, nzmax
     real(kind=WP), allocatable :: vel(:,:,:), ttf(:,:), tr_xy(:,:,:), eudg(:,:,:)
     real(kind=WP), allocatable :: aflux_u(:,:), aflux_m(:,:)
     real(kind=WP), allocatable :: dttf_u(:,:), dttf_m(:,:), dttf_v(:,:), flux_v(:,:)
+    real(kind=WP), allocatable :: wvel(:,:), aflux_vu(:,:), aflux_vq(:,:)
+    real(kind=WP), allocatable :: dttf_vu(:,:), dttf_vq(:,:), zero_h(:,:)
+    ! --- M1.3 FCT path ---
+    real(kind=WP), allocatable :: ttfAB(:,:), aflux_mfct(:,:)
+    real(kind=WP), allocatable :: fct_LO(:,:), fct_ttf_max(:,:), fct_ttf_min(:,:)
+    real(kind=WP), allocatable :: fct_plus(:,:), fct_minus(:,:)
+    real(kind=WP), allocatable :: adf_h(:,:), adf_v(:,:)
+    real(kind=WP), allocatable :: aflux_h_ho(:,:), aflux_v_ho(:,:)
+    real(kind=WP), allocatable :: dttf_h_fct(:,:), dttf_v_fct(:,:)
+    integer :: e2, enodes(2), el(2), nl1, nl2, nu1, nu2, nl12, nu12
     real(kind=WP) :: lon, lat
+    real(kind=MP) :: zbar_srf, zbar_bot
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -73,6 +88,44 @@ program fesom_advhordump
         end do
     end do
 
+    ! hnode / hnode_new (per-node layer thickness): FESOM2 init_thickness_ale linfs
+    ! (oce_ale.F90:1014-1033) sets hnode(nz,n)=zbar_3d_n(nz,n)-zbar_3d_n(nz+1,n) for
+    ! nz in [ulevels_nod2D(n), nlevels_nod2D(n)-2] and hnode(nlevels_nod2D(n)-1,n)=
+    ! bottom_node_thickness; at the initial full-cell state both reduce to
+    ! zbar(nz)-zbar(nz+1) (the node analog of helem). hnode_new=hnode (oce_ale.F90:1217).
+    ! Used by the FCT low-order vertical update, the b2 limiter, and the use_lo scatter;
+    ! dumped + gated below.
+    allocate(mesh%hnode(nl-1, mesh%nod2D), mesh%hnode_new(nl-1, mesh%nod2D))
+    mesh%hnode = 0.0_MP
+    do n = 1, mesh%nod2D
+        do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)-1
+            mesh%hnode(nz, n) = mesh%zbar(nz) - mesh%zbar(nz+1)
+        end do
+    end do
+    mesh%hnode_new = mesh%hnode
+
+    ! zbar_3d_n / Z_3d_n: per-node ALE interface/mid depths needed by QR4C, built
+    ! exactly as FESOM2 init_ale (oce_ale.F90:531-566) at the initial state. pi has
+    ! no cavity (ulevels_nod2D=1) and full cells, so zbar_n_srf=zbar(nzmin) and
+    ! zbar_n_bot=zbar(nzmax); the surface/bottom Z_3d_n use the /2 boundary formula.
+    ! Verified field-by-field by the gate (zbar_3d_n, Z_3d_n).
+    allocate(mesh%zbar_3d_n(nl, mesh%nod2D), mesh%Z_3d_n(nl-1, mesh%nod2D))
+    mesh%zbar_3d_n = 0.0_MP; mesh%Z_3d_n = 0.0_MP
+    do n = 1, mesh%nod2D
+        nzmin = mesh%ulevels_nod2D(n)
+        nzmax = mesh%nlevels_nod2D(n)
+        zbar_srf = mesh%zbar(nzmin)
+        zbar_bot = mesh%zbar(nzmax)
+        mesh%zbar_3d_n(1:nzmin-1, n)       = mesh%zbar(1:nzmin-1)
+        mesh%zbar_3d_n(nzmin, n)           = zbar_srf
+        mesh%zbar_3d_n(nzmin+1:nzmax-1, n) = mesh%zbar(nzmin+1:nzmax-1)
+        mesh%zbar_3d_n(nzmax, n)           = zbar_bot
+        mesh%Z_3d_n(1:nzmin-1, n)          = mesh%Z(1:nzmin-1)
+        mesh%Z_3d_n(nzmin, n)              = mesh%zbar_3d_n(nzmin,n)   + (mesh%zbar_3d_n(nzmin+1,n)-zbar_srf)/2
+        mesh%Z_3d_n(nzmin+1:nzmax-2, n)    = mesh%Z(nzmin+1:nzmax-2)
+        mesh%Z_3d_n(nzmax-1, n)            = mesh%zbar_3d_n(nzmax-1,n) + (zbar_bot-mesh%zbar_3d_n(nzmax-1,n))/2
+    end do
+
     ! Prescribe analytic velocity (at elements) and tracer (at nodes). MUST match
     ! FESOM2 src/fesom_advhor_dump.F90 exactly:
     !   ttf(nz,n)   = sin(2*lon_n)*cos(lat_n) + 0.02*nz
@@ -92,6 +145,33 @@ program fesom_advhordump
         do nz = 1, nl-1
             vel(1, nz, e) = 0.20_WP*cos(lat)*sin(lon) + 0.001_WP*real(nz, WP)
             vel(2, nz, e) = 0.15_WP*cos(2.0_WP*lat)
+        end do
+    end do
+
+    ! ttfAB: the Adams-Bashforth (high-order) tracer for the FCT path. The FCT limiter
+    ! clips the antidiffusive flux HO(ttfAB)-LO(ttf); a deliberately SHARP, large-
+    ! amplitude oscillatory ttfAB (vs the smooth ttf) makes the high-order flux exceed
+    ! the cluster bounds set by ttf, so the limiter actively clips (fct_plus/minus<1)
+    ! and the b1/b2/b3 limiting logic is genuinely exercised, not just multiplied by 1.
+    ! MUST match the FESOM2 oracle src/fesom_advhor_dump.F90 exactly.
+    allocate(ttfAB(nl-1, mesh%nod2D))
+    do n = 1, mesh%nod2D
+        lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
+        do nz = 1, nl-1
+            ttfAB(nz, n) = 20.0_WP*sin(8.0_WP*lon)*cos(6.0_WP*lat) &
+                         + 10.0_WP*sin(5.0_WP*lon)*cos(1.5_WP*real(nz, WP))
+        end do
+    end do
+
+    ! Prescribe analytic vertical velocity Wvel at nodes (nl interfaces). MUST match
+    ! FESOM2 src/fesom_advhor_dump.F90 exactly. Sign varies in space (sin 2*lon) and
+    ! depth (cos 0.3*nz) so both upwind branches (W>0 / W<0) and the QR4C 4th-order
+    ! interior are exercised.
+    allocate(wvel(nl, mesh%nod2D))
+    do n = 1, mesh%nod2D
+        lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
+        do nz = 1, nl
+            wvel(nz, n) = 1.0e-4_WP*sin(2.0_WP*lon)*cos(lat)*cos(0.3_WP*real(nz, WP))
         end do
     end do
 
@@ -120,6 +200,87 @@ program fesom_advhordump
     dttf_m = 0.0_WP; dttf_v = 0.0_WP
     call oce_tra_adv_flux2dtracer(dt, dttf_m, dttf_v, aflux_m, flux_v, mesh)
 
+    ! --- VERTICAL advection: upw1 + qr4c, scatter -> del_ttf_advvert ---
+    ! Scatter with a zero horizontal flux so only the vertical branch contributes;
+    ! dttf_v here is the throwaway dttf_h argument (stays 0), the gated output is
+    ! dttf_vu/dttf_vq.  oce_tra_adv_flux2dtracer:
+    !   del_ttf_advvert(nz,n) += (flux_v(nz,n)-flux_v(nz+1,n))*dt/areasvol(nz,n)
+    allocate(aflux_vu(nl, mesh%nod2D), aflux_vq(nl, mesh%nod2D))
+    allocate(dttf_vu(nl-1, mesh%nod2D), dttf_vq(nl-1, mesh%nod2D))
+    allocate(zero_h(nl-1, mesh%edge2D)); zero_h = 0.0_WP
+
+    call adv_tra_ver_upw1(wvel, ttf, mesh, aflux_vu, o_init_zero=.true.)
+    dttf_v = 0.0_WP; dttf_vu = 0.0_WP
+    call oce_tra_adv_flux2dtracer(dt, dttf_v, dttf_vu, zero_h, aflux_vu, mesh)
+
+    call adv_tra_ver_qr4c(wvel, ttf, mesh, num_ord, aflux_vq, o_init_zero=.true.)
+    dttf_v = 0.0_WP; dttf_vq = 0.0_WP
+    call oce_tra_adv_flux2dtracer(dt, dttf_v, dttf_vq, zero_h, aflux_vq, mesh)
+
+    ! =====================================================================
+    ! M1.3 FCT (Zalesak) path. pi namelist.tra tracers 1/2:
+    !   tra_adv_hor='MFCT'(opth=0.0), tra_adv_ver='QR4C'(optv=1.0), tra_adv_lim='FCT'.
+    ! Mirror do_oce_adv_tra's FCT branch (oce_adv_tra_driver.F90:111-347):
+    !   LO = UPW1(ttf) horiz + vert -> fct_LO ; HO antidiffusive = {MFCT(ttfAB)-LO,
+    !   QR4C(ttfAB)-LO} ; oce_tra_adv_fct clips ; oce_tra_adv_flux2dtracer(use_lo).
+    ! edge_up_dn_grad (eudg) is the gradient of TTF (values), NOT ttfAB — FESOM2
+    ! init_tracers_AB fills it from values (oce_tracer_mod.F90:127, the valuesAB
+    ! variant is commented out), then MFCTs valuesAB with it. So eudg=grad(ttf) is
+    ! reused for the MFCT(ttfAB) reconstruction.
+    ! =====================================================================
+    allocate(aflux_mfct(nl-1, mesh%edge2D))
+    allocate(fct_LO(nl-1, mesh%nod2D), fct_ttf_max(nl-1, mesh%nod2D), fct_ttf_min(nl-1, mesh%nod2D))
+    allocate(fct_plus(nl-1, mesh%nod2D), fct_minus(nl-1, mesh%nod2D))
+    allocate(adf_h(nl-1, mesh%edge2D), adf_v(nl, mesh%nod2D))
+    allocate(aflux_h_ho(nl-1, mesh%edge2D), aflux_v_ho(nl, mesh%nod2D))
+    allocate(dttf_h_fct(nl-1, mesh%nod2D), dttf_v_fct(nl-1, mesh%nod2D))
+
+    ! standalone MFCT high-order horizontal flux from ttf (num_ord=0.75): gates the
+    ! MFCT kernel (no bottom clamp) independently of FCT (mirrors the MUSCL standalone).
+    call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, aflux_mfct, eudg, o_init_zero=.true.)
+
+    ! (1) low-order upwind horizontal flux from ttf -> adf_h
+    call adv_tra_hor_upw1(vel, ttf, mesh, adf_h, o_init_zero=.true.)
+    ! (2) fct_LO = scatter of the LO horizontal flux over edges
+    fct_LO = 0.0_WP
+    do e2 = 1, mesh%edge2D
+        enodes = mesh%edges(:, e2)
+        el     = mesh%edge_tri(:, e2)
+        nl1 = mesh%nlevels(el(1))-1; nu1 = mesh%ulevels(el(1)); nl2 = 0; nu2 = 0
+        if (el(2) > 0) then
+            nl2 = mesh%nlevels(el(2))-1; nu2 = mesh%ulevels(el(2))
+        end if
+        nl12 = max(nl1, nl2); nu12 = nu1
+        if (nu2 > 0) nu12 = min(nu1, nu2)
+        do nz = nu12, nl12
+            fct_LO(nz, enodes(1)) = fct_LO(nz, enodes(1)) + adf_h(nz, e2)
+            fct_LO(nz, enodes(2)) = fct_LO(nz, enodes(2)) - adf_h(nz, e2)
+        end do
+    end do
+    ! (3) low-order upwind vertical flux from ttf -> adf_v
+    call adv_tra_ver_upw1(wvel, ttf, mesh, adf_v, o_init_zero=.true.)
+    ! (4) finish the low-order solution (combine horiz accumulation + vert flux)
+    do n = 1, mesh%nod2D
+        nu1 = mesh%ulevels_nod2D(n); nl1 = mesh%nlevels_nod2D(n)
+        do nz = nu1, nl1-1
+            fct_LO(nz,n) = (ttf(nz,n)*mesh%hnode(nz,n) &
+                          + (fct_LO(nz,n) + (adf_v(nz,n)-adf_v(nz+1,n)))*dt/mesh%areasvol(nz,n)) &
+                          / mesh%hnode_new(nz,n)
+        end do
+    end do
+    ! (exchange_nod(fct_LO) — no-op at 1 rank)
+    ! (5) high-order antidiffusive horizontal flux: MFCT(ttfAB)-LO (opth, o_init_zero=.false.)
+    call adv_tra_hor_mfct(vel, ttfAB, mesh, opth, adf_h, eudg, o_init_zero=.false.)
+    ! (6) high-order antidiffusive vertical flux: QR4C(ttfAB)-LO (optv, o_init_zero=.false.)
+    call adv_tra_ver_qr4c(wvel, ttfAB, mesh, optv, adf_v, o_init_zero=.false.)
+    aflux_h_ho = adf_h; aflux_v_ho = adf_v          ! capture pre-clip antidiffusive fluxes
+    ! (7) FCT limiter: clips adf_h/adf_v in place; fills fct_ttf_max/min + fct_plus/minus
+    call oce_tra_adv_fct(dt, ttf, fct_LO, adf_h, adf_v, fct_ttf_min, fct_ttf_max, fct_plus, fct_minus, mesh)
+    ! (8) scatter clipped fluxes with the low-order reconstruction -> del_ttf_*_fct
+    dttf_h_fct = 0.0_WP; dttf_v_fct = 0.0_WP
+    call oce_tra_adv_flux2dtracer(dt, dttf_h_fct, dttf_v_fct, adf_h, adf_v, mesh, &
+                                  use_lo=.true., ttf=ttf, lo=fct_LO)
+
     ! --- dump (same order/names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'ttf',                    real(ttf, MP))
@@ -133,6 +294,30 @@ program fesom_advhordump
     call wr_r2(u, 'del_ttf_advhoriz_upw1',  real(dttf_u, MP))
     call wr_r2(u, 'adv_flux_hor_muscl',     real(aflux_m, MP))
     call wr_r2(u, 'del_ttf_advhoriz_muscl', real(dttf_m, MP))
+    call wr_r2(u, 'wvel',                   real(wvel, MP))
+    call wr_r2(u, 'zbar_3d_n',              mesh%zbar_3d_n(1:nl,   1:mesh%nod2D))
+    call wr_r2(u, 'Z_3d_n',                 mesh%Z_3d_n(1:nl-1,    1:mesh%nod2D))
+    call wr_r2(u, 'area',                   mesh%area(1:nl,        1:mesh%nod2D))
+    call wr_r2(u, 'adv_flux_ver_upw1',      real(aflux_vu, MP))
+    call wr_r2(u, 'del_ttf_advvert_upw1',   real(dttf_vu, MP))
+    call wr_r2(u, 'adv_flux_ver_qr4c',      real(aflux_vq, MP))
+    call wr_r2(u, 'del_ttf_advvert_qr4c',   real(dttf_vq, MP))
+    ! --- M1.3 FCT fields ---
+    call wr_r2(u, 'adv_flux_hor_mfct',      real(aflux_mfct, MP))
+    call wr_r2(u, 'ttfAB',                  real(ttfAB, MP))
+    call wr_r2(u, 'hnode',                  mesh%hnode(1:nl-1, 1:mesh%nod2D))
+    call wr_r2(u, 'hnode_new',              mesh%hnode_new(1:nl-1, 1:mesh%nod2D))
+    call wr_r2(u, 'fct_LO',                 real(fct_LO, MP))
+    call wr_r2(u, 'adv_flux_hor_fct_ho',    real(aflux_h_ho, MP))
+    call wr_r2(u, 'adv_flux_ver_fct_ho',    real(aflux_v_ho, MP))
+    call wr_r2(u, 'fct_ttf_max',            real(fct_ttf_max, MP))
+    call wr_r2(u, 'fct_ttf_min',            real(fct_ttf_min, MP))
+    call wr_r2(u, 'fct_plus',               real(fct_plus, MP))
+    call wr_r2(u, 'fct_minus',              real(fct_minus, MP))
+    call wr_r2(u, 'adv_flux_hor_fct',       real(adf_h, MP))
+    call wr_r2(u, 'adv_flux_ver_fct',       real(adf_v, MP))
+    call wr_r2(u, 'del_ttf_advhoriz_fct',   real(dttf_h_fct, MP))
+    call wr_r2(u, 'del_ttf_advvert_fct',    real(dttf_v_fct, MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_advhordump: wrote '//trim(out_path)
 

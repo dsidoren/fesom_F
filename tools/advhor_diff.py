@@ -8,10 +8,15 @@ src/fesom_advhor_dump.F90 and FESOM3 src/infra/mod_advhor_dump.F90:
   char8  "FADVHDMP" | int32 nod2D,elem2D,edge2D,nl
   records: char24 name | int32 dtype(0=real64,1=int32) | int32 d1,d2 | d1*d2 values
 
-The gated outputs are adv_flux_hor_{upw1,muscl} (edge fluxes) and
-del_ttf_advhoriz_{upw1,muscl} (the node tendency, oce_ale_tracer.F90:232). The
-intermediates (ttf, vel, helem, nboundary_lay, edge_up_dn_tri, tr_xy,
-edge_up_dn_grad) are dumped too so any divergence is localised.
+The gated outputs are adv_flux_hor_{upw1,muscl} + del_ttf_advhoriz_{upw1,muscl}
+(M1.1 horizontal), adv_flux_ver_{upw1,qr4c} + del_ttf_advvert_{upw1,qr4c} (M1.2
+vertical; the node tendency, oce_ale_tracer.F90:240), and the M1.3 FCT (Zalesak)
+path: fct_LO, the clipped adv_flux_{hor,ver}_fct, the limiter internals (fct_ttf_
+max/min bounds, fct_plus/minus factors, pre-clip *_fct_ho fluxes) and the final
+del_ttf_{advhoriz,advvert}_fct, plus the standalone adv_flux_hor_mfct and the
+node thicknesses hnode/hnode_new. The intermediates (ttf, ttfAB, vel, helem,
+nboundary_lay, edge_up_dn_tri, tr_xy, edge_up_dn_grad, wvel, zbar_3d_n, Z_3d_n,
+area) are dumped too so any divergence is localised.
 
 Usage:  advhor_diff.py <fesom2.bin> <fesom3.bin> [--signal 0.0]
 Exit 0 iff every common field matches within the signal threshold (default 0 ==
@@ -110,8 +115,8 @@ def main():
     if extra3:
         print(f"\n(only in FESOM3, ignored: {extra3})")
 
-    print("\n" + ("M1.1 ADVECTION BYTE-GATE: PASS (max|delta|=0)" if ok else
-                  "M1.1 ADVECTION BYTE-GATE: FAIL"))
+    print("\n" + ("TRACER-ADVECTION BYTE-GATE (M1.1 horiz + M1.2 vert + M1.3 FCT): PASS (max|delta|=0)" if ok else
+                  "TRACER-ADVECTION BYTE-GATE (M1.1 horiz + M1.2 vert + M1.3 FCT): FAIL"))
     sys.exit(0 if ok else 1)
 
 
