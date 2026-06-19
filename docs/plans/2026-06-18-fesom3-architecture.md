@@ -304,11 +304,17 @@ dwarf `oce_adv_tra_*`; **math from FESOM2** `oce_adv_tra_*.F90`.
       `del_ttf_{advhoriz,advvert,}_step` (FCT) + `..._stepnon`/`del_ttf_step_non` (non-FCT).
       `use_wsplit` forced `.false.` (implicit w-split path = M2). Debug `-check all` clean. See L12.
 
-#### Task M1.5: Multi-rank byte-gate
+#### Task M1.5: Multi-rank byte-gate — ⤳ FOLDED INTO M2.12 (decision 2026-06-19)
 
-**Files:** Modify: tests/scripts
-- [ ] run `pi` on `dist_2`, `dist_8`; exchange-and-compare probe clean
-- [ ] **Gate:** per-substep `max|Δ|=0` multi-rank; **M1 exit gate**; tag `m1`
+A multi-rank advection byte-gate needs the **local-mesh remap** (global→local numbering,
+connectivity, `nod_in_elem2D` order, geometry, com-structs) — which `read_mesh` does NOT build
+(`mod_mesh_read.F90:28` errors at `npes/=1`); it was scheduled at **M2.12**, where the
+WHOLE-model multi-rank byte-match (which subsumes advection) lives. Doing the remap now just to
+gate advection, then re-gating the whole model at M2.12, is duplicated effort. So:
+- **M1 EXIT = the 1-rank anchor** (D0/D7 "serial == 1-rank MPI" is the bit-identity gold
+  standard): M1.1–M1.4 `max|Δ|=0` on pi 1-rank ⇒ **tag `m1`** on M1.4. ✅ DONE
+- The multi-rank advection gate (pi `dist_2`/`dist_8`; exchange-and-compare probe; lift the
+  kernels' dropped halo exchanges + myDim/eDim loop bounds) is now part of **M2.12** below.
 
 ### MILESTONE 2 — Minimal ocean dynamical core (ARCHITECTURAL MVP)
 
@@ -430,7 +436,17 @@ in the D6 sequence + the oracle's SW_AB dump).
 - [ ] **Gate:** **per-substep `max|Δ|=0` vs FESOM2 on single-rank CORE2**
 
 #### Task M2.12: Multi-rank + production validation (MVP exit)
-**Files:** Modify: tests/scripts; `docs/HANDOFF.md`
+**Files:** Create: the local-mesh remap in `mod_mesh_read`/a new builder; Modify: tests/scripts; `docs/HANDOFF.md`
+- [ ] **local-mesh remap** (prerequisite for ALL multi-rank): from the global mesh + `dist_<NP>/`
+      (myList, com-structs already read), build the per-rank LOCAL mesh — remap global→local node/
+      elem/edge ids, local `elem2D_nodes`/`edges`/`edge_tri`, local `nod_in_elem2D` IN LOCAL ELEMENT
+      ORDER (L8), local geometry via `compute_geometry`. Replace the `npes/=1` error in
+      `mod_mesh_read.F90`. Byte-gate the local geometry per rank vs a multi-rank FESOM2 geom dump.
+- [ ] **M1 advection multi-rank gate (folded from M1.5):** lift the M1.1–M1.4 kernels/driver to
+      FESOM2's multi-rank structure — exchange_nod/elem of tr_xy/edge_up_dn_grad/fct_LO/fct_plus_minus/
+      del_ttf at the FESOM2 sites; scatter over `myDim_edge2D`/`myDim_nod2D`; then byte-gate
+      `del_ttf` on pi `dist_2`/`dist_8` vs a multi-rank FESOM2 advection reference (post-exchange
+      OWNED values, same partition); exchange-and-compare probe clean.
 - [ ] rest-stays-at-rest; SSH gravity wave at expected speed
 - [ ] **1/8/32-rank byte-match** T/S at step 200 (accept only `extrap_nod3D` diff); halo-identity clean
 - [ ] **production dt=1800 (reduced M2 namelist): PRIMARY gate = per-substep `max|Δ|=0` vs the FESOM2

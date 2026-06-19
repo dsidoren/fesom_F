@@ -4,9 +4,16 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 
 ## Where we are
 
-- **Milestone:** M0 (Foundation) — **COMPLETE ✓** (tag `m0`). 13/13 ctest green on
-  Intel dp + GNU dp; debug build (`-check all`) clean.
-- **M1 in progress.** **Geometry byte-gate CLOSED ✓ (on pi)** — FESOM3 mesh geometry is
+- **Milestone:** M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
+  M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
+  FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
+  (decision 2026-06-19): a multi-rank advection byte-gate needs the local-mesh remap
+  (global→local numbering/connectivity/geometry), which `read_mesh` does not build yet
+  (`mod_mesh_read.F90:28` errors at `npes/=1`); M2.12 builds it for the whole-model
+  multi-rank byte-match, which subsumes advection. The 1-rank anchor IS the D0/D7 bit-identity
+  gold standard ("serial == 1-rank MPI"). **Next: M2** (dynamics; reduced-M2 oracle namelist).
+  M0 (Foundation) — **COMPLETE ✓** (tag `m0`); 13/13 ctest green Intel+GNU dp, debug clean.
+- **M1 detail (all CLOSED ✓ on pi 1-rank).** **Geometry byte-gate** — FESOM3 mesh geometry is
   `max|Δ|=0` vs FESOM2 on pi (1-rank): elem_area, elem_cos, metric_factor, gradient_sca,
   edge_dxdy, edge_cross_dxdy, area/areasvol(+inv), coord_nod2D, elem2D_nodes, edges,
   edge_tri, all level arrays. Run it: `tools/run_geom_gate.sh`.
@@ -47,7 +54,7 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `tools/run_advhor_gate.sh` (41 fields). PASSED first run; debug `-check all` clean. valuesAB
   exactly = 1.6·values−0.6·valuesold (no L7-fold), FCT vs non-FCT del_ttf differ by max 26.
   See LESSONS L12.
-  **Next: M1.5** (multi-rank tracer advection + halo of del_ttf/tr_xy/fct_LO; then tag m1).
+  **M1 COMPLETE at the 1-rank anchor → tag `m1`.** M1.5 (multi-rank) folded into M2.12 (above).
 - **Done:** M0.1 ✓ build. M0.2 ✓ params/. M0.3 ✓ types/. M0.4 ✓ mod_partitioning
   (par_init/par_ex/set_partition; dist_<NP>/ reader transcribed from oce_mesh.F90;
   1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
@@ -73,10 +80,9 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   operator-diff `max|Δ|=0` on valuesAB + del_ttf_{advhoriz,advvert,}_step (FCT) + the
   non-FCT (do_zero_flux) del_ttf vs FESOM2's REAL driver on pi 1-rank. Oracle now runs
   FESOM2's own init_tracers_AB + do_oce_adv_tra (shim extended, libfesom.so rebuilt).
-- **Current task:** M1.5 — multi-rank tracer advection. Lift the 1-rank assumptions in the
-  M1.1–M1.4 kernels/driver (loop bounds myDim vs myDim+eDim; the dropped halo exchanges of
-  tr_xy/edge_up_dn_grad/fct_LO/del_ttf; per-node accumulation order) and byte-gate on dist_2/
-  dist_8 vs a multi-rank FESOM2 reference. Then tag `m1`.
+- **Current task:** M2.1 — `pressure_bv` (EOS + hydrostatic pressure + N²). First dynamics
+  kernel; gate `max|Δ|=0` on density/hpressure/bvfreq vs FESOM2 (reduced-M2 oracle namelist:
+  PP/no-GM/no-Redi/linfs/opt_visc=7). M1's multi-rank advection gate rides M2.12.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -210,18 +216,25 @@ The whole byte-gate pipeline is validated end-to-end:
 
 ## Next task
 
-M1.5 — multi-rank tracer advection (then tag `m1`). The M1.1–M1.4 kernels + driver are
-1-rank only (myDim_* == global): they drop the FESOM2 halo exchanges (tr_xy/edge_up_dn_grad
-after the MUSCL fill; fct_LO after the LO build; fct_plus/minus in the FCT limiter; del_ttf at
-the loop tail) and loop over `myDim+eDim` where FESOM2 splits owned vs halo. Lift those: add
-the `exchange_nod`/`exchange_elem` calls (mod_halo) at the FESOM2 sites, fix loop bounds
-(scatter over `myDim_edge2D`/`myDim_nod2D`, accumulate into halo, exchange), and byte-gate on
-pi `dist_2` + `dist_8` vs a MULTI-RANK FESOM2 reference. NB the per-node/edge accumulation
-ORDER changes multi-rank (L8): the gate target is the post-exchange owned values, and the
-reference must use the SAME partition. Also still 1-rank-deferred from M1.1–M1.3: the FCT
-`AUX`/`edge_up_dn_grad`-scratch cavity caveat (L11) needs a cavity mesh; `enforce_cw_orientation`
-needs a swap mesh (L8). Both can ride the M2.11 CORE2 gate instead. After M1.5: tag `m1`, then
-M2 (dynamics: density/pressure/SSH/momentum + the reduced-M2 oracle namelist).
+M2.1 — `pressure_bv` (EOS + hydrostatic pressure + N²), the first dynamics kernel. Create
+`src/oce/oce_pressure_bv.F90` transcribing FESOM2 `oce_ale_pressure_bv.F90`: full Jackett-
+McDougall EOS in SPLIT form (never linearize α/β — the bits depend on the factorization);
+density anomaly subtracts the `density_ref(nz,node)` ARRAY (not the scalar); N²/bvfreq divides
+by scalar `density_0=1030`; the top-down `hpressure` integration lives here; N² horizontal
+smoothing `smooth_nod` (pin `N2smth_hidx=1`, `N2smth_v=.false.`, one halo exchange/cycle). Omit
+MLD/dbsfc (KPP-only). **Gate:** operator-diff `max|Δ|=0` on density/hpressure/bvfreq vs FESOM2
+under the REDUCED-M2 oracle namelist (PP / no-GM / no-Redi / linfs / opt_visc=7 — a SEPARATE
+namelist from the shipped KPP/GM pi config; see "Canonical references" + L6). New oracle work:
+the reduced-namelist run + a density/pressure/bvfreq dump shim (extend the dump pattern).
+
+**M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
+numbering/connectivity/`nod_in_elem2D` order/geometry, com-structs) needed for ANY multi-rank
+byte-match, then gates the WHOLE model (incl. advection) on 1/8/32-rank. Re-confirm there that
+the M1.1–M1.4 kernels' dropped halo exchanges (tr_xy/edge_up_dn_grad/fct_LO/fct_plus_minus/
+del_ttf) + loop bounds (myDim vs myDim+eDim) are correctly lifted; the gate target is the
+post-exchange OWNED values on the SAME partition (L8 accumulation-order caveat). Also deferred
+to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity caveat (L11);
+`enforce_cw_orientation`'s swap path (L8, pi has 0 swaps).
 
 ## Open notes / risks
 
