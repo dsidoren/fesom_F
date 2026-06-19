@@ -305,3 +305,85 @@ Unlike M1.1–M1.3 (the shim INLINED the orchestration), M1.4 drives FESOM2's OW
   components and passes them to the WP kernels; legal because MP==WP==8 at the DP/SP anchor (the
   pointer/argument match is on the kind integer 8, not the parameter NAME). The `tracers`/`w`/`we`
   dummies need `target`. Revisit only for FP16 (WP=2, MP=4) — a deferred precision decision.
+
+## L13 — Pressure/EOS/N² (M2.1): split EOS + the horizontal smoother both byte-match (PASSED first try)
+
+M2.1 (`pressure_bv`: split Jackett-McDougall EOS → `density_m_rho0`, top-down `hpressure`, N²
+`bvfreq` + the horizontal `smooth_nod` sweep) hit `max|Δ|=0` vs FESOM2 on the FIRST gate run, like
+all of M1. The 10 fields (3 inputs T/S/density_ref, 3 depths, density_m_rho0, hpressure, bvfreq raw
++ smoothed) all matched. Reusable specifics:
+
+- **`density_ref == density_0` on pi.** `use_density_ref` defaults `.false.`, so `arrays_init` sets
+  `density_ref = density_0 = 1030` and `init_ref_density` is NOT called (`oce_setup_step.F90:218`).
+  The plan's "subtract the `density_ref(nz,node)` ARRAY, not the scalar" is therefore bit-TRIVIAL on
+  pi (the array is a constant 1030), but transcribe the array form anyway — a cavity/`use_density_ref`
+  mesh (M2.11) makes it non-constant. N² divides by the SCALAR `density_0`; the PGF anomaly subtracts
+  the ARRAY. Two different density_0 uses in one routine — don't conflate.
+
+- **The horizontal `smooth_nod` (mass-matrix sweep) byte-matched by faithful transcription** — the one
+  horizontally-coupled step in M2. Same reason as M1 (L9): it weights by `elem_area` (geom-proven) and
+  iterates `nod_in_elem2D(:,n)` / `elem2D_nodes(:,el)` (order area-gate-proven). The `1/(3*Σarea)`
+  runtime reciprocal matches because both codes divide the same byte-identical operand (L7/L10). 1-rank:
+  the per-cycle `exchange_nod(bvfreq)` is a no-op, dropped (lifted at M2.12). With `N2smth_hidx=1` only
+  the first sweep runs (the `do q=1,N_smooth-1` loop is empty). The smoother changed 100% of valid
+  entries on the prescribed T/S, so it is a NON-vacuous gate (verify: `max|bvfreq_raw - bvfreq|>0`).
+
+- **Dump bvfreq BOTH pre- and post-smoothing (`bvfreq_raw` + `bvfreq`) to localize.** A two-call toggle
+  (`pressure_bv` with `N2smth_h=.false.` then `.true.`) separates an EOS/N²-difference bug (shows in
+  bvfreq_raw) from a smoother bug (shows in bvfreq-but-not-raw). Same "gate every intermediate" rule as
+  M1. density_m_rho0/hpressure are identical across the two calls (smoothing only touches bvfreq).
+
+- **The caller pre-zeros the three outputs; the kernel does NOT.** FESOM2 `pressure_bv` writes only
+  valid levels `nz=nzmin..nzmax-1` (hpressure/density) / `..nzmax` (bvfreq) and leaves the below-bottom
+  entries untouched (not zeroed at allocation — heap, not `-init=zero` stack). So the dump's below-bottom
+  region is indeterminate unless zeroed. BOTH the FESOM2 shim and the FESOM3 driver `=0` the outputs
+  before calling → deterministic 0 there → the rectangular dump compares clean. Faithful: the FESOM3
+  kernel is `intent(inout)` and also doesn't zero (matches FESOM2); the zeroing is a gate-harness concern.
+
+- **Force the gate knobs in the shim; KPP/GM vs reduced-M2 does NOT change the EOS fields.** EOS density
+  is a pure function of T/S/Z (Jackett-McDougall), so the shipped KPP/GM pi namelist gives the same
+  density/hpressure/bvfreq as reduced-M2 — no need to assemble the reduced namelist for M2.1. The shim
+  pins only what `pressure_bv` reads: `state_equation=1`, `which_ale='linfs'` (routes hpressure through
+  this routine; zstar/zlevel compute it in `pressure_force_4_zxxxx`, M2.x), `N2smth_v=.false.`/
+  `N2smth_hidx=1`, `ldiag_dMOC=.false.` (skip density_dmoc), `mix_scheme_nmb=-1` (`mixing_kpp=.false.`
+  → dbsfc untouched). MLD1/2/3 + dbsfc + dMOC are KPP-only diagnostics that do NOT feed the gated fields
+  (density_m_rho0 is computed BEFORE rho_surf/dbsfc1; the MLD logic only READS bvfreq/rhopot) — omitted.
+
+- **Shared-lib rebuild: `make fesom.x` rebuilds `libfesom.so` but does NOT relink the exe — and that's
+  fine.** The shim lives in `libfesom.so`; `fesom.x` resolves it at runtime (`ldd` → build/lib64). After
+  editing a shim, `make -C build fesom.x` updates the `.so` (timestamp moves) while the exe stays old;
+  running it loads the new `.so`. Confirm with `nm -D libfesom.so | grep <shim_symbol>`. (Same as M1.4.)
+
+## L14 — Hydrostatic PGF (M2.2) byte-matched; and the configure.sh `--debug` Release-clobber footgun
+
+M2.2 (`oce_pgf.F90` `pressure_force_4_linfs_fullcell`: the `gradient_sca` contraction of the M2.1
+`hpressure` → element `pgf_x`/`pgf_y`) hit `max|Δ|=0` vs FESOM2 on the FIRST gate run, like all of M1
++ M2.1. The PGF gate is now the 2-field tail (pgf_x/pgf_y) of the same `tools/run_pressure_gate.sh`
+(12 fields total). Specifics:
+
+- **PGF is the SAME contraction shape as M1.1's `tracer_gradient_elements`, on a pre-gated input.**
+  `pgf_{x,y}(nz,elem) = Σ_k gradient_sca({1:3,4:6},elem)·hpressure(nz,elnodes_k)/density_0`. Both
+  operands were already `max|Δ|=0`: `gradient_sca` from the geometry gate, `hpressure` from the M2.1
+  pass (computed in the smoothed pressure_bv call — hpressure is identical across the raw/smoothed
+  calls, only bvfreq changes, L13). So faithful transcription "just works" (the L9 transitive-gate
+  pattern again). `density_0` is a RUNTIME divisor but byte-identical on both sides (=1030), so the
+  `-no-prec-div` reciprocal matches (L7/L10). Transcribe VERBATIM: the `/density_0` is INSIDE the sum
+  (each of the 3 products divided, then summed), not `sum(...)/density_0`. The shim calls the REAL
+  FESOM2 `pressure_force_4_linfs_fullcell` directly (the `pressure_force_4_linfs` dispatcher is pure
+  namelist branching — no numerics — so it is not gated, cf. M1.4 which DID gate `do_oce_adv_tra`
+  because that dispatch had order-knob numerics). Caller pre-zeros pgf_x/pgf_y (the kernel writes only
+  `ule..nle`; FESOM2 leaves below-bottom at its allocation-zero), same as the M2.1 output treatment.
+  Gate STRENGTH check: pgf is 66% non-zero at ~1e-5 m/s² (realistic PGF accel) on the prescribed T/S.
+
+- **`configure.sh --debug` overwrote the Release anchor build dir → a spurious `area=3.7e-4` gate FAIL.**
+  The footgun: `configure.sh` named the build dir `build_<compiler>_<precision>` with NO build-type
+  suffix, so `--debug` reconfigured **build_intel_dp itself to CMAKE_BUILD_TYPE=Debug** and rebuilt its
+  binaries at `-O0`/no-`-no-prec-div`. Running a parallel `--debug` build alongside the M1 advhor gate
+  meant the gate executed the freshly-clobbered DEBUG `fesom_advhordump` → every FP field diverged,
+  with `area` at the tell-tale `3.66e-4` (the exact L10 Debug-vs-Release signature). It LOOKED like an
+  M2.2 regression in M1; it was a build-dir collision. **Fix:** `configure.sh` now appends `_debug` to
+  the build dir for Debug builds (`build_intel_dp_debug`), so Debug never touches the Release anchor.
+  **Diagnosis tell:** if a previously-`max|Δ|=0` gate suddenly shows `area≈3.7e-4` + diffs on EVERY FP
+  field, you are running a Debug binary — check `CMAKE_BUILD_TYPE` in the build dir's CMakeCache.txt and
+  the binary mtime/size (Debug `fesom_advhordump` ~3.1 MB vs Release ~1.75 MB) BEFORE suspecting a code
+  regression. (The real M2.2 gates, run against the restored Release anchor, are all `max|Δ|=0`.)

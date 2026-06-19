@@ -4,7 +4,12 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 
 ## Where we are
 
-- **Milestone:** M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
+- **Milestone:** M2 (minimal ocean dynamical core) — **IN PROGRESS.** **M2.1 `pressure_bv` +
+  M2.2 hydrostatic PGF COMPLETE ✓** (M2.1: EOS split-form `density_m_rho0` + top-down `hpressure` +
+  N²/`bvfreq` raw+smoothed; M2.2: `gradient_sca`-contraction `pgf_x`/`pgf_y`; all `max|Δ|=0` vs FESOM2
+  on pi 1-rank; one gate `tools/run_pressure_gate.sh`, 12 fields). **Next: M2.3** (`oce_dyn_velrhs.F90`,
+  Coriolis + AB2 + PGF, partial vel_rhs assembly). M1 (tracer advection) — **COMPLETE ✓ at the 1-rank
+  anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
   (decision 2026-06-19): a multi-rank advection byte-gate needs the local-mesh remap
@@ -80,9 +85,30 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   operator-diff `max|Δ|=0` on valuesAB + del_ttf_{advhoriz,advvert,}_step (FCT) + the
   non-FCT (do_zero_flux) del_ttf vs FESOM2's REAL driver on pi 1-rank. Oracle now runs
   FESOM2's own init_tracers_AB + do_oce_adv_tra (shim extended, libfesom.so rebuilt).
-- **Current task:** M2.1 — `pressure_bv` (EOS + hydrostatic pressure + N²). First dynamics
-  kernel; gate `max|Δ|=0` on density/hpressure/bvfreq vs FESOM2 (reduced-M2 oracle namelist:
-  PP/no-GM/no-Redi/linfs/opt_visc=7). M1's multi-rank advection gate rides M2.12.
+- **M2.1 `pressure_bv` byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2 on
+  `density_m_rho0` (EOS PGF density anomaly), `hpressure` (top-down hydrostatic integration) AND
+  `bvfreq` BOTH raw (pre-smoothing) and smoothed (the horizontal `smooth_nod` mass-matrix sweep,
+  N2smth_hidx=1), plus every input (temp, salt, density_ref, zbar_3d_n, Z_3d_n, hnode). Built
+  `src/oce/oce_pressure_bv.F90` (`pressure_bv` + `densityJM_components` split EOS + `smooth_nod`);
+  added density_m_rho0/density_ref/hpressure/bvfreq to `t_dyn_work` (mod_dyn; recomputed each step,
+  not serialized). Gate `tools/run_pressure_gate.sh` (FESOM2 1-rank shim + FESOM3 driver +
+  `pressure_diff.py`). PASSED first run; smoother changed 100% of valid entries (non-vacuous);
+  Debug `-check all` clean; M1 advhor gate + 13/13 ctest still green. See LESSONS L13.
+- **M2.2 hydrostatic PGF byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2 on `pgf_x`/`pgf_y`,
+  the element pressure-gradient force = `Σ_k gradient_sca(k,elem)·hpressure(nz,elnodes_k)/density_0`
+  (the M2.1 `hpressure` contracted with the geometry-gated `gradient_sca`, same shape as M1.1
+  `tracer_gradient_elements`). Built `src/oce/oce_pgf.F90` (`pressure_force_4_linfs_fullcell`); added
+  `pgf_x`/`pgf_y` to `t_dyn_work` (mod_dyn; recomputed each step, not serialized). Same gate
+  `tools/run_pressure_gate.sh` (now 12 fields; extended the FESOM2 shim to call the REAL
+  `pressure_force_4_linfs_fullcell` + the FESOM3 driver to run `oce_pgf`). PASSED first run; pgf 66%
+  non-zero at ~1e-5 m/s² (non-vacuous); Debug `-check all` clean; M1 advhor gate + 13/13 ctest still
+  green. **Also fixed a `configure.sh` footgun** (`--debug` was clobbering the Release `build_intel_dp`;
+  now goes to `build_intel_dp_debug`). See LESSONS L14.
+- **Current task:** M2.3 — `compute_vel_rhs` Coriolis + AB2 + PGF partial assembly (`oce_dyn_velrhs.F90`):
+  AB2 actual coeffs `ab1=-(0.5+ε)`/`ab2=(1.5+ε)`, ε=0.1 (dt=1800 trap); first-step Euler `ff=1.0`;
+  Coriolis init of `UV_rhsAB(1,1,·)` + AB2 blend + add the M2.2 PGF / SSH-gradient. **Partial gate**
+  `max|Δ|=0` on the AB2-blend + Coriolis + PGF pieces (the FULL `UV_rhs` gate is M2.4, after
+  `momentum_adv_scalar` adds into the same slot). M1's multi-rank advection gate rides M2.12.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -181,7 +207,10 @@ inputs and drives the REAL FESOM2 kernels, so it gates actual FESOM2 code:
 cd build_intel_dp && ctest --output-on-failure                   # self-tests
 ```
 Anchor = Intel + DP + FESOM2-v2.7.3-exact flags (see docs/LESSONS.md L1). Build dirs:
-`build_<compiler>_<precision>/`. Login-node runs of 1–8 ranks are fine for self-tests.
+`build_<compiler>_<precision>/` (Release); `--debug` builds into `build_<compiler>_<precision>_debug/`
+(kept SEPARATE so a Debug binary never clobbers the Release anchor and silently breaks the byte-gates —
+the L14 footgun, now fixed in configure.sh). Login-node runs of 1–8 ranks are fine for self-tests.
+Debug is for `-check all` OOB/FPE only, NOT byte-comparable to the Release oracle (L10).
 
 ## Oracle — PROVEN RUNNABLE (2026-06-19) ✅
 
@@ -215,33 +244,66 @@ The whole byte-gate pipeline is validated end-to-end:
   2022.0.1 + openmpi 4.1.2-intel; gcc 11.2.0 + openmpi 4.1.2-gcc. netCDF loaded (only
   needed M2.10+). Login `gfortran` is 8.5.0 with no MPI — always build via `configure.sh`.
 
+## M2.1 pressure/EOS/N² + M2.2 PGF byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.3+)
+
+Same end-of-`ocean_setup` 1-rank shim pattern as the M1 advection gate, the FIRST dynamics
+kernel. `pressure_bv` runs DURING the timestep but 1-rank forcing hangs on the login node (L8),
+so the shim fires at the end of `ocean_setup` (after `init_ale` built Z_3d_n/zbar_3d_n,
+`init_thickness_ale` built hnode, `arrays_init` allocated+set density_ref=density_0), BEFORE
+forcing. It PRESCRIBES analytic T/S and drives FESOM2's REAL `pressure_bv`, so it gates actual
+FESOM2 code:
+- **FESOM2 side:** `src/fesom_pressure_dump.F90` (NEW), wired at end of `ocean_setup`
+  (`oce_setup_step.F90`, AFTER `advhor_dump_write`), env-gated `FESOM_PRESSURE_DUMP`, npes==1,
+  STOPS. Sets `T/S = f(rotated coords, nz)`, FORCES the gate knobs (state_equation=1,
+  which_ale='linfs', N2smth_v=.false./N2smth_hidx=1, ldiag_dMOC=.false., mix_scheme_nmb=-1 to
+  skip dbsfc), then calls `pressure_bv` TWICE — once `N2smth_h=.false.` (raw bvfreq), once
+  `.true.` (smoothed). Library rebuilt: `make -C port2/fesom2/build fesom.x` rebuilds
+  `build/lib64/libfesom.so` (fesom.x loads it at runtime; the exe itself is not relinked, fine).
+- **FESOM3 side:** `src/oce/oce_pressure_bv.F90` (`pressure_bv` + `densityJM_components` split EOS
+  + `smooth_nod`), driver `src/drivers/fesom_pressuredump.F90` (builds Z_3d_n/zbar_3d_n/hnode like
+  fesom_advhordump, same analytic T/S, same two-call raw/smoothed toggle), `tools/pressure_diff.py`
+  + `tools/run_pressuredump_pi.sh` + `tools/run_pressure_gate.sh` — reuse the `mod_advhor_dump`
+  FADVHDMP binary format. Added density_m_rho0/density_ref/hpressure/bvfreq to `t_dyn_work`.
+- **Run:** `tools/run_pressure_gate.sh` → PASS (10 fields `max|Δ|=0`). Key facts in LESSONS L13:
+  density_ref==density_0 (use_density_ref=.false.); the smoother byte-matches by faithful
+  transcription (elem_area + nod_in_elem2D order are geom/area-proven, L9); the EOS split form +
+  the two-call raw/smoothed dump; caller pre-zeros the outputs (pressure_bv leaves below-bottom
+  entries as-is); cavity/use_density_ref branches transcribed but ungated on pi (M2.11).
+- **M2.2 extension (DONE):** the SAME gate now also covers the hydrostatic PGF. After the two
+  pressure_bv calls (hpressure unchanged by smoothing), both the shim and the FESOM3 driver pre-zero
+  `pgf_x`/`pgf_y`, call the full-cell PGF (`pressure_force_4_linfs_fullcell` — shim calls the REAL
+  FESOM2 routine, FESOM3 runs `oce_pgf`), and dump `pgf_x`/`pgf_y`. `pressure_diff.py` picks the two
+  new records up automatically (12 fields now). PGF is element-based (nl-1, elem2D), the
+  `gradient_sca`·`hpressure`/density_0 contraction — same shape as M1.1's tracer_gradient_elements,
+  both operands already gated, so `max|Δ|=0` first run. See LESSONS L14 (+ the configure.sh
+  `--debug` Release-clobber footgun fixed there).
+
 ## Next task
 
-M2.1 — `pressure_bv` (EOS + hydrostatic pressure + N²), the first dynamics kernel. Create
-`src/oce/oce_pressure_bv.F90` transcribing FESOM2 `oce_ale_pressure_bv.F90`: full Jackett-
-McDougall EOS in SPLIT form (never linearize α/β — the bits depend on the factorization);
-density anomaly subtracts the `density_ref(nz,node)` ARRAY (not the scalar); N²/bvfreq divides
-by scalar `density_0=1030`; the top-down `hpressure` integration lives here; N² horizontal
-smoothing `smooth_nod` (pin `N2smth_hidx=1`, `N2smth_v=.false.`, one halo exchange/cycle). Omit
-MLD/dbsfc (KPP-only). **Gate:** operator-diff `max|Δ|=0` on density/hpressure/bvfreq vs FESOM2.
+M2.3 — `compute_vel_rhs`: Coriolis + AB2 + PGF (partial vel_rhs assembly). Create
+`src/oce/oce_dyn_velrhs.F90` transcribing FESOM2 `compute_vel_rhs` (`oce_ale_vel_rhs.F90:35`), the
+non-advection part: Coriolis init of `UV_rhsAB(1,1,·)`, the AB2 blend of the previous-step `UV_rhsAB`,
+and adding the M2.2 PGF (`pgf_x`/`pgf_y`) + the SSH-gradient. **Byte-traps the plan flags:**
+- **AB2 ACTUAL coeffs** `ab1=-(0.5_WP+epsilon)`, `ab2=(1.5_WP+epsilon)` with **`epsilon=0.1`**
+  (`oce_ale_vel_rhs.F90:98-99`) — the `-0.5/1.5` base is only ε=0. (Same `ab_epsilon=0.1` already in
+  mod_config from M1.4; reuse it. L12 proved `1.5+0.1→1.6` is fold-safe, but gate it.)
+- **First-step Euler start** `if (lfirst.and.(.not.r_restart)) ff=1.0_WP` (`:287-289`) — omitting it
+  diverges the step-1 gate. `lfirst` is a `save` var; the gate must drive the FIRST call.
+- **`momentum_adv_scalar` is called from INSIDE `compute_vel_rhs`** (`:273`), adding into the SAME
+  `UV_rhsAB(1,1,·)` slot as Coriolis BEFORE the AB2 blend — so M2.3 ports compute_vel_rhs WITHOUT the
+  momadv call (or with `momadv_opt` set to skip), and the **partial** gate targets only the
+  Coriolis+AB2+PGF pieces. The FULL `UV_rhs` gate (incl. momentum advection) is **M2.4**.
 
-**M2.1 oracle = a 1-rank SHIM (like the M1 advection shims), NOT a model run.** `pressure_bv`
-runs DURING the timestep (after forcing), but 1-rank forcing hangs on the login node (L8) — so
-mirror `port2/fesom2/src/fesom_advhor_dump.F90`: a new env-gated, npes==1 shim wired at the end
-of `ocean_setup` that PRESCRIBES analytic T/S, calls FESOM2's real EOS/`pressure_bv` routines,
-dumps density/hpressure/bvfreq, and STOPs before forcing. Key points so the next session doesn't
-go down the model-run path:
-- **EOS density depends only on T/S/Z** (Jackett-McDougall), so the shipped-KPP/GM vs reduced-M2
-  namelist does NOT change M2.1's gated fields — the reduced-M2 namelist (PP/no-GM/no-Redi/linfs/
-  opt_visc=7) matters for the LATER M2 kernels (PP mixing, momentum, SSH) that run past forcing,
-  not for the M2.1 EOS shim. Assemble it from `work_pi/namelist.*` when those kernels need it.
-- `tools/run_oracle_pi.sh` ALREADY dumps density/pressure/bvfreq (2-rank, shipped namelist) — a
-  useful CROSS-CHECK but not the 1-rank gate oracle (multi-rank + KPP/GM). Build the shim.
-- **Confirm at M2.1:** where FESOM2 initializes `density_ref(nz,node)` (must exist at the shim
-  point); `Z_3d_n`/`zbar_3d_n` already proven (M1.2). The N² horizontal `smooth_nod` is the one
-  horizontally-coupled step — at 1-rank a single global sweep (matches FESOM2 1-rank); its halo
-  is M2.12. FESOM3 side: build `src/oce/oce_pressure_bv.F90` + a `fesom_pressuredump` driver +
-  `tools/pressure_diff.py`, reusing the `mod_advhor_dump` binary format + gate-script pattern.
+**Gate (partial):** operator-diff `max|Δ|=0` on the AB2-blend + Coriolis + PGF contributions vs FESOM2.
+Same 1-rank end-of-`ocean_setup` shim recipe: extend the FESOM2 pressure shim (or a new vel_rhs shim)
+to PRESCRIBE `UV`/`eta_n`/previous `UV_rhsAB` and call the REAL `compute_vel_rhs` (it already has live
+`pgf_x`/`pgf_y` from the M2.2 pass + the geometry `coriolis`/`metric_factor`); the FESOM3 driver runs
+oce_pressure_bv → oce_pgf → oce_dyn_velrhs. Needs `coriolis` (verify it's a geometry-gated mesh field;
+add it if M0.7 didn't dump it) and the SSH `gradient` operator on `eta_n`.
+- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1/M2.2 (EOS + PGF
+  depend only on T/S/Z + hpressure). M2.3 vel_rhs is still forcing-independent IF the shim prescribes
+  UV/eta (Coriolis+AB2+PGF read only mesh + prescribed state); assemble the reduced namelist from
+  `work_pi/namelist.*` once a kernel that runs PAST forcing (PP mixing, SSH CG) needs it (M2.5+).
 
 **M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
 numbering/connectivity/`nod_in_elem2D` order/geometry, com-structs) needed for ANY multi-rank
@@ -254,12 +316,14 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 
 ## Open notes / risks
 
-- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection gates all `max|Δ|=0`).
-  Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-
-  `ocean_setup` shim pattern (M2.1 = EOS/pressure; see "Next task").
+- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1/M2.2 pressure/EOS/
+  N²/PGF gates all `max|Δ|=0`). Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the
+  proven 1-rank end-of-`ocean_setup` shim pattern (`fesom_pressure_dump.F90` now drives both
+  `pressure_bv` and `pressure_force_4_linfs_fullcell`); M2.3 extends it again — see "Next task".
 - **M2.12 is now heavy** (the local-mesh remap + the folded M1 advection multi-rank gate + the
   whole-model multi-rank byte-match + the deferred cavity/CW-swap caveats). Consider splitting the
   local-mesh remap into its own early-M2 task once a dynamics kernel first needs halos at multi-rank.
-- The FESOM2 oracle shim edits (`fesom_advhor_dump.F90`, `oce_setup_step.F90`, geom/ale shims) live
-  as UNCOMMITTED working-tree instrumentation in `port2/fesom2` (not committed there, by design);
-  `libfesom.so` must be rebuilt (`make -C port2/fesom2/build fesom`) after editing a shim.
+- The FESOM2 oracle shim edits (`fesom_advhor_dump.F90`, `fesom_pressure_dump.F90`, `oce_setup_step.F90`,
+  geom/ale shims) live as UNCOMMITTED working-tree instrumentation in `port2/fesom2` (not committed
+  there, by design); `libfesom.so` must be rebuilt (`make -C port2/fesom2/build fesom.x`, then re-run
+  `cmake .` first if a NEW shim file was added so the GLOB picks it up) after editing a shim.

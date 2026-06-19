@@ -4,7 +4,9 @@
 #   ./configure.sh [--compiler intel|gnu] [--precision dp|sp]
 #                  [--debug] [--clean] [--build] [--jobs N] [-- <extra cmake args>]
 #
-# Produces build_<compiler>_<precision>/ . Default = anchor (intel, dp, Release).
+# Produces build_<compiler>_<precision>/ (Release) or build_<compiler>_<precision>_debug/
+# (--debug, kept separate so it never clobbers the Release anchor). Default = anchor
+# (intel, dp, Release).
 set -euo pipefail
 
 compiler="intel"
@@ -37,6 +39,13 @@ esac
 
 src_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 build_dir="${src_dir}/build_${compiler}_${precision}"
+# Debug builds get their OWN dir so they never clobber the Release anchor build.
+# A Debug binary sitting in the Release dir silently breaks the byte-gates: at -O0
+# without -no-prec-div it diverges from the FESOM2 -O3 oracle on every FP field
+# (even `area` at ~3.7e-4 — see LESSONS L10/L14).
+if [[ "${build_type}" == "Debug" ]]; then
+    build_dir="${build_dir}_debug"
+fi
 
 # Load the toolchain (sets FC=mpif90, FESOM_PLATFORM_STRATEGY, runtime env).
 # shellcheck disable=SC1090

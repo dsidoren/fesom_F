@@ -336,26 +336,28 @@ in the D6 sequence + the oracle's SW_AB dump).
 (Coriolis AB2 + momadv + PGF) → viscosity → impl-vert-visc → `ssh_rhs` → CG → `update_vel` → `hbar` →
 `eta_n` → ALE thickness/W → tracer solve → `update_thickness_ale` commit.
 
-#### Task M2.1: `pressure_bv` — EOS + hydrostatic pressure + N² (+ horizontal smoothing)
+#### Task M2.1: `pressure_bv` — EOS + hydrostatic pressure + N² (+ horizontal smoothing) — ✅ DONE (max|Δ|=0)
 **Files:** Create: `src/oce/oce_pressure_bv.F90`
-- [ ] full Jackett-McDougall EOS in **split form** (`densityJM_components`: `bulk_0 + Z·(bulk_pz +
+- [x] full Jackett-McDougall EOS in **split form** (`densityJM_components`: `bulk_0 + Z·(bulk_pz +
       Z·bulk_pz2)`, then `·rhopot/(…)`) — **never linearize α/β**; preserve the factorization (the bits
       depend on it). Cite `oce_ale_pressure_bv.F90`.
-- [ ] density anomaly subtracts the **`density_ref(nz,node)` array** (initialize to match FESOM2), NOT
+- [x] density anomaly subtracts the **`density_ref(nz,node)` array** (initialize to match FESOM2), NOT
       the scalar; `bvfreq`/N² divides by scalar `density_0=1030` (`oce_ale_pressure_bv.F90:440`)
-- [ ] **top-down `hpressure` integration lives HERE** (`oce_ale_pressure_bv.F90:367–403`; dumped before
+- [x] **top-down `hpressure` integration lives HERE** (`oce_ale_pressure_bv.F90:367–403`; dumped before
       PGF) — NOT in M2.2
-- [ ] N² **horizontal** smoothing `smooth_nod(bvfreq, N2smth_hidx, …)` (`oce_ale_pressure_bv.F90:499`);
+- [x] N² **horizontal** smoothing `smooth_nod(bvfreq, N2smth_hidx, …)` (`oce_ale_pressure_bv.F90:499`);
       pin `N2smth_hidx=1`, confirm `N2smth_v=.false.`; **one halo exchange per smoothing cycle** (uses M0.5)
-- [ ] MLD1/2/3 + `dbsfc` are KPP-only → omit in M2 (legitimate scope reduction); aux fields are WORK
-- [ ] **Gate:** operator-diff `max|Δ|=0` on `density`, `hpressure`, `bvfreq`
+- [x] MLD1/2/3 + `dbsfc` are KPP-only → omit in M2 (legitimate scope reduction); aux fields are WORK
+- [x] **Gate:** operator-diff `max|Δ|=0` on `density`, `hpressure`, `bvfreq`
 
-#### Task M2.2: Hydrostatic PGF (gradient contraction only)
+#### Task M2.2: Hydrostatic PGF (gradient contraction only) — ✅ DONE (max|Δ|=0)
 **Files:** Create: `src/oce/oce_pgf.F90`
-- [ ] `pressure_force_4_linfs` → `pressure_force_4_linfs_fullcell` (`oce_ale_pressure_bv.F90:529`):
+- [x] `pressure_force_4_linfs` → `pressure_force_4_linfs_fullcell` (`oce_ale_pressure_bv.F90:529,575`):
       `gradient_sca` contraction of the `hpressure` built in M2.1 → `pgf_x`/`pgf_y`. **No hpressure
-      integration here.**
-- [ ] **Gate:** operator-diff `max|Δ|=0` on `pgf_x`/`pgf_y`
+      integration here.** (`pgf=Σ_k gradient_sca(k)·hpressure(nz,elnode_k)/density_0`; density_0 a
+      runtime divisor but byte-identical both sides, L7/L10; same contraction as M1.1 `tracer_gradient_elements`)
+- [x] **Gate:** operator-diff `max|Δ|=0` on `pgf_x`/`pgf_y` — PASS first run (pgf 66% non-zero, ~1e-5 m/s²;
+      `tools/run_pressure_gate.sh`, 12 fields). Debug `-check all` clean; M1 advhor + 13/13 ctest still green.
 
 #### Task M2.3: vel_rhs — Coriolis + AB2 + PGF (partial assembly)
 **Files:** Create: `src/oce/oce_dyn_velrhs.F90`

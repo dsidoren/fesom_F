@@ -30,6 +30,15 @@ module mod_dyn
     type t_dyn_work
         real(kind=WP), allocatable, dimension(:,:,:) :: uvnode_rhs
         real(kind=WP), allocatable, dimension(:,:)   :: u_c, v_c
+        ! Aux 3D fields recomputed each step from T/S by the EOS/pressure pass
+        ! (M2.1 oce_pressure_bv); NOT serialized — they are diagnostics of the
+        ! prognostic tracer state, restored by recomputation, not from the restart.
+        ! FESOM2 o_ARRAYS names. density_ref = density_0 unless use_density_ref.
+        real(kind=WP), allocatable, dimension(:,:)   :: density_m_rho0  ! (nl-1,nod2D) in-situ density - density_ref (PGF)
+        real(kind=WP), allocatable, dimension(:,:)   :: density_ref     ! (nl-1,nod2D) reference density
+        real(kind=WP), allocatable, dimension(:,:)   :: hpressure       ! (nl,  nod2D) hydrostatic pressure
+        real(kind=WP), allocatable, dimension(:,:)   :: bvfreq          ! (nl,  nod2D) N^2 (squared Brunt-Vaisala)
+        real(kind=WP), allocatable, dimension(:,:)   :: pgf_x, pgf_y    ! (nl-1,elem2D) PGF (M2.2 oce_pgf), from hpressure
     contains
         procedure :: write_dw => write_t_dyn_work
         procedure :: read_dw  => read_t_dyn_work
