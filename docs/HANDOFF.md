@@ -195,8 +195,9 @@ The whole byte-gate pipeline is validated end-to-end:
 - The dump byte-format is **identical** to FESOM3 `mod_dump`; `tools/dump_diff.py` parses
   real FESOM2 dumps (150 records) and self-compares `max|Δ|=0`. A fresh run byte-matches
   the committed fixture `test/refdata/pi_oracle_default/dump.*` → FESOM2 is deterministic.
-- For M1: add UV/Wvel/del_ttf_advhoriz dump calls to FESOM2 `oce_ale_tracer.F90` advection
-  (node + NEW element shims) and rerun. For M2: use the reduced namelist (see below).
+- M1 (DONE) used the end-of-`ocean_setup` shim `fesom_advhor_dump.F90` (prescribe inputs, call
+  the real kernels, dump, stop before forcing). **M2.1 reuses that shim pattern** for EOS/pressure
+  (see "Next task"); later M2 kernels that run past forcing need the reduced-M2 namelist (below).
 
 ## Canonical references
 
@@ -222,10 +223,25 @@ McDougall EOS in SPLIT form (never linearize α/β — the bits depend on the fa
 density anomaly subtracts the `density_ref(nz,node)` ARRAY (not the scalar); N²/bvfreq divides
 by scalar `density_0=1030`; the top-down `hpressure` integration lives here; N² horizontal
 smoothing `smooth_nod` (pin `N2smth_hidx=1`, `N2smth_v=.false.`, one halo exchange/cycle). Omit
-MLD/dbsfc (KPP-only). **Gate:** operator-diff `max|Δ|=0` on density/hpressure/bvfreq vs FESOM2
-under the REDUCED-M2 oracle namelist (PP / no-GM / no-Redi / linfs / opt_visc=7 — a SEPARATE
-namelist from the shipped KPP/GM pi config; see "Canonical references" + L6). New oracle work:
-the reduced-namelist run + a density/pressure/bvfreq dump shim (extend the dump pattern).
+MLD/dbsfc (KPP-only). **Gate:** operator-diff `max|Δ|=0` on density/hpressure/bvfreq vs FESOM2.
+
+**M2.1 oracle = a 1-rank SHIM (like the M1 advection shims), NOT a model run.** `pressure_bv`
+runs DURING the timestep (after forcing), but 1-rank forcing hangs on the login node (L8) — so
+mirror `port2/fesom2/src/fesom_advhor_dump.F90`: a new env-gated, npes==1 shim wired at the end
+of `ocean_setup` that PRESCRIBES analytic T/S, calls FESOM2's real EOS/`pressure_bv` routines,
+dumps density/hpressure/bvfreq, and STOPs before forcing. Key points so the next session doesn't
+go down the model-run path:
+- **EOS density depends only on T/S/Z** (Jackett-McDougall), so the shipped-KPP/GM vs reduced-M2
+  namelist does NOT change M2.1's gated fields — the reduced-M2 namelist (PP/no-GM/no-Redi/linfs/
+  opt_visc=7) matters for the LATER M2 kernels (PP mixing, momentum, SSH) that run past forcing,
+  not for the M2.1 EOS shim. Assemble it from `work_pi/namelist.*` when those kernels need it.
+- `tools/run_oracle_pi.sh` ALREADY dumps density/pressure/bvfreq (2-rank, shipped namelist) — a
+  useful CROSS-CHECK but not the 1-rank gate oracle (multi-rank + KPP/GM). Build the shim.
+- **Confirm at M2.1:** where FESOM2 initializes `density_ref(nz,node)` (must exist at the shim
+  point); `Z_3d_n`/`zbar_3d_n` already proven (M1.2). The N² horizontal `smooth_nod` is the one
+  horizontally-coupled step — at 1-rank a single global sweep (matches FESOM2 1-rank); its halo
+  is M2.12. FESOM3 side: build `src/oce/oce_pressure_bv.F90` + a `fesom_pressuredump` driver +
+  `tools/pressure_diff.py`, reusing the `mod_advhor_dump` binary format + gate-script pattern.
 
 **M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
 numbering/connectivity/`nod_in_elem2D` order/geometry, com-structs) needed for ANY multi-rank
@@ -238,6 +254,12 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 
 ## Open notes / risks
 
-- Byte-gates vs FESOM2 need the instrumented FESOM2 built + run with the reduced namelist +
-  reference inputs. Self-tests (params/types/partit/halo/dump round-trips) run standalone now;
-  FESOM2-oracle gates (M0.7 geometry, M1+ kernels) come online once a reference run is produced.
+- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection gates all `max|Δ|=0`).
+  Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-
+  `ocean_setup` shim pattern (M2.1 = EOS/pressure; see "Next task").
+- **M2.12 is now heavy** (the local-mesh remap + the folded M1 advection multi-rank gate + the
+  whole-model multi-rank byte-match + the deferred cavity/CW-swap caveats). Consider splitting the
+  local-mesh remap into its own early-M2 task once a dynamics kernel first needs halos at multi-rank.
+- The FESOM2 oracle shim edits (`fesom_advhor_dump.F90`, `oce_setup_step.F90`, geom/ale shims) live
+  as UNCOMMITTED working-tree instrumentation in `port2/fesom2` (not committed there, by design);
+  `libfesom.so` must be rebuilt (`make -C port2/fesom2/build fesom`) after editing a shim.
