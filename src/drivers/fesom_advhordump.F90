@@ -22,13 +22,15 @@ program fesom_advhordump
     use mod_partitioning, only: par_init, par_ex
     use mod_mesh_read,    only: read_mesh
     use mod_mesh_areas,   only: compute_geometry
-    use mod_tracer,       only: t_tracer_work
+    use mod_tracer,       only: t_tracer_work, t_tracer
+    use mod_dyn,          only: t_dyn
     use oce_tracer_grad,  only: tracer_gradient_elements
     use oce_muscl_adv,    only: muscl_adv_init, fill_up_dn_grad
     use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
     use oce_adv_tra_ver,  only: adv_tra_ver_upw1, adv_tra_ver_qr4c
     use oce_adv_tra_flux, only: oce_tra_adv_flux2dtracer
     use oce_adv_tra_fct,  only: oce_tra_adv_fct
+    use oce_ale_tracer,   only: advect_tracer       ! M1.4 assembled step body
     use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r2, wr_r3, wr_i1, wr_i2
     implicit none
 
@@ -58,6 +60,12 @@ program fesom_advhordump
     integer :: e2, enodes(2), el(2), nl1, nl2, nu1, nu2, nl12, nu12
     real(kind=WP) :: lon, lat
     real(kind=MP) :: zbar_srf, zbar_bot
+    ! --- M1.4 assembled step (real init_tracers_AB + do_oce_adv_tra via advect_tracer) ---
+    type(t_tracer) :: tr
+    type(t_dyn)    :: dyn
+    real(kind=WP), allocatable :: valuesAB_s(:,:)
+    real(kind=WP), allocatable :: dttf_h_s(:,:),   dttf_v_s(:,:),   dttf_s(:,:)     ! FCT config
+    real(kind=WP), allocatable :: dttf_h_sn(:,:),  dttf_v_sn(:,:),  dttf_sn(:,:)    ! non-FCT config
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -281,6 +289,70 @@ program fesom_advhordump
     call oce_tra_adv_flux2dtracer(dt, dttf_h_fct, dttf_v_fct, adf_h, adf_v, mesh, &
                                   use_lo=.true., ttf=ttf, lo=fct_LO)
 
+    ! =====================================================================
+    ! M1.4 assembled step. Builds a real t_tracer + t_dyn and runs the REAL
+    ! advect_tracer (init_tracers_AB -> do_oce_adv_tra -> del_ttf accumulation) —
+    ! the same body FESOM2 adv_tracers_ale runs per tracer. Prescribes
+    !   values    (smooth) = ttf    (the M1.1 field)
+    !   valuesold (sharp)  = ttfAB  (the M1.3 field)
+    ! so init_tracers_AB's AB(2) interpolation valuesAB = -(0.5+eps)*valuesold +
+    ! (1.5+eps)*values (eps=0.1) is exercised + byte-gated. Two configs: FCT
+    ! (MFCT/QR4C/FCT, opth=0/optv=1, the pi production config) and non-FCT
+    ! (MUSCL/QR4C/NON, ph=pv=0.75) which exercises do_zero_flux + the order knobs.
+    ! =====================================================================
+    tr%num_tracers = 1
+    allocate(tr%data(1))
+    allocate(tr%data(1)%values   (nl-1, mesh%nod2D))
+    allocate(tr%data(1)%valuesAB (nl-1, mesh%nod2D))
+    allocate(tr%data(1)%valuesold(2, nl-1, mesh%nod2D))
+    allocate(tr%work%fct_LO          (nl-1, mesh%nod2D))
+    allocate(tr%work%adv_flux_hor    (nl-1, mesh%edge2D))
+    allocate(tr%work%adv_flux_ver    (nl,   mesh%nod2D))
+    allocate(tr%work%fct_ttf_max     (nl-1, mesh%nod2D))
+    allocate(tr%work%fct_ttf_min     (nl-1, mesh%nod2D))
+    allocate(tr%work%fct_plus        (nl-1, mesh%nod2D))
+    allocate(tr%work%fct_minus       (nl-1, mesh%nod2D))
+    allocate(tr%work%del_ttf         (nl-1, mesh%nod2D))
+    allocate(tr%work%del_ttf_advhoriz(nl-1, mesh%nod2D))
+    allocate(tr%work%del_ttf_advvert (nl-1, mesh%nod2D))
+    call muscl_adv_init(tr%work, mesh)     ! nboundary_lay, edge_up_dn_tri, edge_up_dn_grad
+    allocate(dyn%uv(2, nl-1, mesh%elem2D))
+    allocate(dyn%w(nl, mesh%nod2D), dyn%w_e(nl, mesh%nod2D), dyn%w_i(nl, mesh%nod2D))
+    dyn%uv = vel
+    dyn%w = wvel; dyn%w_e = wvel; dyn%w_i = wvel     ! use_wsplit=.false. -> w==w_e
+
+    allocate(valuesAB_s(nl-1, mesh%nod2D))
+    allocate(dttf_h_s(nl-1, mesh%nod2D),  dttf_v_s(nl-1, mesh%nod2D),  dttf_s(nl-1, mesh%nod2D))
+    allocate(dttf_h_sn(nl-1, mesh%nod2D), dttf_v_sn(nl-1, mesh%nod2D), dttf_sn(nl-1, mesh%nod2D))
+
+    ! --- FCT config (pi tracer 1: MFCT/QR4C/FCT, opth=0/optv=1, AB2) ---
+    tr%data(1)%values(:,:)      = ttf
+    tr%data(1)%valuesold(1,:,:) = ttfAB
+    tr%data(1)%AB_order    = 2
+    tr%data(1)%tra_adv_hor = 'MFCT'
+    tr%data(1)%tra_adv_ver = 'QR4C'
+    tr%data(1)%tra_adv_lim = 'FCT'
+    tr%data(1)%tra_adv_ph  = opth
+    tr%data(1)%tra_adv_pv  = optv
+    call advect_tracer(dt, 1, dyn, tr, mesh)
+    valuesAB_s = real(tr%data(1)%valuesAB,      WP)
+    dttf_h_s   = real(tr%work%del_ttf_advhoriz, WP)
+    dttf_v_s   = real(tr%work%del_ttf_advvert,  WP)
+    dttf_s     = real(tr%work%del_ttf,          WP)
+
+    ! --- non-FCT config (MUSCL/QR4C/NON, ph=pv=0.75): do_zero_flux + order knobs ---
+    tr%data(1)%values(:,:)      = ttf
+    tr%data(1)%valuesold(1,:,:) = ttfAB
+    tr%data(1)%tra_adv_hor = 'MUSCL'
+    tr%data(1)%tra_adv_ver = 'QR4C'
+    tr%data(1)%tra_adv_lim = 'NON'
+    tr%data(1)%tra_adv_ph  = 0.75_WP
+    tr%data(1)%tra_adv_pv  = 0.75_WP
+    call advect_tracer(dt, 1, dyn, tr, mesh)
+    dttf_h_sn = real(tr%work%del_ttf_advhoriz, WP)
+    dttf_v_sn = real(tr%work%del_ttf_advvert,  WP)
+    dttf_sn   = real(tr%work%del_ttf,          WP)
+
     ! --- dump (same order/names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'ttf',                    real(ttf, MP))
@@ -318,6 +390,14 @@ program fesom_advhordump
     call wr_r2(u, 'adv_flux_ver_fct',       real(adf_v, MP))
     call wr_r2(u, 'del_ttf_advhoriz_fct',   real(dttf_h_fct, MP))
     call wr_r2(u, 'del_ttf_advvert_fct',    real(dttf_v_fct, MP))
+    ! --- M1.4 assembled-step fields (real advect_tracer) ---
+    call wr_r2(u, 'valuesAB',                 real(valuesAB_s, MP))
+    call wr_r2(u, 'del_ttf_advhoriz_step',    real(dttf_h_s,  MP))
+    call wr_r2(u, 'del_ttf_advvert_step',     real(dttf_v_s,  MP))
+    call wr_r2(u, 'del_ttf_step',             real(dttf_s,    MP))
+    call wr_r2(u, 'del_ttf_advhoriz_stepnon', real(dttf_h_sn, MP))
+    call wr_r2(u, 'del_ttf_advvert_stepnon',  real(dttf_v_sn, MP))
+    call wr_r2(u, 'del_ttf_step_non',         real(dttf_sn,   MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_advhordump: wrote '//trim(out_path)
 

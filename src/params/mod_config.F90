@@ -64,6 +64,12 @@ module mod_config
     logical            :: use_ice     = .false.
     namelist /configuration/ use_sw_pene, use_ice
 
+    ! --- tracer time stepping (FESOM2 o_PARAM, oce_modules.F90:92) ---
+    ! Adams-Bashforth(2) off-centring offset used by init_tracers_AB. Kept a
+    ! (non-parameter) module variable to mirror FESOM2's runtime `epsilon` so the
+    ! compiler cannot fold (1.5_WP+ab_epsilon) to a literal — see oce_tracer_mod.
+    real(kind=WP)      :: ab_epsilon = 0.1_WP
+
     ! --- derived (not from namelist) ---
     real(kind=WP)      :: dt = 1200.0_WP    ! [s], = 86400/step_per_day after read_config
 

@@ -258,3 +258,50 @@ min, fct_plus/minus, del_ttf_*_fct, hnode/hnode_new, standalone MFCT) all matche
   drove clipping at ~41% of nodes (fct_plus/minus min=0), changing ~14% of the antidiffusive
   fluxes — so the sign-based clip selection was genuinely exercised. Verify clipping fraction
   post-run (count fct_plus<1); byte-identity holds regardless, but gate STRENGTH needs it.
+
+## L12 — Assembled step (M1.4): gate the REAL driver, not an inline copy (PASSED first try)
+
+M1.4 (the assembled advection step: `do_oce_adv_tra` + `init_tracers_AB` + the `adv_tracers_ale`
+`del_ttf += advhoriz+advvert` accumulation) hit `max|Δ|=0` vs FESOM2 on the FIRST gate run.
+Unlike M1.1–M1.3 (the shim INLINED the orchestration), M1.4 drives FESOM2's OWN `init_tracers_AB`
++ `do_oce_adv_tra`. The driver-gate recipe (reuse for every future assembled-routine gate):
+
+- **Run the real FESOM2 routine in the oracle shim AFTER the inline-kernel records are dumped.**
+  The driver overwrites the shared `tracers%work` (adv_flux_*, fct_LO, fct_*, edge_up_dn_grad as
+  FCT scratch) and `tracers%data(1)`. Putting the driver section LAST (just before `close(u)`)
+  needs ZERO edits to the proven M1.1–M1.3 dump — purely additive, regression-safe (re-run the
+  whole gate: the 34 prior fields must still PASS, which they did). The alternative (driver-first)
+  works only because the inline section rebuilds work from scratch; last-is-simpler.
+
+- **Prescribe the driver's INPUTS, not its intermediates, or the new numeric never runs.** M1.3
+  prescribed `valuesAB`(ttfAB) directly; that never exercises FESOM2's AB interpolation. M1.4
+  prescribes `values`(smooth ttf) + `valuesold(1)`(sharp ttfAB) so `init_tracers_AB` COMPUTES
+  `valuesAB = -(0.5+ε)·valuesold + (1.5+ε)·values` (ε=0.1) and the gate compares that.
+
+- **The AB-offset `+` did NOT trip the L7 literal-vs-runtime trap — but gate it anyway.** Feared:
+  FESOM2's `epsilon` is a runtime module var (`(1.5_WP+epsilon)` computed live), so if FESOM3
+  folds `1.5+0.1→1.6` at compile time the bits could differ under fast-math (as `/` does under
+  `-no-prec-div`). They DON'T: `1.5d0+0.1d0` rounds to exactly the literal `1.6d0` (and
+  `0.5+0.1→0.6d0`), so `valuesAB` matched byte-for-bit. `+`/`*` reassociation is far less fragile
+  than `/` here. Defensive choice kept regardless: `ab_epsilon` is a non-parameter module var in
+  mod_config (mirrors FESOM2), so the compiler can't fold even in principle. Lesson: a runtime
+  scalar constant in a SUM is usually fold-safe, but the only proof is the oracle gate.
+
+- **pi runs `use_wsplit=.true.`; the gate must FORCE `.false.` on both sides.** With w-split on,
+  the FCT path calls `adv_tra_vert_impl` (implicit vertical, NOT ported until M2) + recomputes the
+  LO vertical on full `w`. Forcing `dynamics%use_wsplit=.false.` in the shim (= the FESOM3 `t_dyn`
+  default) gates the matched EXPLICIT path (`w==w_e`, both passed the single prescribed wvel). Do
+  not gate against the production `.true.` setting — it would hit an unported kernel / the FESOM3
+  `error stop` guard. The implicit w-split path is a separate M2 gate.
+
+- **Non-FCT (`do_zero_flux`) + per-tracer order knobs closed in the same gate.** A second config
+  on tracer 1 (MUSCL/QR4C/NON, ph=pv=0.75) exercises the `do_zero_flux=.true.` dispatch (HO scheme
+  applied directly to valuesAB, scatter WITHOUT use_lo) and the tra_adv_ph/pv knobs the M1.3 gate
+  fixed at 0/1. FCT vs non-FCT `del_ttf` differ by max 26 yet BOTH byte-match FESOM2 — proving the
+  branch selection, not just one path. (The HANDOFF had flagged this gap for M1.4.)
+
+- **WP pointers onto MP work arrays bind by kind VALUE.** `do_oce_adv_tra` associates `real(WP)`
+  pointers (`ttf`, `fct_LO`, `adv_flux_*`, ...) with the `real(MP)` `tracers%work`/`tracers%data`
+  components and passes them to the WP kernels; legal because MP==WP==8 at the DP/SP anchor (the
+  pointer/argument match is on the kind integer 8, not the parameter NAME). The `tracers`/`w`/`we`
+  dummies need `target`. Revisit only for FP16 (WP=2, MP=4) — a deferred precision decision.

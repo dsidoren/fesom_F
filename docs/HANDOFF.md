@@ -34,7 +34,20 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `oce_adv_tra_flux.F90` is now LIVE. Same `tools/run_advhor_gate.sh` (extended). PASSED first
   run; debug `-check all` clean. The limiter actively clipped (~41% of nodes, fct_plus/minus
   min=0; ~14% of fluxes changed), so b1/b2/b3 were genuinely exercised. See LESSONS L11.
-  **Next: M1.4** (driver `do_oce_adv_tra` + dispatch + `model_step` integration).
+- **M1.4 assembled tracer-advection step byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs
+  FESOM2 on the REAL driver: `valuesAB` (init_tracers_AB AB(2) interpolation), the per-tracer
+  `del_ttf_advhoriz/advvert/del_ttf` for the FCT path (do_oce_adv_tra dispatch + the
+  adv_tracers_ale `del_ttf += advhoriz+advvert` accumulation) AND a non-FCT config
+  (MUSCL/QR4C/NON, ph=pv=0.75 → exercises the `do_zero_flux=.true.` path + per-tracer order
+  knobs). Built `src/oce/oce_adv_tra_driver.F90` (`do_oce_adv_tra`), `src/oce/oce_tracer_mod.F90`
+  (`init_tracers_AB`, AB offset `ab_epsilon=0.1` in mod_config), `src/oce/oce_ale_tracer.F90`
+  (`adv_tracers_ale`/`advect_tracer`). The gate now drives FESOM2's REAL `init_tracers_AB` +
+  `do_oce_adv_tra` (oracle shim `fesom_advhor_dump.F90` extended; `libfesom.so` rebuilt) — not
+  the inline orchestration — so the AB-interpolation is oracle-gated, not self-checked. Same
+  `tools/run_advhor_gate.sh` (41 fields). PASSED first run; debug `-check all` clean. valuesAB
+  exactly = 1.6·values−0.6·valuesold (no L7-fold), FCT vs non-FCT del_ttf differ by max 26.
+  See LESSONS L12.
+  **Next: M1.5** (multi-rank tracer advection + halo of del_ttf/tr_xy/fct_LO; then tag m1).
 - **Done:** M0.1 ✓ build. M0.2 ✓ params/. M0.3 ✓ types/. M0.4 ✓ mod_partitioning
   (par_init/par_ex/set_partition; dist_<NP>/ reader transcribed from oce_mesh.F90;
   1-rank synthesis D7). test_partit passes 1/2/8-rank, Intel+GNU dp.
@@ -56,10 +69,14 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `max|Δ|=0` on fct_LO + clipped adv_flux_{hor,ver}_fct + fct_ttf_max/min + fct_plus/minus
   + del_ttf_*_fct + hnode/hnode_new + standalone MFCT vs FESOM2 on pi 1-rank. Activated the
   `use_lo` hnode/hnode_new branch of oce_adv_tra_flux. Limiter clipped ~41% of nodes.
-- **Current task:** M1.4 — tracer advection driver `do_oce_adv_tra` (dispatch on
-  tra_adv_{hor,ver,lim}) + `init_tracers_AB` (AB interpolation → valuesAB, the tr_xy/
-  edge_up_dn_grad fill) + wire into `model_step`. The FCT path orchestration is proven
-  inline by the M1.3 gate; M1.4 lifts it into the real driver and gates the assembled step.
+  M1.4 ✓ assembled advection step (do_oce_adv_tra + init_tracers_AB + adv_tracers_ale):
+  operator-diff `max|Δ|=0` on valuesAB + del_ttf_{advhoriz,advvert,}_step (FCT) + the
+  non-FCT (do_zero_flux) del_ttf vs FESOM2's REAL driver on pi 1-rank. Oracle now runs
+  FESOM2's own init_tracers_AB + do_oce_adv_tra (shim extended, libfesom.so rebuilt).
+- **Current task:** M1.5 — multi-rank tracer advection. Lift the 1-rank assumptions in the
+  M1.1–M1.4 kernels/driver (loop bounds myDim vs myDim+eDim; the dropped halo exchanges of
+  tr_xy/edge_up_dn_grad/fct_LO/del_ttf; per-node accumulation order) and byte-gate on dist_2/
+  dist_8 vs a multi-rank FESOM2 reference. Then tag `m1`.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -82,7 +99,7 @@ The first true byte-gate vs the live oracle. Reusable for ALL M1+ kernel gates.
 - **Run:** `tools/run_geom_gate.sh` → PASS. Individually: `tools/run_geomdump_pi.sh`
   (FESOM2) then `fesom_geomdump` (FESOM3) then `geom_diff.py`.
 
-## M1.1/M1.2/M1.3 advection byte-gate (CLOSED ✓) — the kernel-gate recipe (reusable for M1.4+)
+## M1.1–M1.4 advection byte-gate (CLOSED ✓) — the kernel-gate recipe (reusable for M1.5+)
 
 Same 1-rank oracle as geometry, but the FESOM2 dump fires LATER (end of `ocean_setup`,
 after `init_thickness_ale` builds `helem` + `muscl_adv_init` builds nboundary_lay/
@@ -118,6 +135,17 @@ inputs and drives the REAL FESOM2 kernels, so it gates actual FESOM2 code:
   not `edge_up_dn_grad`, so the latter survives for its dump). 15 FCT fields gated `max|Δ|=0`.
   Key facts in LESSONS L11: pi config = MFCT(opth=0)/QR4C(optv=1)/FCT; `edge_up_dn_grad`=grad(ttf)
   not grad(ttfAB); the a2 bignumber bottom-layer fill; the AUX cavity caveat.
+- **M1.4 extension (DONE):** unlike M1.1–M1.3 (which inlined the orchestration in the shim), the
+  M1.4 section drives FESOM2's REAL `init_tracers_AB` + `do_oce_adv_tra`. It runs AFTER all the
+  M1.1/1.2/1.3 records are written (those driver calls overwrite tracers%work/tracers%data(1)),
+  prescribing `values`=ttf (smooth) + `valuesold(1)`=ttfAB (sharp) on tracer 1 so the AB(2)
+  interpolation `valuesAB = -(0.5+ε)·valuesold + (1.5+ε)·values` (ε=0.1) is exercised + gated
+  (record `valuesAB`). Two configs on tracer 1: FCT (MFCT/QR4C/FCT, opth=0/optv=1) and non-FCT
+  (MUSCL/QR4C/NON, ph=pv=0.75 → `do_zero_flux` + order knobs). pi runs `use_wsplit=.true.` in
+  production but the shim FORCES `dynamics%use_wsplit=.false.` (= the FESOM3 dyn default) so the
+  gate tests the matched explicit path (w==w_e; the implicit adv_tra_vert_impl is M2). del_ttf is
+  accumulated (= advhoriz+advvert) as adv_tracers_ale does. 7 records: valuesAB,
+  del_ttf_{advhoriz,advvert,}_step, del_ttf_{advhoriz,advvert}_stepnon, del_ttf_step_non. See L12.
 
 ## M1 entry notes (read before starting)
 
@@ -182,19 +210,18 @@ The whole byte-gate pipeline is validated end-to-end:
 
 ## Next task
 
-M1.4 — tracer advection driver + step integration. Create `src/oce/oce_adv_tra_driver.F90`
-(`do_oce_adv_tra`) transcribing FESOM2 `oce_adv_tra_driver.F90:46-419`: dispatch on
-`tra_adv_hor` (UPW1/MUSCL/MFCT), `tra_adv_ver` (UPW1/QR4C/CDIFF/PPM) and `tra_adv_lim` (FCT
-or not) — the exact branch the M1.3 gate already proved inline (LO build → `fct_LO` →
-HO antidiffusive → `oce_tra_adv_fct` → `oce_tra_adv_flux2dtracer(use_lo)`). Add
-`init_tracers_AB` (oce_tracer_mod.F90: AB interpolation `values→valuesAB`, the
-`tracer_gradient_elements(values)`/`fill_up_dn_grad` fill — NB gradient from `values`, NOT
-`valuesAB`, see L11) and wire `do_oce_adv_tra` into `model_step`/`adv_tracers_ale`. All
-kernels (UPW1/MUSCL/MFCT/QR4C + scatter + FCT limiter + tr_xy/MUSCL setup + vertical geometry
-+ hnode/hnode_new) are byte-proven (M1.1+M1.2+M1.3); M1.4 assembles them under the real driver
-and gates the per-tracer `del_ttf` over a real (prescribed-velocity) step. Then M1.5 (multi-
-rank, tag m1). Non-FCT branches (`do_zero_flux=.true.`) and the `tra_adv_ph/pv` per-tracer
-order knobs still need a gate (the M1.3 gate fixed opth=0.0/optv=1.0); cover them at M1.4.
+M1.5 — multi-rank tracer advection (then tag `m1`). The M1.1–M1.4 kernels + driver are
+1-rank only (myDim_* == global): they drop the FESOM2 halo exchanges (tr_xy/edge_up_dn_grad
+after the MUSCL fill; fct_LO after the LO build; fct_plus/minus in the FCT limiter; del_ttf at
+the loop tail) and loop over `myDim+eDim` where FESOM2 splits owned vs halo. Lift those: add
+the `exchange_nod`/`exchange_elem` calls (mod_halo) at the FESOM2 sites, fix loop bounds
+(scatter over `myDim_edge2D`/`myDim_nod2D`, accumulate into halo, exchange), and byte-gate on
+pi `dist_2` + `dist_8` vs a MULTI-RANK FESOM2 reference. NB the per-node/edge accumulation
+ORDER changes multi-rank (L8): the gate target is the post-exchange owned values, and the
+reference must use the SAME partition. Also still 1-rank-deferred from M1.1–M1.3: the FCT
+`AUX`/`edge_up_dn_grad`-scratch cavity caveat (L11) needs a cavity mesh; `enforce_cw_orientation`
+needs a swap mesh (L8). Both can ride the M2.11 CORE2 gate instead. After M1.5: tag `m1`, then
+M2 (dynamics: density/pressure/SSH/momentum + the reduced-M2 oracle namelist).
 
 ## Open notes / risks
 

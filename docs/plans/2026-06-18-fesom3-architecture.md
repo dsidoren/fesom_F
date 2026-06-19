@@ -288,14 +288,21 @@ dwarf `oce_adv_tra_*`; **math from FESOM2** `oce_adv_tra_*.F90`.
       antidiffusive flux; halo writes for `fct_ttf_max/min` over `myDim+eDim` (faithful loop bounds)
 - [x] **Gate:** operator-diff `max|Δ|=0`
 
-#### Task M1.4: Advection driver + dispatch + integration
+#### Task M1.4: Advection driver + dispatch + integration — ✅ DONE (max|Δ|=0)
 
-**Files:** Create: `src/oce/oce_adv_tra_driver.F90`; Modify: `src/step/mod_model.F90`
-- [ ] `do_oce_adv_tra` (structure from dwarf driver): per-tracer scheme dispatch via `select case`
-      on the tracer's scheme strings; prescribed velocity path
-- [ ] wire into `model_step`; dump after each advection substep
-- [ ] **Gate:** **per-substep `max|Δ|=0` vs FESOM2 on `pi`, 1-rank** (oracle = FESOM2 `do_oce_adv_tra`
-      under controlled-input replay with the identical prescribed `UV/Wvel`)
+**Files:** Created: `src/oce/oce_adv_tra_driver.F90` (`do_oce_adv_tra`), `src/oce/oce_tracer_mod.F90`
+(`init_tracers_AB`; `ab_epsilon=0.1` in `mod_config`), `src/oce/oce_ale_tracer.F90`
+(`adv_tracers_ale`/`advect_tracer`)
+- [x] `do_oce_adv_tra`: per-tracer scheme dispatch via `select case` on tra_adv_{hor,ver,lim};
+      FCT + non-FCT (`do_zero_flux`) paths; `tra_adv_ph/pv` order knobs; prescribed velocity
+- [x] `init_tracers_AB` (AB(2)/AB(3) → valuesAB; del_ttf zero; edge_up_dn_grad fill from grad(values))
+      + `adv_tracers_ale`/`advect_tracer` (the per-tracer loop body + `del_ttf += advhoriz+advvert`).
+      NB `model_step` integration awaits LIVE UV/W from dynamics (M2); the gate drives the assembled
+      step with a prescribed velocity.
+- [x] **Gate:** `max|Δ|=0` vs FESOM2's REAL `init_tracers_AB`+`do_oce_adv_tra` on `pi`, 1-rank
+      (oracle shim extended, `libfesom.so` rebuilt). 7 records: `valuesAB`,
+      `del_ttf_{advhoriz,advvert,}_step` (FCT) + `..._stepnon`/`del_ttf_step_non` (non-FCT).
+      `use_wsplit` forced `.false.` (implicit w-split path = M2). Debug `-check all` clean. See L12.
 
 #### Task M1.5: Multi-rank byte-gate
 

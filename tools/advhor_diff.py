@@ -14,9 +14,12 @@ vertical; the node tendency, oce_ale_tracer.F90:240), and the M1.3 FCT (Zalesak)
 path: fct_LO, the clipped adv_flux_{hor,ver}_fct, the limiter internals (fct_ttf_
 max/min bounds, fct_plus/minus factors, pre-clip *_fct_ho fluxes) and the final
 del_ttf_{advhoriz,advvert}_fct, plus the standalone adv_flux_hor_mfct and the
-node thicknesses hnode/hnode_new. The intermediates (ttf, ttfAB, vel, helem,
-nboundary_lay, edge_up_dn_tri, tr_xy, edge_up_dn_grad, wvel, zbar_3d_n, Z_3d_n,
-area) are dumped too so any divergence is localised.
+node thicknesses hnode/hnode_new. The M1.4 assembled-step fields gate the REAL
+driver: valuesAB (init_tracers_AB AB(2) interpolation), del_ttf_{advhoriz,advvert,}
+_step (do_oce_adv_tra FCT path + the del_ttf accumulation) and ..._step{non,_non}
+(the non-FCT do_zero_flux path + per-tracer order knobs). The intermediates (ttf,
+ttfAB, vel, helem, nboundary_lay, edge_up_dn_tri, tr_xy, edge_up_dn_grad, wvel,
+zbar_3d_n, Z_3d_n, area) are dumped too so any divergence is localised.
 
 Usage:  advhor_diff.py <fesom2.bin> <fesom3.bin> [--signal 0.0]
 Exit 0 iff every common field matches within the signal threshold (default 0 ==
@@ -115,8 +118,8 @@ def main():
     if extra3:
         print(f"\n(only in FESOM3, ignored: {extra3})")
 
-    print("\n" + ("TRACER-ADVECTION BYTE-GATE (M1.1 horiz + M1.2 vert + M1.3 FCT): PASS (max|delta|=0)" if ok else
-                  "TRACER-ADVECTION BYTE-GATE (M1.1 horiz + M1.2 vert + M1.3 FCT): FAIL"))
+    print("\n" + ("TRACER-ADVECTION BYTE-GATE (M1.1 horiz + M1.2 vert + M1.3 FCT + M1.4 step): PASS (max|delta|=0)" if ok else
+                  "TRACER-ADVECTION BYTE-GATE (M1.1 horiz + M1.2 vert + M1.3 FCT + M1.4 step): FAIL"))
     sys.exit(0 if ok else 1)
 
 
