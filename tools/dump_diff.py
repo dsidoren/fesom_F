@@ -13,6 +13,8 @@ and a magnitude histogram separating real divergence from FP noise.
 
 Usage:
     dump_diff.py A B [--threshold T] [--glob]   # compare files (or prefixes with --glob)
+    dump_diff.py A B --ignore-substep=2          # skip a substep id (repeatable; e.g. the
+                                                 # M2-dead SW_AB=2 that FESOM3 does not emit)
     dump_diff.py --selftest                      # self-check (no external data)
 
 Exit code 0 = match (all |delta| <= threshold), 1 = divergence (for ctest).
@@ -178,14 +180,22 @@ def main(argv):
     args = [a for a in argv if not a.startswith("--")]
     threshold = 0.0
     use_glob = "--glob" in argv
+    ignore_substeps = set()
     for a in argv:
         if a.startswith("--threshold="):
             threshold = float(a.split("=", 1)[1])
+        if a.startswith("--ignore-substep="):
+            ignore_substeps.add(int(a.split("=", 1)[1]))
     if len(args) != 2:
         print(__doc__)
         return 2
     a = parse_tree(args[0], use_glob)
     b = parse_tree(args[1], use_glob)
+    if ignore_substeps:
+        # key = (step, substep, gid, name); drop records of ignored substeps from both sides
+        a = {k: v for k, v in a.items() if k[1] not in ignore_substeps}
+        b = {k: v for k, v in b.items() if k[1] not in ignore_substeps}
+        print("ignoring substep id(s): " + ", ".join(str(s) for s in sorted(ignore_substeps)))
     return report(*compare(a, b, threshold), threshold)
 
 

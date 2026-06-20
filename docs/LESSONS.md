@@ -892,3 +892,48 @@ reconstruct + `diff_ver_part_impl_ale` implicit vertical-diffusion TDMA + `bc_su
   fluxes `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` — `use` the right module per symbol. Keep FESOM2's
   `zinv1=zinv2` backup bookkeeping in the TDMA verbatim (`1/dz` of the layer above) rather than recomputing
   `1/(Z_n(nz-1)-Z_n(nz))` inline — byte-identical, but faithful transcription removes reviewer doubt (L7).
+
+## L24 — `step_oce` ASSEMBLY (M2.9b): the whole ocean step byte-matches the REAL `oce_timestep_ale` via its own built-in dumps; physical UV to avoid the `check_blowup` stop (PASSED first gate run)
+
+M2.9b assembles every M2.1-M2.9a leaf kernel into one driver (`mod_step_oce::step_oce`, mirroring FESOM2
+`oce_timestep_ale` + the `compute_vel_nodes` the main loop runs just before it) with **LIVE data flow** — each
+kernel reads the PREVIOUS kernel's output, not a prescribed input — and gates the WHOLE step substep-by-substep.
+- **The oracle dumps come for free from the REAL driver.** FESOM2's `oce_timestep_ale` already has built-in
+  `dump_shim_record_node` calls at every substep, and FESOM3's `mod_dump` is byte-format-identical to that shim
+  (M0.6). So the gate just prescribes the clean state + forcing arrays + reduced-M2 config and calls the REAL
+  `compute_vel_nodes` + `oce_timestep_ale` ONCE — no new oracle dump code. FESOM3's `step_oce` emits the same
+  records inline (same substep IDs/names), `dump_diff.py` compares (13 NODE fields × 5 probes = 65 records).
+  This is the **mod_dump / `dump_diff.py`** gate vehicle (the run_oracle path), DISTINCT from the per-kernel
+  FADVHDMP / `pressure_diff.py` gate — both coexist; the step gate is its own `run_step_gate.sh`.
+- **Use the pi namelist (KPP/GM/Redi) + FORCE the reduced-M2 dispatch in the shim** rather than authoring a
+  reduced-M2 namelist. The shipped pi namelist guarantees ALL the GM/Redi/KPP arrays (`sw_alpha`/`sigma_xy`/
+  `neutral_slope`/…) are ALLOCATED at `ocean_setup`; the shim then just redirects the DISPATCH (`mix_scheme_nmb=2`,
+  `Fer_GM=.false.`, `Redi=.false.`, `opt_visc=7`, …). The dead-in-M2 producers (`sw_alpha_beta`/`compute_sigma_xy`/
+  `compute_neutral_slope`) still RUN inside `oce_timestep_ale` (FESOM3's `step_oce` OMITS them), so they dump the
+  SW_AB substep (id=2) that FESOM3 never emits → pass `--ignore-substep=2` to `dump_diff.py` (a clean, documented
+  deferral) rather than faking the records. The "reduced-M2 namelist running past forcing" the HANDOFF anticipated
+  was NOT needed — the prescribe-and-stop shim drives `oce_timestep_ale` standalone (it reads forcing ARRAYS, not
+  files; the 1-rank forcing-file hang L8 is bypassed exactly as for M2.1-M2.9a).
+- **`max|Δ|=0` first run by L9 transitivity** — every operand was already byte-pinned per-kernel; M2.9b only adds
+  the WIRING (uvnode← `compute_vel_nodes`, Av← PP into `impl_vert_visc_ale`, Kv← PP into the tracer TDMA, the full
+  `solve_tracers_ale` loop, the linfs `update_thickness_ale` no-op). The data flow being correct is exactly what a
+  whole-step substep match proves. `compute_vel_nodes` is validated transitively: PP's Kv (a dumped substep)
+  consumes it, so Kv matching ⇒ uvnode matched.
+- **`update_thickness_ale` is a no-op for linfs** (FESOM2 `oce_ale.F90:1226`): neither the zlevel nor the zstar
+  thickness-redistribution branch is taken (hnode/helem/zbar_3d_n/Z_3d_n fixed), only `exchange_elem(helem)` —
+  a 1-rank no-op. The `hnode` THICKNESS dump equals the init value on both sides.
+- **`use_wsplit=.false.` is FORCED (M1.4 precedent).** `do_oce_adv_tra`'s `use_wsplit=.true.` path needs the FCT
+  implicit vertical-advection correction `adv_tra_vert_impl` (a distinct unported kernel; guarded with an explicit
+  `error stop`). With `.false.` the explicit/implicit split is trivial (`w_e=w`, `w_i=0`) AFTER `vert_vel_ale`, but
+  `impl_vert_visc_ale` runs BEFORE `compute_Wvel_split` so it still consumes the PRESCRIBED `w_i` ≠ 0 (vertical
+  momentum advection IS exercised). The w-split itself is gated at M2.7. Porting `adv_tra_vert_impl` +
+  `use_wsplit=.true.` is a scoped follow-up.
+- **Physical prescribed UV (0.50/0.40 m/s), NOT the viscosity gate's 2.0/1.5.** The strong-current stress test
+  drives the single-step elevation `eta_n ~13 m`, past FESOM2's `±10 m` `check_blowup` guard → `oce_timestep_ale`
+  STOPs ("eta_n become NaN or <-10,>10") AFTER all substep dumps fire (the gate still PASSES — dumps complete
+  before the stop, verified by `hnode` matching). But an abnormal-termination + "NaN" log makes a permanent gate
+  look fragile. Reducing UV to a physical 0.50/0.40 keeps `eta_n ∈ [-4.6, 1.9]` so the REAL step COMPLETES cleanly
+  (the shim's own `stop` fires). The gate's correctness rests on the dump COMPARISON (all 13 substeps present +
+  matched), not the exit code (`run_stepdump_pi.sh` tolerates the exit but checks dump existence + completeness),
+  so a blowup would NOT silently pass — but a clean run is the trustworthy default. Branch coverage for the strong
+  flow (the γ0/γ1/γ2 viscosity selection) stays at M2.4, not here.

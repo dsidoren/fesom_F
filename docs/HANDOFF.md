@@ -8,7 +8,8 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   M2.2 hydrostatic PGF + M2.3 vel_rhs + M2.4 momentum advection (FULL `UV_rhs`) + M2.4 biharmonic
   viscosity + M2.5 implicit vertical viscosity (TDMA) + M2.6 SSH (stiffness + `ssh_rhs` + CG solve) +
   M2.7 ALE (linfs) velocity/SSH/thickness-W update + M2.8 PP vertical mixing (`Kv`/`Av`) +
-  M2.8b `mo_convect` convective adjustment
+  M2.8b `mo_convect` convective adjustment + M2.9a `diff_tracers_ale` tracer-solve +
+  M2.9b `step_oce` ASSEMBLY (the whole `oce_timestep_ale` byte-matched LIVE)
   COMPLETE ✓** (M2.1: EOS split-form
   `density_m_rho0` + top-down `hpressure` + N²/`bvfreq` raw+smoothed; M2.2: `gradient_sca`-contraction
   `pgf_x`/`pgf_y`; M2.3: `coriolis` geometry field + `compute_vel_rhs` Coriolis+AB2+PGF+SSH-gradient;
@@ -30,8 +31,13 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `diff_ver_part_impl_ale` implicit vertical-diffusion TDMA — the FIRST consumer of the M2.8 `dyn%work%Kv`,
   sourced LIVE post-`mo_convect` — + `bc_surface` surface fluxes], reduced to the pi path (Redi off, FCT
   `do_wimpl=.false.`, `i_vert_diff=.true.`, no KPP/sw/icebergs);
-  all `max|Δ|=0` vs FESOM2 on pi 1-rank; one
-  gate `tools/run_pressure_gate.sh`, **57 fields**). **Next: M2.9b `step_oce` sequence assembly.**
+  **M2.9b: `step_oce` ASSEMBLY** [the faithful `oce_timestep_ale` sequence with LIVE data flow —
+  `compute_vel_nodes`→pressure_bv→PP+`mo_convect`→vel_rhs→viscosity→ivertvisc (Av LIVE from PP)→SSH-CG→
+  update_vel/hbar/eta_n→vert_vel_ale→`solve_tracers_ale` (full wrapper: advection+diffusion+S-clamp, Kv LIVE)→
+  `update_thickness_ale` (linfs no-op); sw_alpha_beta/sigma_xy/neutral_slope OMITTED, dead in M2; `use_wsplit=.false.`
+  per M1.4]; all `max|Δ|=0` vs FESOM2 on pi 1-rank; gates `tools/run_pressure_gate.sh` (**57 fields**) +
+  `tools/run_step_gate.sh` (**13 node substeps × 5 probes = 65 records**, vs the REAL `oce_timestep_ale`).
+  **M2 minimal dynamical core COMPLETE through the assembled step. Next: M2.10 forcing (JRA55 bulk + SW penetration).**
   M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
@@ -280,11 +286,32 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   before the multiply → uninitialised `NaN·0=NaN` would mismatch FESOM3 which omits the terms); and
   `tracer_gradient_elements` is a `o_tracers` MODULE procedure → `use` it (an explicit external interface gives
   `undefined symbol`). See LESSONS L23.
-- **Current task:** M2.9b `step_oce` sequence assembly (plan Task M2.9b) — assemble the faithful D6 substep
-  sequence with feature dispatch, wire `compute_vel_nodes` (the REAL `uvnode` source, prescribed at M2.8), the
-  PP/`mo_convect` step-order, `impl_vert_visc_ale` sourcing `dyn%work%Av`, the full `solve_tracers_ale` wrapper
-  (advection + the M2.9a diffusion + relax + the salinity clamp + `exchange_nod`), and the `update_thickness_ale`
-  commit; gate per-substep `max|Δ|=0` across the whole ocean step. M1's multi-rank advection gate still rides M2.12.
+- **M2.9b `step_oce` ASSEMBLY byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs the REAL FESOM2
+  `oce_timestep_ale` on **13 NODE substeps × 5 probes = 65 records** (density/pressure/bvfreq / Kv / ssh_rhs /
+  d_eta / hbar / eta_n / hnode_new / w / T / S / hnode). Built `src/step/mod_step_oce.F90` (`step_oce` — the
+  faithful sequence with LIVE data flow), added `compute_vel_nodes` + `update_thickness_ale` to
+  `src/oce/oce_ale.F90`, `solve_tracers_ale` (the full per-tracer wrapper: `advect_tracer` → `tracer_gradient_elements`
+  → `diff_tracers_ale` → salinity clamp) to `src/oce/oce_ale_tracer.F90`, and wired `model_ocean_step` into
+  `src/step/mod_model.F90`. The gate drives the REAL `compute_vel_nodes` + `oce_timestep_ale` (its OWN built-in
+  `dump_shim_record_node` — no new oracle dump code) vs FESOM3's `step_oce` (mirrored `mod_dump` dumps) on identical
+  prescribed state. **This is the FIRST gate of the ASSEMBLY (data flow), not isolated kernels:** uvnode← `compute_vel_nodes`,
+  Av← PP into `impl_vert_visc_ale` (the M2.5-deferred wiring), Kv← PP+convection into the tracer TDMA, d_eta← CG, T/S←
+  advection+diffusion. `max|Δ|=0` first gate run (L9 transitive — every operand pre-pinned; M2.9b only adds wiring).
+  Built `src/drivers/fesom_stepdump.F90`, FESOM2 shim `port2/fesom2/src/fesom_step_dump.F90` (forces the reduced-M2
+  DISPATCH over the pi namelist, so all GM/Redi/KPP arrays stay allocated; SW_AB dumped but `--ignore-substep=2`'d),
+  `tools/run_step{dump_pi,_gate}.sh` + `dump_diff.py --ignore-substep`. Non-vacuous (bvfreq<0 → convective Kv=0.1,
+  d_eta∈[-4.7,2.2], T/S evolved); Debug `-check all` clean; M1 advhor + the M2.1-M2.9a pressure gate (57 fields) +
+  13/13 ctest still green. **Scope:** `use_wsplit=.false.` (the FCT implicit vertical-advection `adv_tra_vert_impl`,
+  do_oce_adv_tra's `use_wsplit=.true.` path, is a distinct unported kernel — M1.4 precedent; `impl_vert_visc_ale` still
+  runs on the prescribed `w_i`). **The prescribe-and-stop shim STILL sufficed** (the "reduced-M2 namelist past forcing"
+  worry was unfounded — `oce_timestep_ale` reads forcing ARRAYS, not files). Physical UV 0.50/0.40 m/s keeps eta_n in
+  the ±10 `check_blowup` guard so the step completes cleanly. See LESSONS L24.
+- **Current task:** M2.10 forcing (plan Task M2.10) — JRA55-do bulk formulae (faithful bilinear time-interp
+  association order, the 2.4e6 cancellation), g2r wind rotation on input, shortwave penetration; create
+  `src/forcing/mod_forcing_bulk.F90` + `mod_forcing_read.F90`. Gate: operator-diff `max|Δ|=0` on forcing fields.
+  This is the FIRST kernel that genuinely needs netCDF I/O + reading the JRA55 forcing files. M1's multi-rank
+  advection gate still rides M2.12. The `use_wsplit=.true.` / `adv_tra_vert_impl` port + the M2.7 split's
+  step-integration are folded into a later dynamics pass.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -420,7 +447,19 @@ The whole byte-gate pipeline is validated end-to-end:
   2022.0.1 + openmpi 4.1.2-intel; gcc 11.2.0 + openmpi 4.1.2-gcc. netCDF loaded (only
   needed M2.10+). Login `gfortran` is 8.5.0 with no MPI — always build via `configure.sh`.
 
-## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH + M2.7 ALE-update + M2.8 PP mixing + M2.8b mo_convect + M2.9a tracer-solve byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.9b+)
+## M2.1–M2.9a dynamics-kernel byte-gate (CLOSED ✓, `run_pressure_gate.sh`, 57 fields) + M2.9b whole-step ASSEMBLY gate (CLOSED ✓, `run_step_gate.sh`, 65 records) — the dynamics-gate recipes (reusable for M2.10+)
+
+**M2.9b step-ASSEMBLY gate (a DISTINCT vehicle from the per-kernel FADVHDMP gate below).** Instead of dumping
+each kernel's output in the FADVHDMP format (`pressure_diff.py`), the step gate reuses FESOM2's OWN built-in
+per-substep `dump_shim_record_node` instrumentation inside `oce_timestep_ale` (the `run_oracle_pi` / `mod_dump`
+format), which FESOM3's `mod_dump` is byte-identical to. So the FESOM2 shim `fesom_step_dump.F90` only prescribes
+the clean state + forcing arrays + reduced-M2 config and calls the REAL `compute_vel_nodes` + `oce_timestep_ale`
+ONCE (no new oracle dump code); FESOM3's `step_oce` (`mod_step_oce.F90`) emits the same records inline; `dump_diff.py
+--glob --ignore-substep=2` compares the 13 NODE substeps (the SW_AB substep is FESOM2-only, dead in M2). Run it:
+`tools/run_step_gate.sh`. This gates the ASSEMBLY (LIVE data flow), the per-kernel gate below gates each leaf.
+The two coexist (separate scratch files, separate comparators). See LESSONS L24.
+
+### the per-kernel FADVHDMP recipe (M2.1–M2.9a, reused since M1):
 
 Same end-of-`ocean_setup` 1-rank shim pattern as the M1 advection gate, the FIRST dynamics
 kernel. `pressure_bv` runs DURING the timestep but 1-rank forcing hangs on the login node (L8),
@@ -573,24 +612,27 @@ FESOM2 code:
 
 ## Next task
 
-M2.9b `step_oce` sequence assembly (plan Task M2.9b) — FESOM2 `oce_ale.F90` step / `oce_setup_step.F90`. **Approach:**
-- Assemble the faithful D6 ocean-substep sequence with feature dispatch (`select case`) + byte-identical
-  off-switches: pressure/EOS/N² → PP mixing + `mo_convect` → `compute_vel_nodes` (the REAL `uvnode` source — gate
-  it here, was prescribed at M2.8) → `compute_vel_rhs` (momadv) → viscosity → `impl_vert_visc_ale` (now sourcing
-  `dyn%work%Av` from PP, was a prescribed arg at M2.5) → SSH solve → ALE update → the full `solve_tracers_ale`
-  wrapper (init_tracers_AB + `do_oce_adv_tra` + the M2.9a `diff_tracers_ale` + relax + the salinity clamp +
-  `exchange_nod`) → final `update_thickness_ale` commit.
-- This is the FIRST kernel that genuinely needs the **reduced-M2 oracle namelist** (PP/no-GM/no-Redi/linfs/
-  `opt_visc=7`) running PAST forcing in a real timestep loop — assemble it from `work_pi/namelist.*` (it was NOT
-  needed for M2.1–M2.9a, all of which run on prescribed state at end-of-`ocean_setup`).
-- **Gate:** **per-substep `max|Δ|=0` on pi** across the whole ocean step.
+M2.10 forcing (plan Task M2.10) — FESOM2 `gen_surface_forcing.F90` / `gen_bulk_formulae.F90`. **Approach:**
+- Port the JRA55-do bulk formulae → surface heat/freshwater/momentum fluxes; the **bilinear time-interp
+  association order must be faithful** (the 2.4e6 cancellation), g2r wind rotation on input, shortwave penetration.
+  Create `src/forcing/mod_forcing_bulk.F90` + `mod_forcing_read.F90`. (SSS/SST restoring already lives in the
+  M2.9a tracer solve — only PREPARE the surface flux/coeff inputs here.)
+- This is the FIRST kernel that genuinely needs **netCDF I/O** (read the JRA55 forcing files) — a new dependency
+  vs the analytic/prescribed inputs of M0-M2.9. Will need the forcing namelist + a forcing-file reader; the
+  1-rank forcing-FILE-read hang (L8) must be revisited (it may have been a login-node MPI artifact, or need the
+  forcing read restructured for 1-rank).
+- **Gate:** operator-diff `max|Δ|=0` on the forcing fields (the M2.9b shim PRESCRIBES the forcing arrays
+  analytically; M2.10 SOURCES them from JRA55 + bulk formulae, then the assembled step consumes the LIVE fields).
 
-- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.7 (EOS + PGF +
-  vel_rhs + momadv + viscosity + ivertvisc + SSH stiffness/`ssh_rhs`/CG + the ALE velocity/SSH/W update all
-  depend only on prescribed T/S/UV/eta/w_e/w_i/Av/stress_surf/`d_eta`/`hbar` + mesh, AND `init_stiff_mat_ale`
-  runs at `ocean_setup:140` → the stiffness is already built when the end-of-`ocean_setup` shim fires).
-  Assemble it from `work_pi/namelist.*` if/when a kernel that runs PAST forcing (full `step_oce` M2.9b)
-  genuinely needs the timestep loop.
+- **The reduced-M2 oracle namelist was NEVER needed** (through M2.9b). Every M2.x gate runs the prescribe-and-stop
+  shim at end-of-`ocean_setup`, which drives the REAL kernels (up to the FULL `oce_timestep_ale` at M2.9b) on
+  PRESCRIBED state — `oce_timestep_ale` reads forcing ARRAYS (set by the shim), not files, so the 1-rank forcing-file
+  hang (L8) is bypassed. The shim FORCES the reduced-M2 dispatch (`mix_scheme_nmb=2`/`Fer_GM=.false.`/`Redi=.false.`/
+  `opt_visc=7`/`use_wsplit=.false.`) over the shipped pi namelist (which keeps all GM/Redi/KPP arrays allocated).
+  M2.10 forcing is where reading real files + running PAST the shim's stop first becomes necessary.
+- **`use_wsplit=.true.` / `adv_tra_vert_impl` is an unported kernel** (do_oce_adv_tra's FCT implicit-vertical-advection
+  correction; guarded with `error stop`). M2.9b forced `use_wsplit=.false.` (M1.4 precedent). Port it + integrate
+  the M2.7 explicit/implicit w-split into a real multi-step run in a later dynamics pass.
 
 **M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
 numbering/connectivity/`nod_in_elem2D` order/geometry, com-structs) needed for ANY multi-rank
@@ -603,16 +645,15 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 
 ## Open notes / risks
 
-- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.8b
+- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.9a
   pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH/ALE-update/PP-mixing/convective-adjustment/tracer-solve gates
-  all `max|Δ|=0`, 57 fields).
+  all `max|Δ|=0`, **57 fields**, `tools/run_pressure_gate.sh`) + M2.9b the WHOLE assembled `oce_timestep_ale`
+  (`tools/run_step_gate.sh`, **65 records** vs the REAL step's built-in dumps, `--ignore-substep=2`).
   Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-`ocean_setup` shim
-  pattern (`fesom_pressure_dump.F90` now drives `pressure_bv` + `pressure_force_4_linfs_fullcell` + the
-  REAL `compute_vel_rhs` with `momadv_opt=2` → `momentum_adv_scalar` + the REAL `visc_filt_bidiff` with
-  `opt_visc=7` + the REAL `impl_vert_visc_ale` + the REAL `compute_ssh_rhs_ale`/`solve_ssh_ale` CG + the REAL
-  `update_vel`/`compute_hbar_ale`/`vert_vel_ale` on the post-CG `d_eta`/`UV_rhs`); the prescribe-and-stop shim
-  STILL sufficed for M2.7 (all kernels run on prescribed state + the pre-built stiffness, before forcing) —
-  M2.8 PP mixing is next, see "Next task".
+  pattern (`fesom_pressure_dump.F90` drives the isolated kernels; `fesom_step_dump.F90` drives the REAL
+  `compute_vel_nodes` + `oce_timestep_ale` on prescribed state). The prescribe-and-stop shim STILL sufficed for
+  M2.9b — the assembled step reads forcing ARRAYS (set by the shim), not files, so the reduced-M2 namelist + the
+  forcing-file read were never needed. **M2.10 forcing is next** (the FIRST netCDF I/O), see "Next task".
 - **⚠️ CLEAN-rebuild rule (L19):** when a milestone adds NEW `src/**/*.F90` files (not just edits), run
   `./configure.sh --compiler intel --precision dp --clean --build` before trusting the byte-gate — an
   incremental build re-runs CMake configure (GLOB `CONFIGURE_DEPENDS`) and can link objects against a MIX

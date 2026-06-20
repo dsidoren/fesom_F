@@ -37,8 +37,52 @@ module oce_ale
     implicit none
     private
     public :: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
+    ! M2.9b (step assembly): compute_vel_nodes is the REAL dyn%uvnode source (prescribed
+    ! at M2.8); update_thickness_ale is the linfs thickness commit (a no-op for which_ale=
+    ! 'linfs'). Both join the faithful oce_timestep sequence assembled in mod_step_oce.
+    public :: compute_vel_nodes, update_thickness_ale
 
 contains
+
+    !===========================================================================
+    subroutine compute_vel_nodes(dynamics, mesh)
+        ! FESOM2 oce_dyn.F90:177-226. Horizontal velocity averaged from elements to
+        ! nodes (area-weighted over the node's element star) -> dyn%uvnode, the input
+        ! PP mixing (M2.8 oce_mixing_pp) reads for the vertical shear. Called at the top
+        ! of the ocean step (FESOM2 fesom_module.F90:654, before oce_timestep_ale).
+        ! 1-rank: the trailing exchange_nod(UVnode) is a no-op (lifted at M2.12). The
+        ! per-node accumulation over nod_in_elem2D is order-sensitive but byte-pinned by
+        ! the geometry gate (L9), so it matches FESOM2's local element order.
+        type(t_dyn),  intent(inout), target :: dynamics
+        type(t_mesh), intent(in),    target :: mesh
+        !______________________________________________________________________
+        integer       :: n, nz, k, elem, nln, uln, nle, ule
+        real(kind=WP) :: tx, ty, tvol
+        real(kind=WP), dimension(:,:,:), pointer :: UV, UVnode
+
+        UV     => dynamics%uv
+        UVnode => dynamics%uvnode
+
+        do n = 1, mesh%nod2D
+            uln = mesh%ulevels_nod2D(n)
+            nln = mesh%nlevels_nod2D(n)
+            do nz = uln, nln-1
+                tvol = 0.0_WP; tx = 0.0_WP; ty = 0.0_WP
+                do k = 1, mesh%nod_in_elem2D_num(n)
+                    elem = mesh%nod_in_elem2D(k, n)
+                    ule  = mesh%ulevels(elem)
+                    nle  = mesh%nlevels(elem)
+                    if (nle-1 < nz .or. nz < ule) cycle
+                    tvol = tvol + mesh%elem_area(elem)
+                    tx   = tx   + UV(1,nz,elem)*mesh%elem_area(elem)
+                    ty   = ty   + UV(2,nz,elem)*mesh%elem_area(elem)
+                end do
+                UVnode(1,nz,n) = tx/tvol
+                UVnode(2,nz,n) = ty/tvol
+            end do
+        end do
+        ! exchange_nod(UVnode) — 1-rank no-op (lifted at M2.12)
+    end subroutine compute_vel_nodes
 
     !===========================================================================
     subroutine update_vel(dynamics, mesh, dt)
@@ -331,5 +375,20 @@ contains
             end do
         end do
     end subroutine compute_Wvel_split
+
+    !===========================================================================
+    subroutine update_thickness_ale(mesh)
+        ! FESOM2 oce_ale.F90:1226-1444. Commit the new layer thicknesses at the end of
+        ! the step: hnode=hnode_new and recompute helem / zbar_3d_n / Z_3d_n. For
+        ! which_ale='linfs' (the M2 path) the layer thickness is fixed (dh/dt=0, hnode_new
+        ! stays = hnode), so NEITHER the zlevel NOR the zstar redistribution branch is
+        ! taken — hnode/helem/zbar_3d_n/Z_3d_n are unchanged and the only remaining action
+        ! is exchange_elem(helem), a 1-rank no-op. The full zlevel/zstar thickness commit
+        ! (the rescue_hnode_old DVD bookkeeping + the per-element helem average) enters with
+        ! non-linfs ALE in a later gate.
+        type(t_mesh), intent(in) :: mesh
+        if (mesh%nod2D < 0) return   ! reference mesh (silence unused-arg); linfs = no-op
+        ! linfs: no thickness redistribution. exchange_elem(helem) — 1-rank no-op (M2.12).
+    end subroutine update_thickness_ale
 
 end module oce_ale

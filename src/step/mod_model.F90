@@ -11,9 +11,16 @@ module mod_model
     use mod_ice,       only: t_ice
     use mod_partitioning, only: par_init, par_ex
     use mod_mesh_analytic, only: generate_analytic_mesh
+    use mod_step_oce,  only: step_oce
     implicit none
     private
     public :: t_model, model_init_analytic, model_step, model_finalize, allocate_state
+    ! M2.9b: model_ocean_step is the model-level entry point for the assembled ocean step
+    ! (mod_step_oce::step_oce). The forcing/diffusivity inputs are still passed in (D7) —
+    ! they are sourced by the model itself once forcing (M2.10) lands; the full lifecycle
+    ! driver (M2.11) calls this each timestep. The M2.9b byte-gate drives step_oce directly
+    ! (src/drivers/fesom_stepdump.F90) so it can prescribe the inputs for the gate.
+    public :: model_ocean_step
 
     type t_model
         type(t_partit) :: partit
@@ -76,10 +83,31 @@ contains
     end subroutine allocate_state
 
     subroutine model_step(model)
-        ! Empty in M0 (the faithful ocean/ice sequence enters at M1/M2).
+        ! Lifecycle step counter. The assembled ocean dynamics are run via
+        ! model_ocean_step (M2.9b), which the full driver (M2.11) wires in once forcing
+        ! (M2.10) sources its inputs; the analytic M0 driver leaves this as the counter.
         type(t_model), intent(inout) :: model
         model%nsteps_done = model%nsteps_done + 1
     end subroutine model_step
+
+    subroutine model_ocean_step(model, dt, lfirst, Ki, heat_flux, water_flux, &
+                                virtual_salt, relax_salt, real_salt_flux, is_nonlinfs, &
+                                stress_surf)
+        ! Model-level wrapper for the assembled ocean timestep (mod_step_oce::step_oce):
+        ! one faithful FESOM2 oce_timestep_ale on the model's prognostic state. The
+        ! diffusivity/forcing inputs are explicit (D7) until the core sources them (M4 / M2.10).
+        type(t_model), intent(inout) :: model
+        real(kind=WP), intent(in) :: dt
+        logical,       intent(in) :: lfirst
+        real(kind=WP), intent(in) :: Ki(:,:)
+        real(kind=WP), intent(in) :: heat_flux(:), water_flux(:), virtual_salt(:)
+        real(kind=WP), intent(in) :: relax_salt(:), real_salt_flux(:), is_nonlinfs
+        real(kind=WP), intent(in) :: stress_surf(:,:)
+        call step_oce(model%nsteps_done+1, dt, lfirst, model%dyn, model%tracers, model%mesh, &
+                      Ki, heat_flux, water_flux, virtual_salt, relax_salt, &
+                      real_salt_flux, is_nonlinfs, stress_surf)
+        model%nsteps_done = model%nsteps_done + 1
+    end subroutine model_ocean_step
 
     subroutine model_finalize(model)
         ! Explicit deallocation (derived-type allocatables would also auto-release

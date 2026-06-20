@@ -473,11 +473,29 @@ to `src/oce/oce_ale_tracer.F90` (mirrors FESOM2's file layout, NOT the plan's `o
       `tsol_T`/`tsol_S` (the solved T/S), **57 fields total** (9 new `tsol_*`). Non-vacuous: Kv consumed=[0, 0.1]
       (live), `max|dT|=1.26`°C, `max|dS|=0.11`, `max|del_ttf_T|=0.50`. Debug `-check all` clean. See LESSONS L23.
 
-#### Task M2.9b: `step_oce` sequence assembly + dispatch + thickness commit
-**Files:** Create: `src/step/mod_step_oce.F90`; Modify: `src/step/mod_model.F90`
-- [ ] assemble the faithful D6 sequence with feature dispatch (`select case`) + byte-identical off-switches
-- [ ] final `update_thickness_ale` commit
-- [ ] **Gate:** **per-substep `max|Δ|=0` on `pi`** across the whole ocean step
+#### Task M2.9b: `step_oce` sequence assembly + dispatch + thickness commit — ✅ DONE (max|Δ|=0, 1-rank pi)
+**Files:** Created: `src/step/mod_step_oce.F90` (`step_oce`); added `compute_vel_nodes` +
+`update_thickness_ale` to `src/oce/oce_ale.F90`, `solve_tracers_ale` to `src/oce/oce_ale_tracer.F90`;
+Modified: `src/step/mod_model.F90` (`model_ocean_step` entry). Gate: `src/drivers/fesom_stepdump.F90`,
+FESOM2 shim `port2/fesom2/src/fesom_step_dump.F90`, `tools/run_step{dump_pi,_gate}.sh`,
+`tools/dump_diff.py --ignore-substep`.
+- [x] assemble the faithful sequence with LIVE data flow: `compute_vel_nodes` → `pressure_bv`+smooth →
+      `pressure_force` → PP `oce_mixing_pp` + `mo_convect` → `compute_vel_rhs` (momadv) → `viscosity_filter` →
+      `impl_vert_visc_ale` (Av now LIVE from PP, the M2.5-deferred wiring) → `compute_ssh_rhs_ale`+`solve_ssh_ale`
+      → `update_vel` → `compute_hbar_ale` → `update_eta_n` → `vert_vel_ale` → `solve_tracers_ale` (the full wrapper:
+      advection + the M2.9a diffusion, Kv LIVE + salinity clamp) → `update_thickness_ale`. The dead-in-M2
+      producers (`sw_alpha_beta`/`compute_sigma_xy`/`compute_neutral_slope`) are OMITTED (return at M4).
+- [x] final `update_thickness_ale` commit (linfs no-op: hnode/helem fixed, `exchange_elem` 1-rank no-op)
+- [x] **Gate:** **per-substep `max|Δ|=0` on `pi`** across the whole ocean step — the gate drives the REAL FESOM2
+      `oce_timestep_ale` (its built-in `dump_shim_record_node`) vs FESOM3's `step_oce` (mirrored `mod_dump` dumps)
+      on identical prescribed state, comparing the 13 NODE substeps (density/pressure/bvfreq / Kv / ssh_rhs /
+      d_eta / hbar / eta_n / hnode_new / w / T / S / hnode = **65 records**, 5 probe nodes) with `dump_diff.py`.
+      The SW_AB substep (dead in M2) is FESOM2-only and ignored. PASS first run; the assembly is exercised LIVE
+      (uvnode← compute_vel_nodes, Av/Kv← PP+convection, d_eta← CG, T/S← advection+diffusion). Non-vacuous
+      (bvfreq<0 → convective Kv=0.1, d_eta∈[-4.7,2.2], T/S evolved). Debug `-check all` clean; M1 advhor + the
+      M2.1-M2.9a pressure gate (57 fields) + 13/13 ctest still green. **Scope:** `use_wsplit=.false.` (the FCT
+      implicit vertical-advection `adv_tra_vert_impl`, do_oce_adv_tra's `use_wsplit=.true.` path, is a distinct
+      unported kernel — M1.4 precedent; `impl_vert_visc_ale` still runs on the prescribed `w_i`). See LESSONS L24.
 
 #### Task M2.10: Forcing (JRA55 bulk + SW penetration)
 **Files:** Create: `src/forcing/mod_forcing_bulk.F90`, `src/forcing/mod_forcing_read.F90`

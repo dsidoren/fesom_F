@@ -30,10 +30,14 @@ module oce_ale_tracer
     use mod_dyn,            only: t_dyn
     use mod_tracer,         only: t_tracer
     use oce_tracer_mod,     only: init_tracers_AB
+    use oce_tracer_grad,    only: tracer_gradient_elements
     use oce_adv_tra_driver, only: do_oce_adv_tra
     implicit none
     private
     public :: adv_tracers_ale, advect_tracer, diff_tracers_ale, diff_ver_part_impl_ale
+    ! M2.9b (step assembly): solve_tracers_ale is the full per-tracer wrapper
+    ! (advection + diffusion solve + salinity clamp) the ocean step calls.
+    public :: solve_tracers_ale
 
 contains
 
@@ -70,6 +74,65 @@ contains
                                        + tracers%work%del_ttf_advvert(:, n)
         end do
     end subroutine advect_tracer
+
+    !===========================================================================
+    subroutine solve_tracers_ale(dt, dynamics, tracers, mesh, Ki, &
+                                 heat_flux, water_flux, virtual_salt, relax_salt, &
+                                 real_salt_flux, is_nonlinfs)
+        ! FESOM2 oce_ale_tracer.F90:135-331, the pi / reduced-M2 path: the full per-tracer
+        ! solve the ocean step (M2.9b) calls. Per tracer, in order:
+        !   advect_tracer    -> init_tracers_AB (zeros del_ttf, AB-interpolate valuesAB,
+        !                       rebuild edge gradient) + do_oce_adv_tra + del_ttf +=
+        !                       del_ttf_advhoriz + del_ttf_advvert
+        !   tr_xy            -> elemental gradient of the still-un-updated tracer (T^n),
+        !                       computed here and passed in (FESOM2 builds it inside
+        !                       diff_tracers_ale; same value, same timing)
+        !   diff_tracers_ale -> horizontal diffusion + ALE reconstruct + implicit vertical
+        !                       diffusion TDMA (consumes the LIVE dyn%work%Kv from M2.8)
+        !   relax_to_clim    -> clim_relax=0 on pi -> short-circuits (3D restoring; M2.10)
+        !   exchange_nod     -> 1-rank no-op (lifted at M2.12)
+        ! then the salinity clamp S in [3, 45] over all nodes.
+        !
+        ! Gated OFF by the reduced-M2 namelist (transcribed-deferred): SPP rejected-salt,
+        ! Fer_GM bolus add/subtract, the toy relaxations (soufflet/neverworld2/dbgyre),
+        ! radioactive decay (14C/39Ar), the ptracers 3D restore, the age-tracer clamp.
+        real(kind=WP),  intent(in)            :: dt
+        type(t_dyn),    intent(inout), target :: dynamics
+        type(t_tracer), intent(inout), target :: tracers
+        type(t_mesh),   intent(in),    target :: mesh
+        real(kind=WP),  intent(in)            :: Ki(mesh%nl-1, mesh%nod2D)
+        real(kind=WP),  intent(in)            :: heat_flux(mesh%nod2D), water_flux(mesh%nod2D)
+        real(kind=WP),  intent(in)            :: virtual_salt(mesh%nod2D), relax_salt(mesh%nod2D)
+        real(kind=WP),  intent(in)            :: real_salt_flux(mesh%nod2D), is_nonlinfs
+        integer :: tr_num, node, nzmin, nzmax
+        real(kind=WP), allocatable :: tr_xy(:,:,:)
+        real(kind=WP), dimension(:,:), pointer :: Svalues
+
+        allocate(tr_xy(2, mesh%nl-1, mesh%elem2D))
+
+        do tr_num = 1, tracers%num_tracers
+            ! advection: del_ttf = advhoriz + advvert (del_ttf zeroed in init_tracers_AB)
+            call advect_tracer(dt, tr_num, dynamics, tracers, mesh)
+            ! elemental gradient of the pre-diffusion tracer (advection left values = T^n)
+            call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh)
+            ! horizontal diffusion + ALE reconstruct + implicit vertical-diffusion TDMA
+            call diff_tracers_ale(tr_num, dt, dynamics, tracers, mesh, tr_xy, Ki, &
+                                  heat_flux, water_flux, virtual_salt, relax_salt, &
+                                  real_salt_flux, is_nonlinfs)
+            ! relax_to_clim (clim_relax=0): no-op; exchange_nod(values): 1-rank no-op
+        end do
+
+        ! salinity clamp (tracer 2 = salinity, FESOM2 :304-316): S in [3, 45]
+        Svalues => tracers%data(2)%values
+        do node = 1, mesh%nod2D
+            nzmax = mesh%nlevels_nod2D(node) - 1
+            nzmin = mesh%ulevels_nod2D(node)
+            where (Svalues(nzmin:nzmax,node) > 45.0_WP) Svalues(nzmin:nzmax,node) = 45.0_WP
+            where (Svalues(nzmin:nzmax,node) <  3.0_WP) Svalues(nzmin:nzmax,node) =  3.0_WP
+        end do
+
+        deallocate(tr_xy)
+    end subroutine solve_tracers_ale
 
     !===========================================================================
     subroutine diff_tracers_ale(tr_num, dt, dynamics, tracers, mesh, tr_xy, Ki, &
