@@ -689,3 +689,67 @@ FESOM2 `oce_ale.F90:1584/2012/3272` + `solver.F90`) byte-matched FESOM2 `max|Δ|
   FESOM2 non-cavity default `oce_ale.F90:525`). The CG `nod2D` divisor (`rtol`, exit test) is the global
   `nod2D=3140`. Debug `-check all` clean (RC=0): `n_pos(12,nod2D)` is wide enough (pi max node degree < 11),
   no CSR-slice OOB.
+
+## L20 — ALE velocity/SSH/thickness-W update (M2.7): the post-CG tail byte-matches; in-place overwrite of prescribed inputs; the Debug I/O stack-temp overflow (PASSED first try)
+
+M2.7 (the linfs post-CG tail: `update_vel` + `compute_hbar_ale` + the `eta_n` blend + `vert_vel_ale`
+→ `compute_CFLz` + `compute_Wvel_split`) byte-matched FESOM2 `max|Δ|=0` on the FIRST Release gate run
+(all 11 new fields → **43 fields**), like all of M1 + M2.1-M2.6. Built `src/oce/oce_ale.F90` (FESOM3
+consolidates `update_vel` — FESOM2 keeps it in `oce_dyn.F90` — with the `oce_ale.F90` ALE routines into
+one M2.7 module). Reusable specifics:
+
+- **The whole post-CG chain is `max|Δ|=0` by pure L9 transitivity — every operand was already pinned.**
+  `update_vel` is a `gradient_sca` contraction of `-g·θ·dt·d_eta` (d_eta from the M2.6 CG, gradient_sca
+  geometry-gated) added to the post-TDMA `UV_rhs` (M2.5; the CG solve never touches it) into `UV`. The
+  `compute_hbar_ale` + `vert_vel_ale` edge-divergences reuse the SAME edge order + `helem`/`edge_cross_dxdy`/
+  `areasvol`/`area` the M2.6 `compute_ssh_rhs_ale` already gated. So nothing genuinely new arithmetic-wise →
+  faithful transcription "just works" (the recurring L9 pattern). `hbar` is prescribed identically on both
+  sides. `dt=1800`/`θ=1`/`α=1` pinned (as M2.3-M2.6); the OpenMP-off oracle (L16/L17/L19) serial edge order
+  matches the serial loops.
+
+- **Three prescribed inputs are OVERWRITTEN in place by the M2.7 kernels — save copies BEFORE the chain or
+  the INPUT dump records become wrong.** `update_vel` overwrites `UV` (but `uv_in` was already saved at
+  M2.3); the `eta_n` blend overwrites `dynamics%eta_n`; `compute_Wvel_split` (inside `vert_vel_ale`)
+  overwrites `dynamics%w_e`/`w_i` — the SAME arrays prescribed as the M2.4/M2.5 inputs. Since the dump fires
+  at the END (after all compute), the `eta_n`/`w_e`/`w_i` INPUT records would otherwise dump the M2.7 output.
+  Fix: save `eta_n_in`/`w_e_in`/`w_i_in` right before the chain (they are fully consumed by M2.4/M2.5 first),
+  dump those for the input records, and dump the post-M2.7 values as NEW records (`eta_n_upd`/`w_split_e`/
+  `w_split_i`). This is correct physics: in the real timestep `vert_vel_ale` recomputes `w_e`/`w_i` for the
+  NEXT step's momadv/ivertvisc. Same save-the-input pattern as `uv_in` (M2.3) and the M2.1 raw/smoothed split.
+
+- **`compute_CFLz` keeps its TWO-statement form for byte-reproducibility (the L19 "reduction form is part of
+  the bits" rule, made explicit by FESOM2).** `CFL_z(nz)=CFL_z(nz)+c1` then `CFL_z(nz+1)=c2` — FESOM2's own
+  comment says this exact split (vs. folding both into one accumulate) is "for the sake of reproducibility …
+  (rounding error)". Transcribe it verbatim; do NOT combine. `c1`/`c2` are scalars here (a DIFFERENT `c1`
+  from the `vert_vel_ale` per-level array).
+
+- **linfs collapses `vert_vel_ale` to W-only.** `which_ale='linfs'` ⇒ the `zlevel`/`zstar` thickness-
+  redistribution branches are NOT taken, so `hnode_new` stays = `hnode` (its init value — gate it anyway to
+  confirm the linfs path leaves it untouched) and there is no surface Wvel/hnode correction; `compute_hbar_ale`'s
+  water-flux term (`.not. linfs`) vanishes. So `vert_vel_ale` is just: zero W → edge-scatter `div(UV·h)` →
+  cumsum bottom-up → `/area`. Fer_GM (`fer_UV`/`fer_Wvel`) and ldiag_ke (`ke_*`) branches dropped (no GM / no
+  `ke_*` in v1, as `compute_vel_rhs`/`impl_vert_visc_ale`). The full-free-surface thickness evolution gets its
+  own later gate.
+
+- **Non-vacuity needs `use_wsplit=.true.` (pi production) + a large UV — else `compute_Wvel_split` is the
+  trivial `Wvel_e=Wvel` branch.** The split only deviates where `CFL_z > wsplit_maxcfl` (=1.0 on pi). With the
+  M2.4-visc-bumped UV (2.0/1.5 m/s) the W divergence is large enough that `CFL_z>1` on **13253** (nz,node) →
+  the `dd`/`Wvel_e`/`Wvel_i` formula is genuinely exercised (a driver diagnostic counts it; the L11/L17 weak-
+  gate guard). Force `use_wsplit=.true.`/`wsplit_maxcfl=1.0` in BOTH shim and driver (the namelist sets them,
+  but assert — defensive like the M2.6 α=θ=1). `max|w|=0.042` m/s (physical), `max|uv_upd|=2.5` (the SSH-grad
+  correction + UV_rhs visibly moved UV) — all non-vacuous.
+
+- **The "`K_v⁻` deformation bound" plan bullet was a MISLABEL — there is no Kv bound in the post-CG ALE path.**
+  `Kv` (vertical diffusivity) is produced by PP mixing (M2.8), not the velocity/SSH/thickness update. Grep of
+  the `oce_ale.F90` step tail (`update_vel`→`compute_hbar_ale`→`eta_n`→`vert_vel_ale`) confirmed no Kv/
+  deformation bound there. Folded the bullet into M2.8.
+
+- **THE DEBUG FOOTGUN (not a kernel bug): the I/O dump writer SEGFAULTs under Debug `-check all` on the default
+  8 MB stack — `ulimit -s unlimited` fixes it.** The compute ran CLEAN under `-check all` (every M2.7 diagnostic
+  printed → all six kernels completed, no OOB/shape/FPE; the L15 `elem2D_nodes(1:3,·)` slices are correct). The
+  crash was at `mod_advhor_dump.F90:68` `write(u) real(a, real64)` on the FIRST big `wr_r3` (`uv_in`, an
+  EXISTING record) — ifort `-O0` puts the ~4.4 MB `real(...,MP)` array temporary on the stack, overflowing the
+  8192 KB default (the extra M2.7 records pushed cumulative pressure over the edge). `ulimit -s unlimited` →
+  EXIT 0, dump written. Release (`-O3`) is unaffected (different temp handling). **Diagnosis tell:** a segfault
+  in `wr_r{2,3}`/`real(a,real64)` AFTER all compute diagnostics printed is a stack-temp overflow, NOT a kernel
+  fault — raise the stack, don't hunt the kernel. (Byte-gate is Release-vs-Release; Debug is OOB-only, L10.)

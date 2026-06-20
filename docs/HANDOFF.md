@@ -6,7 +6,8 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 
 - **Milestone:** M2 (minimal ocean dynamical core) — **IN PROGRESS.** **M2.1 `pressure_bv` +
   M2.2 hydrostatic PGF + M2.3 vel_rhs + M2.4 momentum advection (FULL `UV_rhs`) + M2.4 biharmonic
-  viscosity + M2.5 implicit vertical viscosity (TDMA) + M2.6 SSH (stiffness + `ssh_rhs` + CG solve)
+  viscosity + M2.5 implicit vertical viscosity (TDMA) + M2.6 SSH (stiffness + `ssh_rhs` + CG solve) +
+  M2.7 ALE (linfs) velocity/SSH/thickness-W update
   COMPLETE ✓** (M2.1: EOS split-form
   `density_m_rho0` + top-down `hpressure` + N²/`bvfreq` raw+smoothed; M2.2: `gradient_sca`-contraction
   `pgf_x`/`pgf_y`; M2.3: `coriolis` geometry field + `compute_vel_rhs` Coriolis+AB2+PGF+SSH-gradient;
@@ -17,8 +18,11 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `UV_rhs`, a SEPARATE operator after `viscosity_filter`; M2.6: `init_stiff_mat_ale` CSR stiffness
   [`g·dt·α·θ·H·div` + `areasvol/dt` mass] + `compute_ssh_rhs_ale` edge-divergence + `solve_ssh_ale`
   preconditioned CG → `d_eta` (converged in 37 iters, byte-identical) — the FIRST iterative solver;
+  M2.7: `update_vel` [`UV += UV_rhs + (-g·θ·dt·grad d_eta)`] + `compute_hbar_ale` [`hbar`/`dhe`/`ssh_rhs_old`]
+  + `eta_n=α·hbar+(1−α)·hbar_old` + `vert_vel_ale` [W=−cumsum(div UV·h)/area; linfs `hnode_new=hnode`;
+  `compute_CFLz` + `compute_Wvel_split` explicit/implicit split];
   all `max|Δ|=0` vs FESOM2 on pi 1-rank; one
-  gate `tools/run_pressure_gate.sh`, **32 fields**). **Next: M2.7 ALE (linfs) + velocity/SSH update.**
+  gate `tools/run_pressure_gate.sh`, **43 fields**). **Next: M2.8 PP vertical mixing (`Kv`/`Av`).**
   M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
@@ -195,8 +199,29 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   the incremental build (CMake reconfigure on the 2 NEW files → mixed `.mod` interfaces) ULP-drifted the
   codegen; `./configure.sh --clean --build` restored `max|Δ|=0`. Debug `-check all` clean; M1 advhor +
   13/13 ctest still green. See LESSONS L19.
-- **Current task:** M2.7 ALE (linfs) + velocity/SSH update (`update_vel` `UV += UV_rhs`; `hbar`/`eta_n` update
-  from `d_eta`; ALE thickness/W; `K_v⁻` deformation bound). M1's multi-rank advection gate still rides M2.12.
+- **M2.7 ALE (linfs) velocity/SSH/thickness-W update byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2
+  on `uv_upd` (post-`update_vel` velocity), `ssh_rhs_old` (the `compute_hbar_ale` edge-divergence intermediate),
+  `hbar` + `dhe` (the new elevation + element thickness change), `eta_n_upd` (the α-blend), `w` (the
+  `vert_vel_ale` vertical velocity — the big target), `hnode_new` (=`hnode`, the linfs branch leaves it
+  untouched), `cfl_z` (the `compute_CFLz` intermediate), AND `w_split_e`/`w_split_i` (the `compute_Wvel_split`
+  explicit/implicit split) — plus the prescribed `hbar_in`. Built `src/oce/oce_ale.F90` (`update_vel` [FESOM2
+  `oce_dyn.F90:88-173`] + `compute_hbar_ale` + `update_eta_n` + `vert_vel_ale` + private `compute_CFLz`/
+  `compute_Wvel_split` [FESOM2 `oce_ale.F90:2165/2323/3126/3217`]). The whole post-CG chain is `max|Δ|=0` by
+  **L9 transitivity** (every operand pre-gated — `d_eta` M2.6, post-TDMA `UV_rhs` M2.5, `gradient_sca`/edge
+  order/`helem`/`area`/`areasvol` geometry+M2.6; `hbar` prescribed identically; `dt=1800`/`θ=1`/`α=1` pinned).
+  Same gate `tools/run_pressure_gate.sh` (now **43 fields**; the shim drives the REAL `update_vel`/
+  `compute_hbar_ale`/`vert_vel_ale` via explicit interface blocks — no auto-gen `*_interface`, like
+  `impl_vert_visc_ale`). linfs: the `zlevel`/`zstar` thickness redistribution + the `compute_hbar_ale`
+  water-flux term vanish (`hnode_new` stays = `hnode`); Fer_GM/ldiag_ke branches dropped. **3 prescribed inputs
+  (`eta_n`/`w_e`/`w_i`) are overwritten IN PLACE** by the M2.7 kernels → saved copies before the chain so the
+  M2.3/M2.4/M2.5 input records still echo the prescription (L20). Non-vacuous: the Wvel split fired on 13253
+  (nz,node) (`CFL_z>wsplit_maxcfl`, `use_wsplit=.true.`), `max|w|=0.042` m/s, `max|uv_upd|=2.5`. Debug
+  `-check all` clean (compute clean — L15 `elem2D_nodes(1:3,·)` slices correct; the I/O dump writer needs
+  `ulimit -s unlimited` for the big array temporary, a harness concern not a kernel bug). M1 advhor + 13/13
+  ctest still green. See LESSONS L20.
+- **Current task:** M2.8 PP vertical mixing (`oce_ale_mixing_pp.F90` → `Kv` nodes / `Av` elements; dispatch
+  `mix_scheme=='PP'`), then M2.8b `mo_convect` convective adjustment. M1's multi-rank advection gate still
+  rides M2.12.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -332,7 +357,7 @@ The whole byte-gate pipeline is validated end-to-end:
   2022.0.1 + openmpi 4.1.2-intel; gcc 11.2.0 + openmpi 4.1.2-gcc. netCDF loaded (only
   needed M2.10+). Login `gfortran` is 8.5.0 with no MPI — always build via `configure.sh`.
 
-## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.7+)
+## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH + M2.7 ALE-update byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.8+)
 
 Same end-of-`ocean_setup` 1-rank shim pattern as the M1 advection gate, the FIRST dynamics
 kernel. `pressure_bv` runs DURING the timestep but 1-rank forcing hangs on the login node (L8),
@@ -424,27 +449,41 @@ FESOM2 code:
   `sum()` matvecs. **The first gate FAILED at uniform ~few-ULP on EVERY field — the incremental build's
   CMake-reconfigure-on-new-files left mixed `.mod` codegen; a CLEAN `./configure.sh --clean --build` fixed
   it (always clean-rebuild after adding NEW files).** Debug `-check all` clean. See LESSONS L19.
+- **M2.7-ALE extension (DONE):** the SAME gate now also covers the post-CG velocity/SSH/thickness-W update —
+  `update_vel` (FESOM2 `oce_dyn.F90:88`) + `compute_hbar_ale` (`oce_ale.F90:2165`) + the inline `eta_n` blend
+  (`:3973`) + `vert_vel_ale` (`:2323` → `compute_CFLz` `:3126` + `compute_Wvel_split` `:3217`), run AFTER
+  `solve_ssh_ale` (FESOM2 `oce_ale.F90:3946-4081`). FESOM3 `src/oce/oce_ale.F90`. The shim drives the REAL
+  routines via **explicit interface blocks** (no auto-gen `*_interface`, like `impl_vert_visc_ale`); the
+  `eta_n` blend is inlined in both (FESOM2 keeps it inline in the step). Both prescribe an analytic `hbar`
+  (the previous-step elevation), force `use_wsplit=.true.`/`wsplit_maxcfl=1.0` (pi production), and chain off
+  the post-CG `d_eta`/post-TDMA `UV_rhs`. **3 prescribed inputs (`eta_n`/`w_e`/`w_i`) are overwritten IN PLACE**
+  (eta_n by the blend, w_e/w_i by `compute_Wvel_split`) → saved copies before the chain so the M2.3/M2.4/M2.5
+  input records still echo the prescription (dump `eta_n_upd`/`w_split_e`/`w_split_i` as NEW records). 11 new
+  records: `hbar_in`, `uv_upd`, `ssh_rhs_old`, `hbar`, `dhe`, `eta_n_upd`, `w`, `hnode_new`, `cfl_z`,
+  `w_split_e`, `w_split_i`; `pressure_diff.py` picks them up automatically (**43 fields**). `max|Δ|=0` first
+  run (L9 transitive — every operand pre-gated). Non-vacuous: the Wvel split fired on 13253 (nz,node), `max|w|=
+  0.042` m/s. Debug `-check all` clean (`ulimit -s unlimited` for the I/O writer's big array temp — L20). See
+  LESSONS L20.
 
 ## Next task
 
-M2.7 ALE (linfs) + velocity/SSH update (plan Task M2.7). FESOM2 `oce_ale.F90` post-CG path: `update_vel`
-(`UV += UV_rhs` + the `d_eta` SSH-gradient correction), `compute_hbar_ale` (`hbar`/`hbar_old`/`ssh_rhs_old`),
-the `eta_n` update from `d_eta`, the ALE thickness/`W` update, `K_v⁻` deformation bound. **Approach:**
-- **Same prescribe-and-stop end-of-`ocean_setup` shim** (the reduced-M2 namelist is STILL not needed — like
-  M2.6, these kernels run on prescribed `UV`/`UV_rhs`/`d_eta`/`eta_n`/`hbar` + mesh, standalone). Chain off
-  the M2.6 outputs (the byte-gated `d_eta`) where natural, or prescribe fresh.
-- **Gate:** operator-diff `max|Δ|=0` on the updated `UV`, `hbar`, `eta_n`, the ALE thicknesses (`hnode_new`
-  on linfs = `hnode`), `W`. linfs (`which_ale='linfs'`) is the simple branch (`hnode_new=hnode`, no
-  thickness evolution from `eta`); the zstar thickness redistribution is deferred to its own later gate.
-- **Watch:** `update_vel` reads `d_eta` and applies `-g·dt·grad(α·d_eta + ...)` to `UV` — a `gradient_sca`
-  contraction like M2.2/M2.3 (operands pre-gated). The L15 `elem2D_nodes(1:3,·)` MAX_NV-slice trap on any
-  new element-indexed code; the L19 clean-rebuild rule if M2.7 adds a NEW `oce_ale.F90` source file.
+M2.8 PP vertical mixing (plan Task M2.8). FESOM2 `oce_ale_mixing_pp.F90` → `Kv` (nodes) / `Av` (elements);
+dispatch `mix_scheme=='PP'`. Then M2.8b `mo_convect` (convective adjustment, `oce_mo_conv.F90`, called AFTER
+PP — `oce_ale.F90:3729` — applies the instability adjustment to BOTH `Kv` and `Av`; pin `use_instabmix=.true.`,
+`instabmix_kv=0.1`). **Approach:**
+- **Same prescribe-and-stop end-of-`ocean_setup` shim.** PP mixing reads `bvfreq` (M2.1, gated), the
+  Richardson number from the prescribed `UV`/`density`, and mesh; standalone, no forcing/timestep loop needed
+  (the reduced-M2 namelist STILL likely not needed — confirm `mix_scheme_nmb` routing). The `Av` it produces
+  is the SAME `Av` M2.5 `impl_vert_visc_ale` consumes (currently prescribed analytically) — when M2.8 lands the
+  M2.5 caller can source `dyn%work%Av` instead, kernel unchanged. **Watch:** `K_v⁻` deformation bound (the
+  mislabeled M2.7 bullet) belongs HERE if anywhere — verify against `oce_ale_mixing_pp.F90`.
+- **Gate:** operator-diff `max|Δ|=0` on `Kv`/`Av` (+ intermediates: Richardson number, the 3 PP loops).
 
-- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.6 (EOS + PGF +
-  vel_rhs + momadv + viscosity + ivertvisc + the SSH stiffness/`ssh_rhs`/CG all depend only on prescribed
-  T/S/UV/eta/w_e/w_i/Av/stress_surf/`d_eta` + mesh, AND `init_stiff_mat_ale` runs at `ocean_setup:140` →
-  the stiffness is already built when the end-of-`ocean_setup` shim fires). Assemble it from
-  `work_pi/namelist.*` if/when a kernel that runs PAST forcing (PP mixing M2.8, full `step_oce` M2.9b)
+- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.7 (EOS + PGF +
+  vel_rhs + momadv + viscosity + ivertvisc + SSH stiffness/`ssh_rhs`/CG + the ALE velocity/SSH/W update all
+  depend only on prescribed T/S/UV/eta/w_e/w_i/Av/stress_surf/`d_eta`/`hbar` + mesh, AND `init_stiff_mat_ale`
+  runs at `ocean_setup:140` → the stiffness is already built when the end-of-`ocean_setup` shim fires).
+  Assemble it from `work_pi/namelist.*` if/when a kernel that runs PAST forcing (full `step_oce` M2.9b)
   genuinely needs the timestep loop.
 
 **M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
@@ -458,14 +497,15 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 
 ## Open notes / risks
 
-- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.6
-  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH gates all `max|Δ|=0`, 32 fields). Self-tests
-  run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-`ocean_setup` shim
+- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.7
+  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH/ALE-update gates all `max|Δ|=0`, 43 fields).
+  Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-`ocean_setup` shim
   pattern (`fesom_pressure_dump.F90` now drives `pressure_bv` + `pressure_force_4_linfs_fullcell` + the
   REAL `compute_vel_rhs` with `momadv_opt=2` → `momentum_adv_scalar` + the REAL `visc_filt_bidiff` with
-  `opt_visc=7` + the REAL `impl_vert_visc_ale` + the REAL `compute_ssh_rhs_ale`/`solve_ssh_ale` CG on the
-  post-`viscosity_filter`/TDMA `UV_rhs`); the prescribe-and-stop shim STILL sufficed for M2.6 (the
-  stiffness is built at `ocean_setup:140`, before forcing) — M2.7 ALE/update is next, see "Next task".
+  `opt_visc=7` + the REAL `impl_vert_visc_ale` + the REAL `compute_ssh_rhs_ale`/`solve_ssh_ale` CG + the REAL
+  `update_vel`/`compute_hbar_ale`/`vert_vel_ale` on the post-CG `d_eta`/`UV_rhs`); the prescribe-and-stop shim
+  STILL sufficed for M2.7 (all kernels run on prescribed state + the pre-built stiffness, before forcing) —
+  M2.8 PP mixing is next, see "Next task".
 - **⚠️ CLEAN-rebuild rule (L19):** when a milestone adds NEW `src/**/*.F90` files (not just edits), run
   `./configure.sh --compiler intel --precision dp --clean --build` before trusting the byte-gate — an
   incremental build re-runs CMake configure (GLOB `CONFIGURE_DEPENDS`) and can link objects against a MIX

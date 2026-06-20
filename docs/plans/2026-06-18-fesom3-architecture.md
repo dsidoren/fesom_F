@@ -417,10 +417,23 @@ matches FESOM2's `oce_ale_vel_rhs.F90` layout); viscosity → `src/oce/oce_dyn_v
       clean; M1 advhor + 13/13 ctest still green. (L19; **CLEAN-rebuild footgun** — new files force a clean
       Release rebuild before the byte-gate is byte-reliable.)
 
-#### Task M2.7: ALE (linfs) + velocity/SSH update
-**Files:** Create: `src/oce/oce_ale.F90`
-- [ ] linfs (`hnode_new=hnode`); `update_vel`; `hbar`; `eta_n`; thickness/W update; `K_v⁻` deformation bound
-- [ ] **Gate:** operator-diff `max|Δ|=0`
+#### Task M2.7: ALE (linfs) + velocity/SSH update — ✅ DONE (max|Δ|=0)
+**Files:** Created: `src/oce/oce_ale.F90` (`update_vel` + `compute_hbar_ale` + `update_eta_n` +
+`vert_vel_ale` + private `compute_CFLz`/`compute_Wvel_split`)
+- [x] linfs (`hnode_new=hnode`); `update_vel` (`UV += UV_rhs + [-g·θ·dt·grad(d_eta)]`, a
+      `gradient_sca` contraction of `d_eta`, FESOM2 `oce_dyn.F90:88-173`); `compute_hbar_ale`
+      (`hbar_old=hbar`; `hbar += dt/areasvol·div(UV)`; `dhe`; the linfs water-flux term vanishes);
+      `eta_n = α·hbar + (1−α)·hbar_old` (α=1 ⇒ `eta_n=hbar`); thickness/W update `vert_vel_ale`
+      (W = −cumsum(div(UV·h))/area; linfs leaves `hnode_new=hnode`; then `compute_CFLz` +
+      `compute_Wvel_split` explicit/implicit split). The **`K_v⁻` deformation bound is NOT in the
+      post-CG ALE path** — `Kv` is produced by PP mixing (M2.8); the bullet was a mislabel, folded
+      into M2.8. Fer_GM/ldiag_ke branches dropped (no GM / no `ke_*` in v1).
+- [x] **Gate:** operator-diff `max|Δ|=0` on `uv_upd` + `ssh_rhs_old` + `hbar` + `dhe` + `eta_n_upd`
+      + `w` + `hnode_new` + `cfl_z` + `w_split_e`/`w_split_i` (+ prescribed `hbar_in`) — 11 new
+      records → **43 fields** in `run_pressure_gate.sh`. PASS first run (L9 transitive: every operand
+      pre-gated — `d_eta` M2.6, post-TDMA `UV_rhs` M2.5, geometry, edge order). Non-vacuous: the Wvel
+      split fired on 13253 (nz,node) (`CFL_z>wsplit_maxcfl`), `max|w|=0.042` m/s. Debug `-check all`
+      clean (compute clean; the I/O writer needs `ulimit -s unlimited` for the big array temporary). (L20)
 
 #### Task M2.8: PP vertical mixing
 **Files:** Create: `src/oce/oce_mix_pp.F90`

@@ -28,6 +28,7 @@ program fesom_pressuredump
     use oce_dyn_ivertvisc, only: impl_vert_visc_ale
     use oce_ssh_rhs,      only: init_stiff_mat_ale, compute_ssh_rhs_ale
     use oce_ssh_solve,    only: solve_ssh_ale
+    use oce_ale,          only: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
     use mod_param_phys,   only: alpha, theta
     use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3
     implicit none
@@ -67,6 +68,13 @@ program fesom_pressuredump
     real(kind=WP), allocatable :: ssh_diag(:), ssh_Aeta(:)
     integer       :: n_ssh_iter, row, ni, ne2
     real(kind=WP) :: sum_ssh_rhs, resid_inf
+    ! --- M2.7 ALE (linfs) velocity / SSH / thickness-W update ---
+    ! Saved copies of the prescribed inputs the M2.7 kernels overwrite in place
+    ! (eta_n by update_eta_n; w_e/w_i by compute_Wvel_split) so the M2.3/M2.4/M2.5
+    ! INPUT dump records still echo the prescription, not the M2.7 output.
+    real(kind=WP), allocatable :: hbar_in(:), eta_n_in(:), w_e_in(:,:), w_i_in(:,:)
+    real(kind=WP), allocatable :: uv_upd(:,:,:)
+    integer       :: n_cflsplit
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -366,6 +374,60 @@ program fesom_pressuredump
         ' ; max|d_eta|=', maxval(abs(dyn%d_eta)), ' ; sum(ssh_rhs)=', sum_ssh_rhs, &
         ' ; ||A d_eta - rhs||inf=', resid_inf
 
+    ! ============== M2.7 ALE (linfs) velocity / SSH / thickness-W update ==============
+    ! The post-CG tail of the timestep (FESOM2 oce_ale.F90:3946-4081), run AFTER the SSH
+    ! solve. Build the ALE thickness state the update reads/writes: mesh%hbar (prescribed,
+    ! the previous-step elevation), hbar_old/dhe (outputs), hnode_new=hnode (linfs never
+    ! evolves it), and dyn%w/cfl_z. Force the pi wsplit config (use_wsplit=.true.,
+    ! wsplit_maxcfl=1.0). alpha=theta=1.0 already set above. The chain is, in order:
+    !   update_vel (UV += UV_rhs + SSH-grad) -> compute_hbar_ale (hbar/dhe/ssh_rhs_old)
+    !   -> update_eta_n (eta_n=hbar) -> vert_vel_ale (w + cfl_z + Wvel split). dyn%uv_rhs
+    ! is the post-TDMA uv_rhs_ivv; dyn%uv is the prescribed UV (update_vel overwrites it).
+    allocate(mesh%hbar(mesh%nod2D), mesh%hbar_old(mesh%nod2D), mesh%dhe(mesh%elem2D))
+    allocate(mesh%hnode_new(nl-1, mesh%nod2D))
+    allocate(dyn%w(nl, mesh%nod2D), dyn%cfl_z(nl, mesh%nod2D))
+    mesh%hbar_old  = 0.0_MP
+    mesh%dhe       = 0.0_MP
+    mesh%hnode_new = mesh%hnode            ! linfs: hnode_new == hnode (never evolves)
+    dyn%w          = 0.0_WP
+    dyn%cfl_z      = 0.0_WP
+    dyn%use_wsplit    = .true.             ! pi production value (namelist.dyn)
+    dyn%wsplit_maxcfl = 1.0_WP
+
+    ! analytic previous-step elevation hbar (sign-varying, ~0.6 m). MUST match the oracle.
+    do n = 1, mesh%nod2D
+        lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
+        mesh%hbar(n) = 0.4_WP*sin(lon)*cos(lat) - 0.2_WP*cos(2.0_WP*lat)
+    end do
+
+    ! save the prescribed inputs the M2.7 kernels overwrite in place
+    allocate(hbar_in(mesh%nod2D), eta_n_in(mesh%nod2D))
+    allocate(w_e_in(nl,mesh%nod2D), w_i_in(nl,mesh%nod2D), uv_upd(2,nl-1,mesh%elem2D))
+    hbar_in  = mesh%hbar
+    eta_n_in = dyn%eta_n
+    w_e_in   = dyn%w_e
+    w_i_in   = dyn%w_i
+
+    call update_vel(dyn, mesh, dt_velrhs)           ! UV += UV_rhs + [-g*theta*dt*grad(d_eta)]
+    uv_upd = dyn%uv
+    call compute_hbar_ale(dyn, mesh, dt_velrhs)     ! ssh_rhs_old, hbar_old, hbar, dhe
+    call update_eta_n(dyn, mesh)                    ! eta_n = alpha*hbar + (1-alpha)*hbar_old
+    call vert_vel_ale(dyn, mesh, dt_velrhs)         ! w + cfl_z + w_e/w_i split
+
+    ! gate-strength diagnostic (NOT dumped): the Wvel split fires only where CFL_z >
+    ! wsplit_maxcfl. A non-zero share confirms the split formula (dd, Wvel_e/Wvel_i) is
+    ! genuinely exercised (not just the trivial Wvel_e=Wvel branch), the L11/L17 guard.
+    n_cflsplit = 0
+    do n = 1, mesh%nod2D
+        do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)
+            if (dyn%cfl_z(nz,n) > dyn%wsplit_maxcfl) n_cflsplit = n_cflsplit + 1
+        end do
+    end do
+    write(*,'(a,es10.3,a,es10.3,a,es10.3,a,i0)') &
+        'fesom_pressuredump: ale: max|uv_upd|=', maxval(abs(uv_upd)), &
+        ' ; max|hbar|=', maxval(abs(mesh%hbar)), ' ; max|w|=', maxval(abs(dyn%w)), &
+        ' ; CFL_z>maxcfl on ', n_cflsplit
+
     ! --- dump (same FADVHDMP format / names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'temp',           real(temp,        MP))
@@ -383,10 +445,10 @@ program fesom_pressuredump
     ! M2.3 vel_rhs + M2.4 momadv: gated coriolis + prescribed inputs (incl. w_e) +
     ! the momadv nodal intermediate (uvnode_rhs) + the full-assembly outputs.
     call wr_r1(u, 'coriolis',       real(mesh%coriolis(1:mesh%elem2D), MP))
-    call wr_r1(u, 'eta_n',          real(dyn%eta_n,        MP))
+    call wr_r1(u, 'eta_n',          real(eta_n_in,         MP))   ! prescribed (pre-M2.7)
     call wr_r3(u, 'uv_in',          real(uv_in,            MP))
     call wr_r3(u, 'uv_rhsAB_prev',  real(uv_rhsAB_prev,    MP))
-    call wr_r2(u, 'w_e',            real(dyn%w_e(1:nl, :), MP))
+    call wr_r2(u, 'w_e',            real(w_e_in(1:nl, :),  MP))   ! prescribed (pre-split)
     call wr_r3(u, 'uvnode_rhs',     real(uvnode_rhs_dump,  MP))
     call wr_r3(u, 'uv_rhsAB_cor',   real(uv_rhsAB_cor,     MP))
     call wr_r3(u, 'uv_rhs_eul',     real(uv_rhs_eul,       MP))
@@ -400,7 +462,7 @@ program fesom_pressuredump
     ! the post-solve UV_rhs (gate target).
     call wr_r2(u, 'Av',             real(Av(1:nl, :),      MP))
     call wr_r2(u, 'stress_surf',    real(stress_surf,      MP))
-    call wr_r2(u, 'w_i',            real(dyn%w_i(1:nl, :), MP))
+    call wr_r2(u, 'w_i',            real(w_i_in(1:nl, :),  MP))   ! prescribed (pre-split)
     call wr_r3(u, 'uv_rhs_ivv',     real(uv_rhs_ivv,       MP))
     ! M2.6 SSH: the stiffness diagonal + matvec A*eta_n (localise the matrix assembly),
     ! the assembled ssh_rhs, and the CG solution d_eta (the gate target).
@@ -408,6 +470,21 @@ program fesom_pressuredump
     call wr_r1(u, 'ssh_Aeta',       real(ssh_Aeta,    MP))
     call wr_r1(u, 'ssh_rhs',        real(dyn%ssh_rhs, MP))
     call wr_r1(u, 'd_eta',          real(dyn%d_eta,   MP))
+    ! M2.7 ALE velocity/SSH/thickness-W update: the prescribed hbar input + the updated
+    ! UV (update_vel) + the divergence ssh_rhs_old + new hbar/dhe (compute_hbar_ale) + the
+    ! blended eta_n + the vertical velocity w (vert_vel_ale) + hnode_new (=hnode, linfs) +
+    ! cfl_z (compute_CFLz) + the explicit/implicit Wvel split (compute_Wvel_split).
+    call wr_r1(u, 'hbar_in',        real(hbar_in,          MP))
+    call wr_r3(u, 'uv_upd',         real(uv_upd,           MP))
+    call wr_r1(u, 'ssh_rhs_old',    real(dyn%ssh_rhs_old,  MP))
+    call wr_r1(u, 'hbar',           real(mesh%hbar,        MP))
+    call wr_r1(u, 'dhe',            real(mesh%dhe,         MP))
+    call wr_r1(u, 'eta_n_upd',      real(dyn%eta_n,        MP))
+    call wr_r2(u, 'w',              real(dyn%w(1:nl, :),   MP))
+    call wr_r2(u, 'hnode_new',      real(mesh%hnode_new(1:nl-1, :), MP))
+    call wr_r2(u, 'cfl_z',          real(dyn%cfl_z(1:nl, :), MP))
+    call wr_r2(u, 'w_split_e',      real(dyn%w_e(1:nl, :), MP))
+    call wr_r2(u, 'w_split_i',      real(dyn%w_i(1:nl, :), MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_pressuredump: wrote '//trim(out_path)
 
