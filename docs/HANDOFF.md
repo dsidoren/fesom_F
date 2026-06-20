@@ -39,7 +39,9 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `tools/run_step_gate.sh` (**13 node substeps × 5 probes = 65 records**, vs the REAL `oce_timestep_ale`).
   **M2 minimal dynamical core COMPLETE through the assembled step + M2.10 forcing COMPLETE (M2.10a read [the FIRST
   netCDF I/O] + M2.10b bulk coeffs/wind stress + M2.10c SW penetration; `tools/run_forcing_gate.sh`, 20 fields
-  `max|Δ|=0`). Next: M2.11 (full driver + single-rank CORE2 byte-gate).**
+  `max|Δ|=0`) + M2.11a CORE2 geometry byte-gate COMPLETE (`max|Δ|=0`, 19 fields, CORE2 1-rank — closed the L8
+  CW-swap deferral: **244654/244659** `enforce_cw_orientation` swaps). Next: M2.11b (PHC/WOA initial conditions)
+  → M2.11c (full driver + multi-step CORE2 gate).**
   M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
@@ -53,10 +55,10 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `max|Δ|=0` vs FESOM2 on pi (1-rank): elem_area, elem_cos, metric_factor, gradient_sca,
   edge_dxdy, edge_cross_dxdy, area/areasvol(+inv), coord_nod2D, elem2D_nodes, edges,
   edge_tri, all level arrays. Run it: `tools/run_geom_gate.sh`.
-  ⚠️ **Caveat:** pi has 0/5839 CW swaps, so the `enforce_cw_orientation` vertex-reorder
-  path is byte-identical-by-construction to FESOM2 `test_tri` but NOT yet empirically
-  gated (soufflet=228/5700, CORE2 will have swaps). Confirm at the M2.11 CORE2 gate or on
-  soufflet. See LESSONS L8.
+  ✅ **Caveat CLOSED (M2.11a, 2026-06-20):** the CW-swap path is now EMPIRICALLY gated — CORE2 needs
+  **244654/244659** `enforce_cw_orientation` swaps (≈100%, mesh stored CCW; pi had 0), and the post-swap
+  `elem2D_nodes` + centroid + `elem_area`/`gradient_sca`/`area` are all `max|Δ|=0` vs FESOM2's runtime
+  `test_tri` on CORE2 1-rank (`tools/run_geom_gate_core2.sh`, 19 fields). See LESSONS L8 + **L26**.
 - **M1.1 horizontal tracer advection byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs
   FESOM2 on every field: `del_ttf_advhoriz` (the gate target) AND `adv_flux_hor` for BOTH
   upwind (UPW1) and MUSCL, plus every intermediate (helem, nboundary_lay, edge_up_dn_tri,
@@ -343,9 +345,10 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `ice%data(1)`=a_ice + the REAL `cal_shortwave_rad` via an explicit interface). Non-vacuous (chl floor fires on 476
   polar nodes, `sw_3d` decays over depth). `max|Δ|=0` first gate run; Debug `-check all` clean; ctest 13/13 + pressure
   gate (57 fields) still green. **M2.10 forcing COMPLETE.**
-- **Current task:** M2.11 (full driver + single-rank CORE2 byte-gate). Build the real `fesom` lifecycle reading the
-  CORE2 mesh + PHC IC (partition-matched, in-situ→potential T + `extrap_nod3D` fill) + JRA/CORE forcing; gate
-  per-substep `max|Δ|=0` vs FESOM2 on single-rank CORE2. **SCOPE carried from M2.10 (LESSONS L25):** the air-sea
+- **Current task:** M2.11b (initial conditions). **M2.11a CORE2 geometry byte-gate ✅ DONE** (`max|Δ|=0`, 19 fields,
+  CORE2 1-rank; L8 CW-swap deferral closed — 244654/244659 swaps, `tools/run_geom_gate_core2.sh`). Remaining M2.11:
+  build the real `fesom` lifecycle reading the CORE2 mesh + PHC IC (partition-matched, in-situ→potential T +
+  `extrap_nod3D` fill) + JRA/CORE forcing; gate per-substep `max|Δ|=0` vs FESOM2 on single-rank CORE2. **SCOPE carried from M2.10 (LESSONS L25):** the air-sea
   `heat_flux`/`water_flux` budget is the **obudget in `ice_thermo_oce.F90` + `oce_fluxes`** = M3 (ice/thermo); M2.10
   produces `stress_surf` + `sw_3d` live, leaving `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` prescribed until
   M3. So a full CORE2 run at M2.11 still needs those prescribed (or a reduced gate) until the M3 ice/thermo lands.
@@ -671,10 +674,14 @@ M2-MVP capstone: the FIRST real time-stepping run, not a prescribe-and-stop shim
 sub-tasks (mirroring M2.10a/b/c); scoping done **2026-06-20** (3 oracle-investigation passes — all input paths verified
 reachable: CORE2 mesh `/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2/`, IC `tests/data/INITIAL/{WOA18,phc3.0}/`):
 
-- **M2.11a — CORE2 geometry byte-gate (DO FIRST; de-risks everything downstream).** Scale mesh-read ~40× (CORE2
-  `nod2D=126858`/`elem2D=244659`/`edge2D=371644`/`edge2D_in=362333`/`nl=48`) and **empirically close the L8 CW-swap
-  deferral**: ≈244653/244659 CORE2 elements need the `enforce_cw_orientation` swap (mesh stored CCW; pi had 0 → this
-  path is gated for the first time). **No `dist_1` exists** (only dist_2/4/…/512) → hand-craft from the pi template
+- **M2.11a — CORE2 geometry byte-gate — ✅ DONE (2026-06-20; `max|Δ|=0`, 19 fields, `tools/run_geom_gate_core2.sh`).**
+  Scaled mesh-read ~40× (CORE2 `nod2D=126858`/`elem2D=244659`/`edge2D=371644`/`edge2D_in=362333`/`nl=48`) and **CLOSED
+  the L8 CW-swap deferral**: FESOM3 made **244654/244659** `enforce_cw_orientation` swaps (≈100%, mesh stored CCW; pi
+  had 0) and the post-swap `elem2D_nodes`/centroid/`elem_area`/`gradient_sca`/`area` are all `max|Δ|=0` vs the oracle's
+  runtime `test_tri`. **`tools/make_dist1.py`** hand-crafts dist_1 (validated vs the pi template); `fesom_geomdump`
+  needed NO code change (just `FESOM3_MESH_DIR`); the geom shim stops at mesh_setup (~2 s, mesh-only). See LESSONS L26.
+  ↳ **ACTIVE NEXT: M2.11b.** *(historical scoping notes follow.)* **No `dist_1` existed** (only dist_2/4/…/512) →
+  hand-crafted from the pi template
   (`tests/data/MESHES/pi/dist_1/`: `rpart.out`=npes/nod2D/identity-list, `my_list00000.out`=identity,
   `com_info00000.out`=empty halo w/ blank lines). Run the existing FESOM2 geom-dump shim (`fesom_geom_dump.F90`, fires
   at `mesh_setup`, STOPS before forcing → NO lifecycle/output-crash exposure) + `fesom_geomdump` on CORE2 1-rank;

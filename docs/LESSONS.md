@@ -1020,3 +1020,39 @@ The first kernel that reads real files (CORE2 NCAR stubs `test/input/global/{u_1
   `FESOM3_LIB_DIRS` (auto-globbed once created). One forcing gate (`run_forcing_gate.sh`) now covers all 20 fields
   (read→bulk→SW pene, a real producer chain on the LIVE read); `pressure_diff.py` is the generic comparator (its
   "PRESSURE/EOS…" trailer is cosmetic).
+
+## L26 — CORE2 geometry byte-gate (M2.11a): the L8 CW-swap deferral CLOSED; the proven geom pipeline scales 40× with NO code change (PASSED first run)
+
+M2.11a (the FIRST gate on the CORE2 mesh — nod2D=126858 / elem2D=244659 / edge2D=371644 / edge2D_in=362333 / nl=48,
+~40× pi) byte-matched FESOM2 `max|Δ|=0` on the FIRST run, on **all 19 geometry fields** (coord/geo_coord/elem2D_nodes
++ elem_area/elem_cos/metric_factor/gradient_sca + edge_dxdy/edge_cross_dxdy + area/areasvol/(inv) + edges/edge_tri +
+the level arrays). Run it: `tools/run_geom_gate_core2.sh`. Reusable specifics:
+
+- **The L8 CW-orientation-swap deferral is now EMPIRICALLY CLOSED.** pi has 0/5839 swaps, so `enforce_cw_orientation`'s
+  reorder path (`mod_mesh_read.F90:150-174`: `r=b1·c2−b2·c1`, swap nodes 2,3 when `r>0`) was byte-identical-to-FESOM2-
+  test_tri *by construction* but NEVER exercised. CORE2 is stored CCW → FESOM3 reports **CW swaps = 244654/244659**
+  (≈100%), and the post-swap `elem2D_nodes` (integer node order) AND every geometry quantity that depends on it
+  (centroid `sum/3`, `elem_area`, `gradient_sca`, the per-node `area=Σelem_area/3` accumulation) are `max|Δ|=0` vs the
+  oracle's runtime `test_tri`. The reorder is the SAME b/c/trim_cyclic/r>0 logic operating on the SAME byte-proven
+  coords, so it matches — but it is now *gated*, not just *argued*. This was the single biggest M2.11 risk; it's gone.
+- **The whole geom pipeline scaled 40× with ZERO FESOM3 code change.** `fesom_geomdump` already parameterized the mesh
+  dir (`FESOM3_MESH_DIR`); `read_mesh`/`compute_geometry`/`enforce_cw_orientation` are all allocatable-sized and
+  mesh-agnostic. So the FESOM3 side is just `FESOM3_MESH_DIR=<core2> mpirun -n1 fesom_geomdump` — no new code, no
+  rebuild. The diff was exactly 0 (NOT the L10/L19 uniform-ULP signature), confirming the M2.10 build is sound for
+  geometry and an incremental rebuild was unnecessary here.
+- **The single-rank `dist_1` is hand-crafted + MESH-INDEPENDENT in its hard part.** FESOM2 always reads a partition;
+  METIS can't make dist_1, so `tools/make_dist1.py` mirrors `save_dist_mesh` np=1 (validated by re-parsing the proven pi
+  dist_1): `rpart.out`=npes(1)/count(nod2D)/identity-map 1..nod2D; `my_list00000.out`=`0` then per-domain
+  `myDim`/`eDim`(0)[/`eXDim`(0)]/identity-list (each SCALAR on its OWN line — list-directed READ starts a new record per
+  statement so a scalar read consumes a whole line; LISTS may wrap freely since a list read spans records until full);
+  `com_info00000.out`=empty np=1 comm structs (rPEnum=sPEnum=0, blank zero-size arrays, rptr=sptr=1) — this file is
+  **byte-identical across meshes** (no nod2D/elem2D content), so COPY pi's verbatim. The oracle read it first try
+  ("rpart is read / myLists are read / communication arrays are read"). Lives in `<core2>/dist_1/` (the mesh dir, like
+  pi's), NOT in the FESOM3 repo (external artifact; the generator is the tracked deliverable).
+- **The geom-dump shim STOPS at mesh_setup (MPI_FINALIZE+stop, `fesom_geom_dump.F90:88`), BEFORE ocean_setup/forcing**,
+  so the CORE2 oracle run is ~2 s and reads ONLY the mesh (no IC/forcing — bypasses every downstream 1-rank issue).
+  CORE2 `test_tri`=3.5 ms, `load_edges`=0.38 s, 246 MB dump. Fast even at 40× pi.
+- **Safe deferrals CONFIRMED on CORE2** (read the mesh, don't guess): min `nlevels=5` for nodes AND elems → NO
+  single-layer columns (the L18 `impl_vert_visc_ale` benign-OOB guard is NOT needed, same as pi); cavity + partial-cell
+  OFF. So the M2.11b/c kernels inherit pi's safe assumptions. (The deferred cavity/partial-cell + the FCT AUX-scratch
+  cavity caveat (L11) still await a cavity mesh — `pi_cavity` exists in tests/data, a later gate.)

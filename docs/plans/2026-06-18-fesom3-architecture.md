@@ -523,7 +523,12 @@ FESOM2 shim `port2/fesom2/src/fesom_step_dump.F90`, `tools/run_step{dump_pi,_gat
 
 #### Task M2.11: Full driver + single-rank CORE2 byte-gate
 **Files:** Create: `src/drivers/fesom.F90`, `src/step/mod_model.F90` (full lifecycle), `src/io/` (minimal)
-- [ ] `fesom` driver: read CORE2 mesh + **PHC IC (partition-matched)** + JRA55; `model_init/step/finalize`
+- [x] **M2.11a CORE2 geometry byte-gate — ✅ DONE (2026-06-20, max|Δ|=0, 19 fields).** Scaled the mesh pipeline 40×
+      (nod2D=126858/elem2D=244659/edge2D=371644/nl=48) + **closed the L8 CW-swap deferral** (FESOM3 made 244654/244659
+      `enforce_cw_orientation` swaps — ≈100%, mesh stored CCW; pi had 0 — post-swap geometry max|Δ|=0). `tools/make_dist1.py`
+      hand-crafts the single-rank dist_1; `tools/run_geom_gate_core2.sh`; `fesom_geomdump` unchanged (`FESOM3_MESH_DIR`).
+      Confirmed safe: min nlevels=5 (no single-layer cols, L18 N/A), cavity+partial-cell OFF. See LESSONS L26.
+- [ ] **M2.11b** `fesom` driver: read CORE2 mesh + **PHC IC (partition-matched)** + JRA55; `model_init/step/finalize`
 - [ ] PHC IC: in-situ→potential T conversion; `extrap_nod3D` fill (accept partition-order dependence)
 - [ ] **Gate:** **per-substep `max|Δ|=0` vs FESOM2 on single-rank CORE2**
 
