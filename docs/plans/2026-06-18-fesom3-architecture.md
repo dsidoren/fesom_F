@@ -445,13 +445,17 @@ matches FESOM2's `oce_ale_vel_rhs.F90` layout); viscosity → `src/oce/oce_dyn_v
       Non-vacuous: the Ri factor spans [5.8e-7, 0.93] (62.4% of node-levels > 0.1), `max|Kv|`=8e-3
       (800× the K_ver background), `max|Av|`=8.7e-3. Debug `-check all` clean. See LESSONS L21.
 
-#### Task M2.8b: `mo_convect` — convective adjustment
-**Files:** Create: `src/oce/oce_mo_conv.F90`
-- [ ] transcribe `oce_mo_conv.F90` (called AFTER PP — `oce_ale.F90:3729`); applies the instability
-      adjustment to **both `Kv` (nodes, `oce_mo_conv.F90:85`) AND `Av` (elements, line 108)**
-- [ ] pin run-namelist switches: `use_instabmix=.true., instabmix_kv=0.1` (the source of the `0.1`);
-      confirm `use_momix=.false.`, `use_windmix=.false.` (only the instability branch is live in M2)
-- [ ] **Gate:** operator-diff `max|Δ|=0` on `Kv` and `Av`
+#### Task M2.8b: `mo_convect` — convective adjustment ✅ DONE (byte-gate CLOSED, pi 1-rank)
+**Files:** Created: `src/oce/oce_mo_conv.F90`
+- [x] transcribe `oce_mo_conv.F90` (called AFTER PP — `oce_ale.F90:3729`); applies the instability
+      adjustment to **both `Kv` (nodes, `oce_mo_conv.F90:85`) AND `Av` (elements, line 108)**.
+      `use_momix` (TB04, reads forcing/ice) OMITTED → deferred to M2.10; `use_windmix` transcribed guarded-off.
+- [x] pin run-namelist switches: `use_instabmix=.true., instabmix_kv=0.1` (the source of the `0.1`);
+      forced `use_momix=.false.`, `use_windmix=.false.` (only the instability branch is live in M2)
+- [x] **Gate:** operator-diff `max|Δ|=0` on `moc_Kv` and `moc_Av` (2 new records, 48 fields total).
+      Non-vacuous: a localized unstable T band (warm subsurface lens) makes `bvfreq<0` on 5165 node-levels /
+      9936 elem-levels → the floor fires, `max|ΔKv|`=0.090, `max|ΔAv|`=0.096 (~0.01→0.1). The T/S change
+      cascades but M2.1-M2.8 records all re-verify `max|Δ|=0`. Debug `-check all` clean. See LESSONS L22.
 
 #### Task M2.9a: Tracer-solve assembly (`solve_tracers_ale`)
 **Files:** Create: `src/oce/oce_solve_tracers.F90`

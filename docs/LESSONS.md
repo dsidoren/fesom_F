@@ -801,3 +801,41 @@ byte-matched FESOM2 `max|Δ|=0` on the FIRST Release gate run (3 new fields `uvn
   (ifort `#6796`) — FESOM2 declares `dynamics` `target` too; mirror it. The only compile error; otherwise the
   transcription + Debug `-check all` were clean first try (the L15 `elem2D_nodes(1:3,elem)` slice avoids the
   MAX_NV=4 trap; FESOM2's `elem2D_nodes(:,elem)` is `(3,·)` on its runtime path so its `:` is already 1:3).
+
+## L22 — Convective adjustment (M2.8b): the FIRST gate to deliberately perturb the shared T/S (an unstable band) for non-vacuity — the cascade auto-re-verifies (PASSED first gate run)
+
+M2.8b (`mo_convect`: where N²<0, floor `Kv` nodes / `Av` elements to `instabmix_kv`=0.1 — the convective
+overturning proxy, run after PP, FESOM2 `oce_ale.F90:3729`) byte-matched FESOM2 `max|Δ|=0` on the FIRST gate
+run (2 new fields `moc_Kv`/`moc_Av` → **48 fields**). Built `src/oce/oce_mo_conv.F90` (`mo_convect`). Specifics:
+
+- **The convective branch is UNTESTABLE on a stable T/S — perturb the shared input to make `bvfreq<0`, and the
+  cascade re-verifies for free.** The standing prescribed T/S (T↓, S↑ with depth) is statically STABLE
+  everywhere → `bvfreq≥0` → the `if (bvfreq<0) Kv=max(Kv,0.1)` floor NEVER fires → a vacuous gate (passes
+  trivially, a transcription bug in the condition/`max` uncaught). Fix: add a LOCALIZED unstable band to T — a
+  warm subsurface lens `+8·max(0,cos lat·cos lon)·min(nz,8)/8` whose downward warming over the top 8 levels
+  overcomes the −0.20·nz(T)/+0.03·nz(S) stabilisation in the warm hemisphere → `bvfreq<0` on **5165 node-levels
+  / 9936 elem-levels**, the floor genuinely fires (`max|ΔKv|`=0.090, `max|ΔAv|`=0.096, i.e. ~0.01→0.1). This is
+  the FIRST gate to deliberately change the shared T/S — it CASCADES (T→density→hpressure→pgf→vel_rhs→…→every
+  downstream field, 40+ records), but **all M2.1-M2.8 records re-verify `max|Δ|=0` automatically** (both sides
+  use the identical T) — the cascade is harmless, only the new `moc_Kv`/`moc_Av` are added. Keep it BOUNDED
+  (≤+8 °C → T≤~28 °C) and S>0 so the EOS `sqrt(s)` stays well-posed; verify no NaN. (Side effect, noted not
+  re-committed: the unstable region clamps PP's `5·max(N²,0)=0` → the M2.8 Ri factor now reaches exactly **1.0**,
+  vs the [5.8e-7, 0.93] of the M2.8 commit's stable T/S — `pp_Kv`/`pp_Av` re-verify regardless.)
+
+- **`mo_convect` overwrites `Kv`/`Av` in place → save the PP output before calling it (the L20/L21 pattern).**
+  `pp_Kv`/`pp_Av` (the M2.8 records) must dump the PRE-adjustment PP output, but the dump fires at the end after
+  `mo_convect` has floored `Kv`/`Av`. Save `pp_Kv_save`/`pp_Av_save` right after PP, dump those for `pp_Kv`/
+  `pp_Av` and the live post-adjustment `Kv`/`Av` as NEW records `moc_Kv`/`moc_Av`. The difference localises the
+  gate: `pp_*` isolates PP, `moc_*` isolates the convective floor.
+
+- **Port only the reachable branch; OMIT (don't stub) the forcing-coupled `use_momix` block.** FESOM2
+  `mo_convect` has three enhancements: `use_instabmix` (convective, M2-live), `use_windmix` (near-surface, uses
+  only params+`Kv`/`Av` → transcribe guarded-off) and `use_momix` (TB04 Monin-Obukhov). The momix block reads
+  forcing/ice fields not ported yet (`water_flux`/`heat_flux`/`stress_node_surf`/ice/`mo`/`mixlength`/`mo_length`/
+  `pmlktmo`) — they don't EXIST, so it cannot compile → OMIT it entirely (a comment marks it deferred to M2.10),
+  not a dead `if`-guard. Force `use_momix=.false.` in the gate. **Oracle-side gotcha:** the FESOM2 `mo_convect`
+  signature is `(ice, partit, mesh)` and it pointer-assigns `u_ice=>ice%uice` / `v_ice=>ice%vice` /
+  `a_ice=>ice%data(1)%values` UNCONDITIONALLY (before the `use_momix` guard), so the shim's `ice_dummy` must have
+  those three allocated (size `nod2D`) even though `use_momix=.false.` never dereferences them — extend the M2.3
+  `ice_dummy` (which only had `data(2)`/`data(3)` for `compute_vel_rhs`'s `m_ice`/`m_snow`). FESOM3's ported
+  `mo_convect(dyn, mesh)` drops `ice` entirely (no momix → no ice).

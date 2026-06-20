@@ -30,8 +30,10 @@ program fesom_pressuredump
     use oce_ssh_solve,    only: solve_ssh_ale
     use oce_ale,          only: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
     use oce_ale_mixing_pp, only: oce_mixing_pp
+    use oce_mo_conv,      only: mo_convect
     use mod_param_phys,   only: alpha, theta
     use mod_param_phys,   only: mix_coeff_PP, A_ver, K_ver, Kv0_const
+    use mod_param_phys,   only: use_instabmix, instabmix_kv, use_momix, use_windmix
     use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3
     implicit none
 
@@ -80,6 +82,11 @@ program fesom_pressuredump
     ! --- M2.8 PP vertical mixing (oce_mixing_pp -> Kv nodes / Av elements) ---
     real(kind=WP) :: shear, dz_inv, factor, fmin, fmax
     integer       :: nf, nf_big
+    ! --- M2.8b mo_convect convective adjustment (Kv/Av floored where bvfreq<0) ---
+    ! pp_Kv_dump/pp_Av_dump save the post-PP (pre-mo_convect) coefficients so the M2.8
+    ! pp_Kv/pp_Av records still echo the PP output (mo_convect overwrites Kv/Av in place).
+    real(kind=WP), allocatable :: pp_Kv_dump(:,:), pp_Av_dump(:,:)
+    integer       :: n_unstab_n, n_unstab_e
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -145,16 +152,26 @@ program fesom_pressuredump
 
     ! Prescribe analytic temperature + salinity (at nodes). MUST match the FESOM2
     ! oracle src/fesom_pressure_dump.F90 exactly:
-    !   T(nz,n) = 12.0 + 8.0*cos(lat)*cos(lon) - 0.20*nz
+    !   T(nz,n) = 12.0 + 8.0*cos(lat)*cos(lon) - 0.20*nz + dT_unstable(nz,n)
     !   S(nz,n) = 34.5 + 0.5*sin(2*lon)*cos(lat) + 0.03*nz   (always > 0 for sqrt(s))
     ! Strong horizontal (cos lat/lon) + vertical (nz) structure exercises the EOS,
     ! the top-down hpressure integration, the N^2 difference, and the horizontal
     ! N^2 smoother (which only changes a horizontally-varying field).
+    !
+    ! M2.8b: dT_unstable = 8.0*max(0,cos(lat)*cos(lon))*min(nz,8)/8 — a warm subsurface
+    ! lens in the warm hemisphere whose downward warming (d/dnz > 0 over the top 8 levels)
+    ! OVERCOMES the stabilising -0.20*nz (T) and +0.03*nz (S) there, so N^2 goes NEGATIVE
+    ! (statically unstable) in a controlled region. This makes the M2.8b mo_convect
+    ! convective adjustment (Kv/Av floored to instabmix_kv where bvfreq<0) NON-VACUOUS.
+    ! It CASCADES (T -> density -> hpressure -> pgf -> ... -> every downstream field), but
+    ! all M2.1-M2.8 records re-verify max|Δ|=0 (both sides use this identical T). Bounded
+    ! at +8 C (T <= ~28 C) and S unchanged (>0) so the EOS stays well-posed.
     allocate(temp(nl-1, mesh%nod2D), salt(nl-1, mesh%nod2D), density_ref(nl-1, mesh%nod2D))
     do n = 1, mesh%nod2D
         lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
         do nz = 1, nl-1
-            temp(nz, n) = 12.0_WP + 8.0_WP*cos(lat)*cos(lon) - 0.20_WP*real(nz, WP)
+            temp(nz, n) = 12.0_WP + 8.0_WP*cos(lat)*cos(lon) - 0.20_WP*real(nz, WP) &
+                        + 8.0_WP*max(0.0_WP, cos(lat)*cos(lon))*min(real(nz,WP),8.0_WP)/8.0_WP
             salt(nz, n) = 34.5_WP + 0.5_WP*sin(2.0_WP*lon)*cos(lat) + 0.03_WP*real(nz, WP)
         end do
     end do
@@ -490,6 +507,43 @@ program fesom_pressuredump
         '] ; max|Kv|=', maxval(dyn%work%Kv), ' ; max|Av|=', maxval(dyn%work%Av), &
         ' ; factor>0.1 on ', 100.0_WP*real(nf_big,WP)/real(max(nf,1),WP), '% of node-levels'
 
+    ! ============== M2.8b mo_convect convective adjustment ===========================
+    ! Static-instability adjustment, run AFTER PP in the step (FESOM2 oce_ale.F90:3729 ->
+    ! mo_convect): where N^2<0 floor Kv (nodes) / Av (elements) to instabmix_kv (=0.1).
+    ! Save the post-PP Kv/Av first (mo_convect overwrites them in place — the L20 pattern;
+    ! the pp_Kv/pp_Av records keep echoing the PP output). Force the gate knobs:
+    ! use_instabmix=.true./instabmix_kv=0.1 (pi defaults), use_momix=.false. (CRITICAL —
+    ! the TB04 path needs forcing/ice not present pre-forcing; deferred to M2.10),
+    ! use_windmix=.false. (pi default; the branch is guarded off). The unstable T band
+    ! prescribed above makes bvfreq<0 in the warm hemisphere's upper levels -> non-vacuous.
+    ! MUST match the FESOM2 oracle src/fesom_pressure_dump.F90.
+    allocate(pp_Kv_dump(nl, mesh%nod2D), pp_Av_dump(nl, mesh%elem2D))
+    pp_Kv_dump = dyn%work%Kv                 ! save the PP output (pre-adjustment)
+    pp_Av_dump = dyn%work%Av
+    use_instabmix = .true.
+    instabmix_kv  = 0.1_WP
+    use_momix     = .false.                  ! TB04 Monin-Obukhov DEFERRED to M2.10 (forcing/ice)
+    use_windmix   = .false.
+    call mo_convect(dyn, mesh)
+
+    ! gate-strength diagnostic (NOT dumped): how many node/elem levels were statically
+    ! unstable (bvfreq<0) so the convective floor genuinely fired (the L11 weak-gate guard).
+    n_unstab_n = 0; n_unstab_e = 0
+    do n = 1, mesh%nod2D
+        do nz = mesh%ulevels_nod2D(n)+1, mesh%nlevels_nod2D(n)-1
+            if (bvfreq(nz,n) < 0.0_WP) n_unstab_n = n_unstab_n + 1
+        end do
+    end do
+    do e = 1, mesh%elem2D
+        do nz = mesh%ulevels(e)+1, mesh%nlevels(e)-1
+            if (any(bvfreq(nz, mesh%elem2D_nodes(1:3,e)) < 0.0_WP)) n_unstab_e = n_unstab_e + 1
+        end do
+    end do
+    write(*,'(a,i0,a,i0,a,es10.3,a,es10.3)') &
+        'fesom_pressuredump: mo_convect: bvfreq<0 on ', n_unstab_n, ' node-levels / ', &
+        n_unstab_e, ' elem-levels ; max|d Kv|=', maxval(abs(dyn%work%Kv - pp_Kv_dump)), &
+        ' ; max|d Av|=', maxval(abs(dyn%work%Av - pp_Av_dump))
+
     ! --- dump (same FADVHDMP format / names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'temp',           real(temp,        MP))
@@ -550,8 +604,11 @@ program fesom_pressuredump
     ! M2.8 PP vertical mixing: the prescribed nodal-velocity shear input + the gate
     ! targets pp_Kv (vertical diffusivity, nodes) and pp_Av (vertical viscosity, elements).
     call wr_r3(u, 'uvnode',         real(dyn%uvnode,            MP))
-    call wr_r2(u, 'pp_Kv',          real(dyn%work%Kv(1:nl, :),  MP))
-    call wr_r2(u, 'pp_Av',          real(dyn%work%Av(1:nl, :),  MP))
+    call wr_r2(u, 'pp_Kv',          real(pp_Kv_dump(1:nl, :),   MP))   ! PP output (pre-adjustment)
+    call wr_r2(u, 'pp_Av',          real(pp_Av_dump(1:nl, :),   MP))
+    ! M2.8b mo_convect: the post-adjustment Kv/Av (floored to instabmix_kv where bvfreq<0).
+    call wr_r2(u, 'moc_Kv',         real(dyn%work%Kv(1:nl, :),  MP))
+    call wr_r2(u, 'moc_Av',         real(dyn%work%Av(1:nl, :),  MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_pressuredump: wrote '//trim(out_path)
 
