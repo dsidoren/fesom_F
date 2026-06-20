@@ -7,7 +7,7 @@ module mod_mesh_rotate
     use mod_constants, only: rad
     implicit none
     private
-    public :: init_mesh_rotation, g2r, r2g, trim_cyclic, get_cyclic_length
+    public :: init_mesh_rotation, g2r, r2g, vector_g2r, trim_cyclic, get_cyclic_length
 
     real(kind=WP), save :: r2g_matrix(3,3) = 0.0_WP
     real(kind=WP), save :: cyclic_length_rad = 6.283185307179586_WP  ! 2*pi default
@@ -63,6 +63,37 @@ contains
             glon = atan2(yg, xg)
         end if
     end subroutine r2g
+
+    subroutine vector_g2r(tlon, tlat, lon, lat, flag_coord)
+        ! Rotate a 2-D vector (tlon,tlat) from geographic to rotated-mesh components.
+        ! Transcribed VERBATIM from FESOM2 gen_modules_rotate_grid.F90:120-160. Used
+        ! by the M2.10 forcing read to rotate the wind interpolation coefficients
+        ! (flag_coord=0 => (lon,lat) are the ROTATED node coords, so r2g recovers the
+        ! geographic (glon,glat); magnitude-preserving). All angles in radians.
+        integer,       intent(in)    :: flag_coord
+        real(kind=WP), intent(inout) :: tlon, tlat
+        real(kind=WP), intent(in)    :: lon, lat
+        real(kind=WP) :: rlon, rlat, glon, glat
+        real(kind=WP) :: txg, tyg, tzg, txr, tyr, tzr
+        if (flag_coord == 1) then  ! input is in geographical coordinates
+           glon = lon; glat = lat
+           call g2r(glon, glat, rlon, rlat)
+        else                       ! input is in rotated coordinates
+           rlon = lon; rlat = lat
+           call r2g(glon, glat, rlon, rlat)
+        end if
+        ! vector in Cartesian geo. coordinates
+        txg = -tlat*sin(glat)*cos(glon) - tlon*sin(glon)
+        tyg = -tlat*sin(glat)*sin(glon) + tlon*cos(glon)
+        tzg =  tlat*cos(glat)
+        ! vector in rotated Cartesian coordinates
+        txr = r2g_matrix(1,1)*txg + r2g_matrix(1,2)*tyg + r2g_matrix(1,3)*tzg
+        tyr = r2g_matrix(2,1)*txg + r2g_matrix(2,2)*tyg + r2g_matrix(2,3)*tzg
+        tzr = r2g_matrix(3,1)*txg + r2g_matrix(3,2)*tyg + r2g_matrix(3,3)*tzg
+        ! vector in rotated coordinates
+        tlat = -sin(rlat)*cos(rlon)*txr - sin(rlat)*sin(rlon)*tyr + cos(rlat)*tzr
+        tlon = -sin(rlon)*txr + cos(rlon)*tyr
+    end subroutine vector_g2r
 
     elemental subroutine trim_cyclic(b)
         ! wrap a longitude difference into (-L/2, L/2). cyclic_length in radians.

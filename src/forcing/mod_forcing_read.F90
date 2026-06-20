@@ -1,0 +1,383 @@
+module mod_forcing_read
+    ! Surface-forcing READ + space/time interpolation (M2.10a). Transcribed from
+    ! FESOM2 v2.7.3 gen_surface_forcing.F90 (MODULE g_sbf):
+    !   julday              (1850-1889)  Numerical-Recipes Julian Day Number
+    !   calendar_date       (1892-1935)  inverse (only the year is used)
+    !   binarysearch        (1962-2006)  bisection -> largest index with arr(i)<=val
+    !   nc_readTimeGrid     ( 223- 538)  read lon/lat/time axes; time-axis transform
+    !                                     to days-since-0001; periodic-lon halo; lat flip
+    !   nc_sbc_ini          (1047-1468)  build per-node bilinear indices; cold-start
+    !                                     getcoeffld; g2r wind-coef rotation
+    !   getcoeffld          ( 724-1020)  read 2 bracketing real(4) slices; spatial
+    !                                     bilinear -> data1/data2; coef_a/coef_b
+    !   data_timeinterp     (1022-1045)  atmdata = rdate*coef_a + coef_b
+    !
+    ! BIT-IDENTITY NOTES:
+    ! * The time interp is kept as the EXACT two-stage form coef_a=(data2-data1)/dt;
+    !   coef_b=data1-coef_a*nc_time(t_indx); atmdata=rdate*coef_a+coef_b. nc_time and
+    !   rdate live on the Julian-Day scale (~710820 for the pi CORE2 noleap year 1948
+    !   = 365*1948; ~2.43e6 for JRA gregorian), so rdate*coef_a and coef_b nearly
+    !   cancel — NEVER refactor to data1+coef_a*(rdate-nc_time) (the WP rounding of
+    !   the large coef_b differs). FESOM2 getcoeffld:1015-1016 + data_timeinterp:1041.
+    ! * The coefficients are built at the COLD-START rdate (no half-step shift,
+    !   nc_sbc_ini:643-644) and evaluated at the per-step rdate (with the -dt/2
+    !   half-step shift, sbc_do:1527-1528). Both passed in by the caller.
+    ! * The raw slices stay real(4) (on-disk type); they promote to WP inside the
+    !   bilinear weight expression exactly as FESOM2 (real(4) sbcdata * real(WP) wgt).
+    ! * julday for 'noleap'/'none'/'365_days' = 365*yyyy (the else branch, :1887).
+    ! * The g2r wind rotation acts on the interpolation COEFFICIENTS (coef_a, coef_b)
+    !   separately — rotating the two linear coefficients then evaluating a*t+b equals
+    !   rotating the evaluated vector (nc_sbc_ini:703-707).
+    !
+    ! SCOPE (M2.10a): the READ only — produces atmdata for the enabled fields. The
+    ! bulk transfer coefficients + wind stress (M2.10b) and SW penetration (M2.10c)
+    ! consume these; heat/water flux air-sea budget is M3 (ice thermo). The async
+    ! prefetch reader stack + the SSS/runoff/chl climatology reads are NOT ported
+    ! (perf / separate fields).
+    use, intrinsic :: iso_fortran_env, only: real32, real64
+    use mod_precision, only: WP
+    use mod_constants,  only: rad
+    use mod_io_netcdf
+    use mod_mesh_rotate, only: vector_g2r
+    use mod_mesh,   only: t_mesh
+    use mod_partit, only: t_partit
+    implicit none
+    private
+    public :: t_atm_forcing, forcing_alloc, forcing_read_grid, forcing_build_bilin, &
+              forcing_getcoeffld, forcing_rotate_wind, forcing_timeinterp, &
+              forcing_julday, forcing_binarysearch
+
+    integer, parameter, public :: FRC_MAXFLD = 16
+
+    type :: t_ffile
+        character(len=512) :: file_base = ''   ! e.g. '<path>/u_10.'  (year + '.nc' appended)
+        character(len=64)  :: varname  = ''    ! e.g. 'U_10_MOD'
+        character(len=64)  :: calendar = 'none'
+        integer            :: nlon = 0, nlat = 0, ntime = 0   ! nlon INCLUDES the +2 lon halo
+        integer            :: year_orig = 0
+        real(WP), allocatable :: nc_lon(:), nc_lat(:), nc_time(:)
+        integer            :: flip_lat = 0
+    end type t_ffile
+
+    type :: t_atm_forcing
+        integer :: nfld   = 0
+        integer :: nnod   = 0            ! myDim_nod2D + eDim_nod2D
+        integer :: iyear  = 1948, imm = 1, idd = 1   ! time-axis reference (nm_nc_*)
+        integer :: freq   = 1            ! nm_nc_freq
+        integer :: tmid   = 1            ! nm_nc_tmid
+        logical :: ic_cyclic = .true.
+        logical :: rotated_grid = .true.
+        integer :: i_xwind = 0, i_ywind = 0   ! wind-pair field indices for g2r (0 = none)
+        type(t_ffile)         :: f(FRC_MAXFLD)
+        integer,  allocatable :: idx_i(:,:), idx_j(:,:)   ! (nfld, nnod) bilinear indices
+        real(WP), allocatable :: coef_a(:,:), coef_b(:,:) ! (nfld, nnod) time-interp coeffs
+        real(WP), allocatable :: atmdata(:,:)             ! (nfld, nnod) interpolated data
+    end type t_atm_forcing
+
+contains
+
+    ! ---- Numerical-Recipes Julian Day (FESOM2 julday, 1850-1889) -----------------
+    integer function forcing_julday(yyyy, mm, dd, calendar) result(jd)
+        integer, intent(in) :: yyyy, mm, dd
+        character(len=*), intent(in) :: calendar
+        integer, parameter :: IGREG = 15 + 31*(10 + 12*1582)
+        integer :: ja, jm, jy
+        if ((trim(calendar) == 'julian')              .or. &
+            (trim(calendar) == 'gregorian')           .or. &
+            (trim(calendar) == 'proleptic_gregorian') .or. &
+            (trim(calendar) == 'standard')) then
+            jy = yyyy
+            if (jy == 0) error stop 'julday: there is no year zero'
+            if (jy < 0) jy = jy + 1
+            if (mm > 2) then
+                jm = mm + 1
+            else
+                jy = jy - 1
+                jm = mm + 13
+            end if
+            jd = int(365.25_WP*jy) + int(30.6001_WP*jm) + dd + 1720995
+            if (dd + 31*(mm + 12*yyyy) >= IGREG) then
+                ja = int(0.01_WP*jy)
+                jd = jd + 2 - ja + int(0.25_WP*ja)
+            end if
+        else
+            jd = 365*yyyy
+        end if
+    end function forcing_julday
+
+    ! Inverse: only the YEAR is consumed (FESOM2 calendar_date, 1892-1935).
+    integer function forcing_calyear(julian, calendar) result(yyyy)
+        integer, intent(in) :: julian
+        character(len=*), intent(in) :: calendar
+        integer, parameter :: IGREG = 2299161
+        integer :: ja, jb, jc, jd, je, mm
+        real(WP) :: x
+        if ((trim(calendar) == 'julian')              .or. &
+            (trim(calendar) == 'gregorian')           .or. &
+            (trim(calendar) == 'proleptic_gregorian') .or. &
+            (trim(calendar) == 'standard')) then
+            if (julian >= IGREG) then
+                x = ((julian - 1867216) - 0.25_WP)/36524.25_WP
+                ja = julian + 1 + int(x) - int(0.25*x)
+            else
+                ja = julian
+            end if
+            jb = ja + 1524
+            jc = int(6680 + ((jb - 2439870) - 122.1_WP)/365.25_WP)
+            jd = int(365*jc + (0.25_WP*jc))
+            je = int((jb - jd)/30.6001_WP)
+            mm = je - 1
+            if (mm > 12) mm = mm - 12
+            yyyy = jc - 4715
+            if (mm > 2) yyyy = yyyy - 1
+            if (yyyy <= 0) yyyy = yyyy - 1
+        else
+            yyyy = int((real(julian) + 1.e-12_WP)/365._WP)
+        end if
+    end function forcing_calyear
+
+    ! ---- bisection: largest index with array(ind) <= value (FESOM2, 1962-2006) ---
+    subroutine forcing_binarysearch(length, array, value, ind)
+        integer,  intent(in)  :: length
+        real(WP), intent(in)  :: array(length)
+        real(WP), intent(in)  :: value
+        integer,  intent(out) :: ind
+        integer :: left, middle, right
+        real(WP), parameter :: d = 1e-9_WP
+        left = 1
+        right = length
+        do
+            if (left > right) exit
+            middle = nint((left + right)/2.0_WP)
+            if (abs(array(middle) - value) <= d) then
+                ind = middle
+                return
+            else if (array(middle) > value) then
+                right = middle - 1
+            else
+                left = middle + 1
+            end if
+        end do
+        ind = right
+    end subroutine forcing_binarysearch
+
+    subroutine forcing_alloc(frc)
+        type(t_atm_forcing), intent(inout) :: frc
+        allocate(frc%idx_i(frc%nfld, frc%nnod), frc%idx_j(frc%nfld, frc%nnod))
+        allocate(frc%coef_a(frc%nfld, frc%nnod), frc%coef_b(frc%nfld, frc%nnod))
+        allocate(frc%atmdata(frc%nfld, frc%nnod))
+    end subroutine forcing_alloc
+
+    ! ---- read lon/lat/time axes + transform time axis (FESOM2 nc_readTimeGrid) ----
+    subroutine forcing_read_grid(frc, fld, year)
+        type(t_atm_forcing), intent(inout) :: frc
+        integer, intent(in) :: fld, year
+        character(len=512) :: fname
+        character(len=4) :: cyear
+        integer :: ncid, nlon0, i, yyyy
+        real(real64), allocatable :: tmp(:)
+        write(cyear, '(I4)') year
+        fname = trim(frc%f(fld)%file_base)//trim(adjustl(cyear))//'.nc'
+        ncid = nc_open_read(fname)
+        nlon0 = nc_dimlen(ncid, ['LON ','lon '])              ! file lon count (no halo)
+        frc%f(fld)%nlat  = nc_dimlen(ncid, ['LAT ','lat '])
+        frc%f(fld)%ntime = nc_dimlen(ncid, ['TIME','time'])
+        frc%f(fld)%nlon  = nlon0 + 2                            ! +2 periodic-lon halo (353)
+        allocate(frc%f(fld)%nc_lon(frc%f(fld)%nlon), frc%f(fld)%nc_lat(frc%f(fld)%nlat), &
+                 frc%f(fld)%nc_time(frc%f(fld)%ntime))
+        ! lat (no halo)
+        call nc_get_axis_dp(ncid, ['LAT ','lat '], frc%f(fld)%nc_lat)
+        ! lon into interior 2:nlon-1, then periodic halo (377-379)
+        allocate(tmp(nlon0))
+        call nc_get_axis_dp(ncid, ['LON ','lon '], tmp)
+        frc%f(fld)%nc_lon(2:frc%f(fld)%nlon-1) = tmp
+        frc%f(fld)%nc_lon(1)            = frc%f(fld)%nc_lon(frc%f(fld)%nlon-1)
+        frc%f(fld)%nc_lon(frc%f(fld)%nlon) = frc%f(fld)%nc_lon(2)
+        deallocate(tmp)
+        ! time axis + calendar
+        call nc_get_axis_dp(ncid, ['TIME','time'], frc%f(fld)%nc_time)
+        frc%f(fld)%calendar = lc(nc_get_att_text(ncid, ['TIME','time'], 'calendar'))
+        if (len_trim(frc%f(fld)%calendar) == 0) frc%f(fld)%calendar = 'none'
+        call nc_close(ncid)
+
+        ! transfer time-axis to days since 0001 (473-503)
+        frc%f(fld)%nc_time = frc%f(fld)%nc_time / frc%freq
+        frc%f(fld)%nc_time = frc%f(fld)%nc_time + &
+            forcing_julday(frc%iyear, frc%imm, frc%idd, frc%f(fld)%calendar)
+        yyyy = forcing_calyear(int(frc%f(fld)%nc_time(1)), frc%f(fld)%calendar)
+        frc%f(fld)%year_orig = yyyy
+        frc%f(fld)%nc_time = frc%f(fld)%nc_time - forcing_julday(yyyy, 1, 1, frc%f(fld)%calendar)
+        frc%f(fld)%nc_time = frc%f(fld)%nc_time + forcing_julday(year, 1, 1, frc%f(fld)%calendar)
+        ! mid-point shift (505-512): pi has tmid=1 -> skipped
+        if (frc%tmid /= 1 .and. frc%f(fld)%ntime > 1) then
+            do i = 1, frc%f(fld)%ntime - 1
+                frc%f(fld)%nc_time(i) = (frc%f(fld)%nc_time(i+1) + frc%f(fld)%nc_time(i))/2.0_WP
+            end do
+            frc%f(fld)%nc_time(frc%f(fld)%ntime) = frc%f(fld)%nc_time(frc%f(fld)%ntime) + &
+                (frc%f(fld)%nc_time(frc%f(fld)%ntime) - frc%f(fld)%nc_time(frc%f(fld)%ntime-1))/2.0
+        end if
+        ! lat flip if descending (519-526)
+        frc%f(fld)%flip_lat = 0
+        if (frc%f(fld)%nlat > 1) then
+            if (frc%f(fld)%nc_lat(1) > frc%f(fld)%nc_lat(frc%f(fld)%nlat)) then
+                frc%f(fld)%flip_lat = 1
+                frc%f(fld)%nc_lat = frc%f(fld)%nc_lat(frc%f(fld)%nlat:1:-1)
+            end if
+        end if
+        ! cyclic lon: shift the two halo columns by +-360 (534-537)
+        if (frc%ic_cyclic) then
+            frc%f(fld)%nc_lon(1)            = frc%f(fld)%nc_lon(1)            - 360._WP
+            frc%f(fld)%nc_lon(frc%f(fld)%nlon) = frc%f(fld)%nc_lon(frc%f(fld)%nlon) + 360._WP
+        end if
+    end subroutine forcing_read_grid
+
+    ! ---- per-node bilinear source indices (FESOM2 nc_sbc_ini, 652-675) ----------
+    subroutine forcing_build_bilin(frc, fld, mesh, partit)
+        type(t_atm_forcing), intent(inout) :: frc
+        integer, intent(in) :: fld
+        type(t_mesh),   intent(in), target :: mesh
+        type(t_partit), intent(in), target :: partit
+        integer :: i
+        real(WP) :: x, y
+        do i = 1, frc%nnod
+            x = mesh%geo_coord_nod2D(1, i)/rad
+            if (x < 0) x = x + 360._WP
+            y = mesh%geo_coord_nod2D(2, i)/rad
+            if (x < frc%f(fld)%nc_lon(frc%f(fld)%nlon) .and. x >= frc%f(fld)%nc_lon(1)) then
+                call forcing_binarysearch(frc%f(fld)%nlon, frc%f(fld)%nc_lon, x, frc%idx_i(fld, i))
+            else
+                if (x < frc%f(fld)%nc_lon(1)) then
+                    frc%idx_i(fld, i) = -1
+                else
+                    frc%idx_i(fld, i) = 0
+                end if
+            end if
+            if (y < frc%f(fld)%nc_lat(frc%f(fld)%nlat) .and. y >= frc%f(fld)%nc_lat(1)) then
+                call forcing_binarysearch(frc%f(fld)%nlat, frc%f(fld)%nc_lat, y, frc%idx_j(fld, i))
+            else
+                if (y < frc%f(fld)%nc_lat(1)) then
+                    frc%idx_j(fld, i) = -1
+                else
+                    frc%idx_j(fld, i) = 0
+                end if
+            end if
+        end do
+    end subroutine forcing_build_bilin
+
+    ! ---- read 2 bracketing slices, spatial bilinear, build coef (FESOM2 getcoeffld) --
+    subroutine forcing_getcoeffld(frc, fld, year, rdate, mesh, partit)
+        type(t_atm_forcing), intent(inout) :: frc
+        integer,  intent(in) :: fld, year
+        real(WP), intent(in) :: rdate
+        type(t_mesh),   intent(in), target :: mesh
+        type(t_partit), intent(in), target :: partit
+        character(len=512) :: fname
+        character(len=4) :: cyear
+        integer :: ncid, nlon, nlat, ntime, t_indx, t_indx_p1, ii, i, j, ip1, jp1, extrp
+        real(WP) :: delta_t, x, y, x1, x2, y1, y2, denom, data1, data2
+        real(real32), allocatable :: raw(:,:), sbc1(:,:), sbc2(:,:)
+
+        nlon = frc%f(fld)%nlon; nlat = frc%f(fld)%nlat; ntime = frc%f(fld)%ntime
+        write(cyear, '(I4)') year
+        fname = trim(frc%f(fld)%file_base)//trim(adjustl(cyear))//'.nc'
+
+        call forcing_binarysearch(ntime, frc%f(fld)%nc_time, rdate, t_indx)
+        if (t_indx < ntime .and. t_indx > 0) then
+            t_indx_p1 = t_indx + 1
+            delta_t   = frc%f(fld)%nc_time(t_indx_p1) - frc%f(fld)%nc_time(t_indx)
+        else if (t_indx > 0) then            ! no extrapolation into the future
+            t_indx = ntime; t_indx_p1 = t_indx; delta_t = 1.0_WP
+        else                                 ! t_indx < 1: no extrapolation back in time
+            t_indx = 1; t_indx_p1 = t_indx; delta_t = 1.0_WP
+        end if
+
+        ! read the two slices into the halo'd buffers (interior 2:nlon-1; halo mirror)
+        allocate(raw(nlon-2, nlat), sbc1(nlon, nlat), sbc2(nlon, nlat))
+        ncid = nc_open_read(fname)
+        call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx, raw)
+        sbc1(2:nlon-1, 1:nlat) = raw
+        sbc1(1,    1:nlat) = sbc1(nlon-1, 1:nlat)
+        sbc1(nlon, 1:nlat) = sbc1(2,      1:nlat)
+        call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx_p1, raw)
+        sbc2(2:nlon-1, 1:nlat) = raw
+        sbc2(1,    1:nlat) = sbc2(nlon-1, 1:nlat)
+        sbc2(nlon, 1:nlat) = sbc2(2,      1:nlat)
+        call nc_close(ncid)
+
+        do ii = 1, frc%nnod
+            i = frc%idx_i(fld, ii); j = frc%idx_j(fld, ii)
+            ip1 = i + 1; jp1 = j + 1
+            x = mesh%geo_coord_nod2D(1, ii)/rad
+            if (x < 0.0_WP) x = x + 360._WP
+            y = mesh%geo_coord_nod2D(2, ii)/rad
+            extrp = 0
+            if (i ==  0) then; i = nlon; ip1 = i; extrp = extrp + 1; end if
+            if (i == -1) then; i = 1;    ip1 = i; extrp = extrp + 1; end if
+            if (j ==  0) then; j = nlat; jp1 = j; extrp = extrp + 2; end if
+            if (j == -1) then; j = 1;    jp1 = j; extrp = extrp + 2; end if
+            x1 = frc%f(fld)%nc_lon(i);  x2 = frc%f(fld)%nc_lon(ip1)
+            y1 = frc%f(fld)%nc_lat(j);  y2 = frc%f(fld)%nc_lat(jp1)
+            if (extrp == 0) then
+                denom = (x2 - x1)*(y2 - y1)
+                data1 = ( sbc1(i,j)*(x2-x)*(y2-y) + sbc1(ip1,j)*(x-x1)*(y2-y) + &
+                          sbc1(i,jp1)*(x2-x)*(y-y1) + sbc1(ip1,jp1)*(x-x1)*(y-y1) ) / denom
+                data2 = ( sbc2(i,j)*(x2-x)*(y2-y) + sbc2(ip1,j)*(x-x1)*(y2-y) + &
+                          sbc2(i,jp1)*(x2-x)*(y-y1) + sbc2(ip1,jp1)*(x-x1)*(y-y1) ) / denom
+            else if (extrp == 1) then
+                denom = (y2 - y1)
+                data1 = ( sbc1(i,j)*(y2-y) + sbc1(ip1,jp1)*(y-y1) ) / denom
+                data2 = ( sbc2(i,j)*(y2-y) + sbc2(ip1,jp1)*(y-y1) ) / denom
+            else if (extrp == 2) then
+                denom = (x2 - x1)
+                data1 = ( sbc1(i,j)*(x2-x) + sbc1(ip1,jp1)*(x-x1) ) / denom
+                data2 = ( sbc2(i,j)*(x2-x) + sbc2(ip1,jp1)*(x-x1) ) / denom
+            else
+                data1 = sbc1(i,j); data2 = sbc2(i,j)
+            end if
+            frc%coef_a(fld, ii) = (data2 - data1) / delta_t
+            frc%coef_b(fld, ii) = data1 - frc%coef_a(fld, ii) * frc%f(fld)%nc_time(t_indx)
+        end do
+        deallocate(raw, sbc1, sbc2)
+    end subroutine forcing_getcoeffld
+
+    ! ---- g2r rotation of the wind interpolation coefficients (FESOM2 703-707) -----
+    subroutine forcing_rotate_wind(frc, mesh, partit)
+        type(t_atm_forcing), intent(inout) :: frc
+        type(t_mesh),   intent(in), target :: mesh
+        type(t_partit), intent(in), target :: partit
+        integer :: i
+        if (frc%i_xwind == 0 .or. frc%i_ywind == 0 .or. .not. frc%rotated_grid) return
+        do i = 1, frc%nnod
+            call vector_g2r(frc%coef_a(frc%i_xwind,i), frc%coef_a(frc%i_ywind,i), &
+                            mesh%coord_nod2D(1,i), mesh%coord_nod2D(2,i), 0)
+            call vector_g2r(frc%coef_b(frc%i_xwind,i), frc%coef_b(frc%i_ywind,i), &
+                            mesh%coord_nod2D(1,i), mesh%coord_nod2D(2,i), 0)
+        end do
+    end subroutine forcing_rotate_wind
+
+    ! ---- atmdata = rdate*coef_a + coef_b (FESOM2 data_timeinterp, 1041) ----------
+    subroutine forcing_timeinterp(frc, rdate, partit)
+        type(t_atm_forcing), intent(inout) :: frc
+        real(WP), intent(in) :: rdate
+        type(t_partit), intent(in), target :: partit
+        integer :: fld, i
+        do fld = 1, frc%nfld
+            do i = 1, frc%nnod
+                frc%atmdata(fld, i) = rdate * frc%coef_a(fld, i) + frc%coef_b(fld, i)
+            end do
+        end do
+    end subroutine forcing_timeinterp
+
+    ! lowercase a calendar string (FESOM2 lowercase, 2798-2832)
+    function lc(s) result(o)
+        character(len=*), intent(in) :: s
+        character(len=len(s)) :: o
+        integer :: i, k
+        o = s
+        do i = 1, len_trim(s)
+            k = iachar(s(i:i))
+            if (k >= iachar('A') .and. k <= iachar('Z')) o(i:i) = achar(k + 32)
+        end do
+    end function lc
+
+end module mod_forcing_read

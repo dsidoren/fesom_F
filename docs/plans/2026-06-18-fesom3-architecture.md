@@ -497,12 +497,29 @@ FESOM2 shim `port2/fesom2/src/fesom_step_dump.F90`, `tools/run_step{dump_pi,_gat
       implicit vertical-advection `adv_tra_vert_impl`, do_oce_adv_tra's `use_wsplit=.true.` path, is a distinct
       unported kernel — M1.4 precedent; `impl_vert_visc_ale` still runs on the prescribed `w_i`). See LESSONS L24.
 
-#### Task M2.10: Forcing (JRA55 bulk + SW penetration)
-**Files:** Create: `src/forcing/mod_forcing_bulk.F90`, `src/forcing/mod_forcing_read.F90`
-- [ ] JRA55-do bulk formulae; **bilinear time-interp association order faithful** (the 2.4e6
-      cancellation); g2r wind rotation on input; shortwave penetration
+#### Task M2.10: Forcing (JRA55 bulk + SW penetration) — ✅ DONE (max|Δ|=0, 1-rank pi, 20 fields)
+**Files:** Create: `src/io/mod_io_netcdf.F90`, `src/forcing/mod_forcing_read.F90`, `src/forcing/mod_forcing_bulk.F90`,
+`src/oce/oce_shortwave_pene.F90`
+- [x] **M2.10a forcing READ — ✅ DONE (max|Δ|=0, 1-rank pi, 8 fields).** The FIRST netCDF I/O. `mod_io_netcdf`
+      (`use netcdf` wrapper, CMake `nf-config`+rpath) + `mod_forcing_read` (julday[noleap=365·yyyy] + binarysearch +
+      time-axis transform + periodic-lon halo + spatial bilinear + the **two-stage time-interp `atmdata=rdate·coef_a+
+      coef_b`** ~710820-scale cancellation [faithful, NOT collapsed] + **g2r wind-coef rotation**) + `vector_g2r`
+      (mod_mesh_rotate). Reads CORE2 NCAR stubs. Fixed the L8 1-rank hang = FESOM2 `next_io_rank` np=1 infinite
+      recursion (patched, value-identical). Gate `tools/run_forcing_gate.sh`. See LESSONS L25.
+- [x] **M2.10b bulk transfer coeffs + wind stress — ✅ DONE (max|Δ|=0, 1-rank pi, 17 fields).**
+      `ncar_ocean_fluxes_mode` (Large&Yeager + Large-2009 drag, 5-iter Monin-Obukhov) → `Cd`/`Ch`/`Ce` (gated vs the
+      REAL routine); `stress_atmoce = Cd·ρ_air·|Δu|·Δu`; node→elem `stress_surf` (`a_ice=0`, `/3`). Prescribed SST +
+      surface ocean velocity (dummy ice, thermo type-defaults). Byte traps: `inc_ratio=1.0e-4`/`inv_rhoair=1./1.3`/
+      `tmelt=273.15`/`rhoair=1.3` transcribed VERBATIM (un-suffixed); `(ustar*ustar)`; `atan(1.0_WP)`. Debug `-check
+      all` clean. See LESSONS L25.
+- [x] **M2.10c shortwave penetration — ✅ DONE (max|Δ|=0, 1-rank pi).** `cal_shortwave_rad` (Morel&Antoine/Sweeney
+      2005: `swsurf=(1-albw)·shortwave·0.54`, chl floor 0.02, the v1/v2/sc1/sc2 polynomial, the two-exponential
+      `sw_3d` depth profile via `zbar_3d_n`, `/vcpw`) → `sw_3d` + the `heat_flux` visible-removal. Built
+      `src/oce/oce_shortwave_pene.F90`. Consumes the LIVE M2.10a `shortwave`; `chl`/`heat_flux`/`a_ice=0` prescribed;
+      `albw=0.066_WP` forced both sides. Non-vacuous (chl floor fires on 476 polar nodes). Debug `-check all` clean.
 - [ ] (SSS/SST restoring lives in the tracer solve M2.9a, NOT here — only prepare surface flux/coeff inputs)
-- [ ] **Gate:** operator-diff `max|Δ|=0` on forcing fields
+- **SCOPE:** `heat_flux`/`water_flux` air-sea budget = **M3** (obudget in `ice_thermo_oce.F90` + `oce_fluxes`); M2.10
+      leaves them prescribed (M2.9b shim) until M3. `gen_bulk_formulae.F90` = transfer coefficients ONLY (not stress/heat).
 
 #### Task M2.11: Full driver + single-rank CORE2 byte-gate
 **Files:** Create: `src/drivers/fesom.F90`, `src/step/mod_model.F90` (full lifecycle), `src/io/` (minimal)

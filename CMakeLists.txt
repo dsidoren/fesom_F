@@ -33,6 +33,39 @@ include(fesom_flags)
 
 find_package(MPI REQUIRED COMPONENTS Fortran)
 
+# ----------------------------------------------------------------------
+# netCDF (Fortran) — needed from M2.10 (forcing read). Discover via nf-config
+# (on PATH from env/levante module load). This MUST be the same spack
+# netcdf-fortran the FESOM2 oracle links (4.5.3) so the raw real(4) slices read
+# byte-identically. Exposed as an INTERFACE target `fesom_netcdf`.
+# ----------------------------------------------------------------------
+find_program(NF_CONFIG nf-config)
+if(NOT NF_CONFIG)
+    message(FATAL_ERROR "nf-config not found on PATH — load the netcdf-fortran module (env/levante.dkrz.de/shell.*).")
+endif()
+execute_process(COMMAND ${NF_CONFIG} --includedir
+                OUTPUT_VARIABLE NETCDF_F_INCLUDE OUTPUT_STRIP_TRAILING_WHITESPACE)
+execute_process(COMMAND ${NF_CONFIG} --flibs
+                OUTPUT_VARIABLE NETCDF_F_FLIBS OUTPUT_STRIP_TRAILING_WHITESPACE)
+separate_arguments(NETCDF_F_FLIBS_LIST UNIX_COMMAND "${NETCDF_F_FLIBS}")
+message(STATUS "FESOM3 netCDF-Fortran include: ${NETCDF_F_INCLUDE}")
+message(STATUS "FESOM3 netCDF-Fortran flibs  : ${NETCDF_F_FLIBS}")
+# Bake the netcdf-fortran + netcdf-c lib dirs into the binaries' RPATH so they run
+# without LD_LIBRARY_PATH (the spack modules set compile paths but not runtime).
+execute_process(COMMAND ${NF_CONFIG} --prefix OUTPUT_VARIABLE NF_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE)
+find_program(NC_CONFIG nc-config)
+set(NETCDF_RPATH "${NF_PREFIX}/lib")
+if(NC_CONFIG)
+    execute_process(COMMAND ${NC_CONFIG} --prefix OUTPUT_VARIABLE NC_PREFIX OUTPUT_STRIP_TRAILING_WHITESPACE)
+    list(APPEND NETCDF_RPATH "${NC_PREFIX}/lib")
+endif()
+add_library(fesom_netcdf INTERFACE)
+target_include_directories(fesom_netcdf INTERFACE ${NETCDF_F_INCLUDE})
+target_link_libraries(fesom_netcdf INTERFACE ${NETCDF_F_FLIBS_LIST})
+foreach(_rp ${NETCDF_RPATH})
+    target_link_options(fesom_netcdf INTERFACE "-Wl,-rpath,${_rp}")
+endforeach()
+
 # Put .mod files in a private dir so the scanner resolves USE across subdirs.
 set(CMAKE_Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/module)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -54,7 +87,7 @@ endforeach()
 
 add_library(fesom3 STATIC ${fesom3_lib_sources})
 apply_fesom_compile_flags(fesom3)
-target_link_libraries(fesom3 PUBLIC MPI::MPI_Fortran)
+target_link_libraries(fesom3 PUBLIC MPI::MPI_Fortran fesom_netcdf)
 set_target_properties(fesom3 PROPERTIES LINKER_LANGUAGE Fortran)
 
 # ----------------------------------------------------------------------

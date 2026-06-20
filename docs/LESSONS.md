@@ -937,3 +937,86 @@ kernel reads the PREVIOUS kernel's output, not a prescribed input — and gates 
   matched), not the exit code (`run_stepdump_pi.sh` tolerates the exit but checks dump existence + completeness),
   so a blowup would NOT silently pass — but a clean run is the trustworthy default. Branch coverage for the strong
   flow (the γ0/γ1/γ2 viscosity selection) stays at M2.4, not here.
+
+## L25 — Forcing READ (M2.10a): the FIRST netCDF I/O — the 1-rank async-netcdf infinite-recursion fix, per-node partition-independence, the noleap `julday=365·yyyy` (710820 not 2.4e6) two-stage time-interp cancellation (PASSED first gate run)
+
+The first kernel that reads real files (CORE2 NCAR stubs `test/input/global/{u_10,v_10,q_10,ncar_rad,t_10,ncar_precip}.1948.nc`,
+192×94, 5 records, ~360 KB each). All 8 atmospheric fields (`u_wind`/`v_wind`/`Tair`/`shum`/`shortwave`/`longwave`/
+`prec_rain`/`prec_snow`) `max|Δ|=0` vs the REAL FESOM2 `sbc_do` on pi 1-rank. Built `src/io/mod_io_netcdf.F90`
+(thin `use netcdf` wrapper) + `src/forcing/mod_forcing_read.F90` (the read+interp) + `vector_g2r` into
+`mod_mesh_rotate` + driver `src/drivers/fesom_forcingdump.F90`; gate `tools/run_forcing_gate.sh`.
+
+- **The L8 "1-rank forcing hang" is a REAL infinite recursion, now FIXED in the oracle.** Empirically: a 1-rank
+  full run hangs in `g_sbf::getcoeffld → io_netcdf_workaround::next_io_rank → mpi_topology`. Root cause:
+  `next_io_rank_helper` (its own TODO admits it) infinite-recurses when the only rank IS `SEQUENTIAL_IO_RANK`(0) —
+  the async-NetCDF IO-rank selector. Patched `port2/fesom2/src/io_netcdf_workaround_module.F90`: at `partit%npes==1`
+  short-circuit to sequential I/O on rank 0 (`async_netcdf_allowed=.false.`) — **VALUE-IDENTICAL** (only changes
+  which rank reads+bcasts, not the bytes). After the patch the full model runs PAST forcing and through a clean
+  first step (`FDBG step=1 uv=0.13 ssh=0.10 Smax=37.4`, no NaN); it then crashes at OUTPUT I/O
+  (`io_meandata::init_nod2d_lists`, a SEPARATE 1-rank gather bug) — irrelevant, the prescribe-and-stop shim stops
+  before output. This is an UNCOMMITTED FESOM2 working-tree change (like the dump shims).
+- **Forcing is PARTITION-INDEPENDENT per node** (each node's value is a pure function of its own geo-coords + the
+  global file data + the model time — NO cross-node accumulation), unlike `area`/FCT scatter. So a multi-rank
+  oracle would byte-match too; the np=1 fix simply keeps the 1-rank anchor (consistent with every prior gate).
+- **The oracle shim** (`port2/fesom2/src/fesom_forcing_dump.F90`) is wired right AFTER `forcing_setup` in
+  `fesom_module.F90:315` (NOT end-of-`ocean_setup` — `sbc_ini` only runs inside `forcing_setup`, which is AFTER
+  `ocean_setup` and gated on `use_ice=.true.`, true on pi). It pins the model time, drives the REAL `sbc_do`, maps
+  `atmdata→arrays` exactly as `gen_forcing_couple::update_atm_forcing:681-694`, dumps (FADVHDMP), stops.
+- **`julday` for `noleap`/`none`/`365_days` = `365·yyyy`** (the else branch, `gen_surface_forcing.F90:1887`), so the
+  pi CORE2 time axis is `365·1948=710820`-scale — NOT the ~2.43e6 NR Julian-Day-Number of the JRA gregorian case
+  (that's where the HANDOFF's "2.4e6 cancellation" figure comes from). Same cancellation PRINCIPLE, smaller magnitude.
+- **The time interp is a TWO-STAGE form that must NOT be collapsed**: `coef_a=(data2-data1)/Δt`;
+  `coef_b=data1-coef_a·nc_time(t_indx)`; `atmdata=rdate·coef_a+coef_b`. Both `rdate·coef_a` (~710820·a) and `coef_b`
+  (~−710820·a) are large and nearly cancel to the O(1) physical value. Refactoring to the algebraically-equal
+  `data1+coef_a·(rdate−nc_time)` rounds the large `coef_b` differently → drift. (FESOM2 getcoeffld:1015-1016 +
+  data_timeinterp:1041.)
+- **Two rdates**: the coefficients are built at the COLD-START rdate (`nc_sbc_ini:643` — NO half-step, clock-init
+  day 1 / sec 0) and the data is evaluated at the per-step rdate (`sbc_do:1527` — WITH the `−dt/86400/2` half-step,
+  pinned day 1 / sec 43200 / dt 2400). The gate driver replicates BOTH. (For pi both land in the same window
+  → `t_indx=1`, so a single-rdate read would also match, but the two-phase form is faithful and general.)
+- **Raw slices stay `real(4)`** (the on-disk type) and promote to WP inside the bilinear weight expression — exactly
+  FESOM2 (`real(4) sbcdata · real(WP) wgt`); `real4→real8` is exact so it's byte-identical either way, but keeping
+  `real(4)` reads the on-disk bytes verbatim. The periodic-lon halo (`nlon+2`, mirror cols 1↔nlon-1 / nlon↔2, then
+  `ic_cyclic` ±360) makes lon monotonic for `binarysearch`; lat-flip only if descending (CORE2 ascends → no flip).
+- **netCDF link via `nf-config`** in CMakeLists.txt (the SAME spack `netcdf-fortran-4.5.3` the oracle links → byte
+  reads) + **`-Wl,-rpath`** to both netcdf-fortran/-c lib dirs so binaries run without `LD_LIBRARY_PATH` (the spack
+  modules set compile paths but not runtime). `use netcdf` (the F90 `.mod`) is compatible across intel 2021.5.0
+  (netcdf build) ↔ 2022.0.1 (FESOM3) — no need for the F77 `netcdf.inc`.
+- **The dump drivers do NOT call `set_partition`**, so `partit%myDim_nod2D` stays 0 — loop forcing over `mesh%nod2D`
+  (== `myDim+eDim` at 1-rank), the same convention every FESOM3 kernel uses (`oce_pressure_bv.F90:72`
+  `do node=1,mesh%nod2D`). The driver sets `frc%nnod=mesh%nod2D` and the read routines loop `1,frc%nnod`.
+- **SCOPE**: M2.10a is the READ only. `heat_flux`/`water_flux` come from the air-sea **obudget** in
+  `ice_thermo_oce.F90` (+ `oce_fluxes`), which is **M3 (ice/thermo)** per the plan ("M3 → thermo → oce_fluxes") —
+  even for open water. So M2.10b (bulk transfer coeffs `Cd/Ch/Ce` + wind `stress_surf`) + M2.10c (SW penetration
+  `sw_3d`) finish M2.10's producible fields; `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` stay prescribed
+  until M3. `gen_bulk_formulae.F90` computes ONLY the transfer coefficients (NOT stress/heat/evap).
+- **M2.10b (bulk + wind stress, 17 fields, PASSED first gate run).** `ncar_ocean_fluxes_mode` (the LIVE NCAR routine:
+  Large&Yeager 2004 + **Large-2009 drag** [the `u10**6` term + the 33 m/s → `2.34e-3` cap, NOT the commented-out
+  L-Y2004 6a form], `n_itts=5`, a 3-height Monin-Obukhov stability iteration) → `Cd`/`Ch`/`Ce` — gated against the REAL
+  routine. Then `stress_atmoce=Cd·(ρ_air·|Δu|)·Δu` (`Δu=u_wind−(1−Swind)·u_w`, `Swind=0`) and the node→elem
+  `stress_surf(elem)=sum(stress_node_surf(elnodes))/3` (`a_ice=0` ⇒ `stress_node_surf=stress_atmoce`). **Byte traps —
+  transcribe the un-suffixed default-real literals VERBATIM** (the L16 family): `inc_ratio=1.0e-4`, `inv_rhoair=1./1.3`,
+  `tmelt=273.15`, `rhoair=1.3` (MOD_ICE type-defaults / the gen_bulk local) — a `_WP` suffix would round differently;
+  also `(ustar*ustar)` not `ustar**2`, `atan(1.0_WP)` kept a runtime call, `test=abs(cd−cd_prev)/(cd+1.0e-8_WP)`.
+  **SST + surface ocean velocity are PRESCRIBED** (a fresh `type(t_ice)` dummy supplies the thermo TYPE-DEFAULTS —
+  `ice%thermo` is a non-allocatable component so `inv_rhoair`/`tmelt`/`rhoair` auto-initialize; only `srfoce_temp/u/v`
+  need allocation). The wind stress + node→elem are inlined in BOTH sides (trivial formulas, L9-transitive — `Cd` is the
+  gated substance). Non-vacuous: `Cd∈[5.5e-5,1.7e-2]`, the wide Tair(−44..31)−SST(−1..19) range fires both
+  stability branches. `elem2D_nodes(1:3,elem)` slice (FESOM3 MAX_NV=4; FESOM2's is (3,·)) — the L15 trap. The bulk
+  consumes the LIVE M2.10a `u_wind`/`v_wind`/`Tair`/`shum` (a real read→bulk assembly).
+- **M2.10c (shortwave penetration, 20 fields total, PASSED first gate run).** `cal_shortwave_rad`
+  (`oce_shortwave_pene.F90`, Morel&Antoine 1994 / Sweeney 2005): `swsurf=(1−albw)·shortwave·0.54`; `heat_flux+=swsurf`
+  (the visible band is REMOVED from the +upward non-solar `heat_flux` and redeposited as `sw_3d`); chl floor `0.02`;
+  the v1/v2/sc1/sc2 polynomials in `c=log10(chl)`; the two-exponential `sw_3d(k)=swsurf·(v1·exp(zbar/sc1)+v2·exp(zbar/
+  sc2))` over `zbar_3d_n` (the per-node ALE depth, pressure-gate-proven) with the `aux<1e-5`/`k==nzmax` cutoff;
+  `swsurf/=vcpw` (W/m²→K·m/s, `vcpw=4.2e6` — exactly representable so `_WP` is moot). Consumes the LIVE M2.10a
+  `shortwave`; `chl`/`heat_flux`/`a_ice=0` prescribed. **`albw=0.066` forced to `0.066_WP` on BOTH sides** (the shim
+  sets `ice%thermo%albw=0.066_WP`) so the un-suffixed default-real ambiguity can't bite. The shim's dummy ice needs
+  `ice%data(1)%values` (= `a_ice`) allocated (the routine pointer-assigns it); the REAL `cal_shortwave_rad` is driven
+  via an explicit interface. Non-vacuous: the chl floor fires on 476 polar nodes; `sw_3d` decays to 0 over 48 levels.
+- **Build/CMake recap (M2.10):** netCDF added to FESOM3 via `nf-config` (include+`--flibs`) + `-Wl,-rpath` to the
+  netcdf-fortran/-c lib dirs (self-contained binaries; no `LD_LIBRARY_PATH`). `use netcdf` (the F90 `.mod`) works
+  across the intel 2021.5.0 (netcdf) ↔ 2022.0.1 (FESOM3) minor-version gap. `src/io/` + `src/forcing/` were already in
+  `FESOM3_LIB_DIRS` (auto-globbed once created). One forcing gate (`run_forcing_gate.sh`) now covers all 20 fields
+  (read→bulk→SW pene, a real producer chain on the LIVE read); `pressure_diff.py` is the generic comparator (its
+  "PRESSURE/EOS…" trailer is cosmetic).
