@@ -753,3 +753,51 @@ one M2.7 module). Reusable specifics:
   EXIT 0, dump written. Release (`-O3`) is unaffected (different temp handling). **Diagnosis tell:** a segfault
   in `wr_r{2,3}`/`real(a,real64)` AFTER all compute diagnostics printed is a stack-temp overflow, NOT a kernel
   fault — raise the stack, don't hunt the kernel. (Byte-gate is Release-vs-Release; Debug is OOB-only, L10.)
+
+## L21 — PP vertical mixing (M2.8): three sequential passes byte-match by transitivity; prescribe `uvnode` (not `UV`) to isolate the add + control the Ri-factor range (PASSED first gate run)
+
+M2.8 (Pacanowski-Philander Richardson-number mixing: `oce_mixing_pp` → `Kv` on nodes, `Av` on elements)
+byte-matched FESOM2 `max|Δ|=0` on the FIRST Release gate run (3 new fields `uvnode`/`pp_Kv`/`pp_Av` →
+**46 fields**), like all of M1 + M2.1-M2.7. Built `src/oce/oce_ale_mixing_pp.F90` (`oce_mixing_pp` +
+`Kv0_background_qiang` + `Kv0_background`, mirroring the oracle filename). Reusable specifics:
+
+- **Three SEQUENTIAL passes, byte-match by pure L9 transitivity.** Pass 1 (nodes): `Kv := factor =
+  shear/(shear + 5·max(N²,0) + 1e-14)`, the inverse-Richardson factor `1/(1+5·Ri)` with `shear =
+  |d(uvnode)/dz|²`. Pass 2 (elements): `Av = mix_coeff_PP·mean₃(factor²) + A_ver`. Pass 3 (nodes): `Kv =
+  mix_coeff_PP·factor³ + K_ver`. The ordering is LOAD-BEARING — `Kv` is the scratch that holds the factor
+  (pass 1) AND the final diffusivity (pass 3), so the `Av` elem loop MUST run between them (Av reads factor²,
+  Kv overwrites with factor³). No scatter/accumulation (`sum(Kv(nz,elnodes)**2)` is a fixed 3-element array
+  order, elnodes geom-gated) → no order ambiguity → every operand pinned (`bvfreq` M2.1, `uvnode`/`Z_3d_n`
+  geometry) ⇒ `max|Δ|=0` first run. The recurring L9 pattern (like M2.5's TDMA).
+
+- **Prescribe `dyn%uvnode` DIRECTLY (a new input), do NOT compute it from the prescribed `UV`.** PP reads the
+  nodal velocity `dynamics%uvnode` (the area-weighted elem→node average `compute_vel_nodes` fills each step,
+  `oce_dyn.F90:177`). Two wins from prescribing it rather than running `compute_vel_nodes`: (1) **isolation** —
+  the existing `UV` (and hence all M2.3-M2.7 records) is UNTOUCHED, so M2.8 is a pure additive gate (no
+  re-gate churn); (2) **non-vacuity control** — the PP factor depends on the VERTICAL shear `Δuvnode/Δz`, and
+  the existing `UV`'s depth term (`-0.005·nz`, tuned so it cancels in the across-EDGE viscosity `du`) gives a
+  shear ~3e-8 → factor ~1e-3 (technically non-zero in dp, but a weak gate). A bespoke `uvnode` with a strong
+  vertical shear (`1.2·cos(lat)sin(lon)·sin(0.5·nz)` etc., per-layer jump ~0.6 m/s) makes the factor span
+  **[5.8e-7, 0.93]** (62.4% of node-levels > 0.1) → `f²`/`f³` exercised across their full range, `max|Kv|`=8e-3
+  (800× the `K_ver`=1e-5 background), `max|Av|`=8.7e-3 (87× `A_ver`). This is the M2.5 precedent (prescribe the
+  not-yet-sourced input: `Av`/`stress_surf` there): `compute_vel_nodes` is gated with the step at M2.9, where
+  `impl_vert_visc_ale` will also source its `Av` from `dyn%work%Av` instead of the prescribed analytic one.
+
+- **`A_ver` is a pi NAMELIST override (1e-4), NOT the `mod_param_phys` default (1e-3) — force it.** The pi
+  `namelist.oce` sets `A_ver=1.e-4`; FESOM3's `mod_param_phys` default is `0.001`. PP's `Av=…+A_ver` reads it,
+  so the driver+shim must FORCE `A_ver=1e-4` (+ `mix_coeff_PP=0.01`, `K_ver=1e-5`, `Kv0_const=.true.`, all pi
+  defaults). Proof `A_ver` was unused by M2.1-M2.7: M2.5 gated `max|Δ|=0` with the oracle at `A_ver=1e-4` and
+  FESOM3 at its 1e-3 default — if `impl_vert_visc_ale` read `A_ver` they would have diverged. (`Kv0_const=.false.`
+  Qiang lat/depth background + the cavity `nzmin>1` path are transcribed but UNGATED on pi — M2.11.)
+
+- **PP OVERWRITES the shared `Av`; save the M2.5 prescribed `Av` first (the L20 save-the-input pattern).** In
+  the FESOM2 shim `Av`/`Kv` are o_ARRAYS globals: PP clobbers the SAME `Av` the M2.5 section prescribed, and the
+  dump fires at the END → the `Av` record would dump PP's output. Save `Av_in = Av` before PP, dump `Av_in` for
+  the M2.5 record, dump post-PP `Av`/`Kv` as NEW records `pp_Av`/`pp_Kv`. (FESOM3 has no conflict: PP writes
+  `dyn%work%Av`, distinct from the driver's local M2.5 `Av` — but the DUMPED values match.) Both sides pre-zero
+  `Kv`/`Av` before PP (it writes only `nz∈[nzmin+1,nzmax-1]`; surface/bottom/below stay a deterministic 0).
+
+- **`target` on the `dyn` dummy is required** for the `UVnode=>dyn%uvnode` / `Kv=>dyn%work%Kv` pointer aliases
+  (ifort `#6796`) — FESOM2 declares `dynamics` `target` too; mirror it. The only compile error; otherwise the
+  transcription + Debug `-check all` were clean first try (the L15 `elem2D_nodes(1:3,elem)` slice avoids the
+  MAX_NV=4 trap; FESOM2's `elem2D_nodes(:,elem)` is `(3,·)` on its runtime path so its `:` is already 1:3).

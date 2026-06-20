@@ -39,6 +39,10 @@ module mod_dyn
         real(kind=WP), allocatable, dimension(:,:)   :: hpressure       ! (nl,  nod2D) hydrostatic pressure
         real(kind=WP), allocatable, dimension(:,:)   :: bvfreq          ! (nl,  nod2D) N^2 (squared Brunt-Vaisala)
         real(kind=WP), allocatable, dimension(:,:)   :: pgf_x, pgf_y    ! (nl-1,elem2D) PGF (M2.2 oce_pgf), from hpressure
+        ! M2.8 PP vertical mixing coefficients (oce_ale_mixing_pp). FESOM2 o_ARRAYS
+        ! names Kv/Av; recomputed each step from N^2 + uvnode shear, NOT serialized.
+        real(kind=WP), allocatable, dimension(:,:)   :: Kv              ! (nl,  nod2D) vertical diffusivity (tracers)
+        real(kind=WP), allocatable, dimension(:,:)   :: Av              ! (nl,  elem2D) vertical viscosity (momentum)
     contains
         procedure :: write_dw => write_t_dyn_work
         procedure :: read_dw  => read_t_dyn_work

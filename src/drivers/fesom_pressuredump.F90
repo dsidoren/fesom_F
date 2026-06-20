@@ -29,7 +29,9 @@ program fesom_pressuredump
     use oce_ssh_rhs,      only: init_stiff_mat_ale, compute_ssh_rhs_ale
     use oce_ssh_solve,    only: solve_ssh_ale
     use oce_ale,          only: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
+    use oce_ale_mixing_pp, only: oce_mixing_pp
     use mod_param_phys,   only: alpha, theta
+    use mod_param_phys,   only: mix_coeff_PP, A_ver, K_ver, Kv0_const
     use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3
     implicit none
 
@@ -75,6 +77,9 @@ program fesom_pressuredump
     real(kind=WP), allocatable :: hbar_in(:), eta_n_in(:), w_e_in(:,:), w_i_in(:,:)
     real(kind=WP), allocatable :: uv_upd(:,:,:)
     integer       :: n_cflsplit
+    ! --- M2.8 PP vertical mixing (oce_mixing_pp -> Kv nodes / Av elements) ---
+    real(kind=WP) :: shear, dz_inv, factor, fmin, fmax
+    integer       :: nf, nf_big
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -196,6 +201,11 @@ program fesom_pressuredump
     allocate(dyn%work%pgf_x(nl-1, mesh%elem2D), dyn%work%pgf_y(nl-1, mesh%elem2D))
     allocate(dyn%work%u_c(nl-1, mesh%elem2D), dyn%work%v_c(nl-1, mesh%elem2D))  ! visc scratch
     allocate(Av(nl, mesh%elem2D), stress_surf(2, mesh%elem2D))  ! M2.5 prescribed inputs
+    ! M2.8 PP mixing: nodal velocity (prescribed input), smoothed N^2 (copied from the
+    ! M2.1 local bvfreq), and the Kv/Av output fields.
+    allocate(dyn%uvnode(2, nl-1, mesh%nod2D))                   ! nodal velocity (PP shear input)
+    allocate(dyn%work%bvfreq(nl, mesh%nod2D))                   ! smoothed N^2 (PP reads it)
+    allocate(dyn%work%Kv(nl, mesh%nod2D), dyn%work%Av(nl, mesh%elem2D))
     dyn%AB_order          = 2
     dyn%momadv_opt        = 2     ! M2.4: enable momentum_adv_scalar (pi production value)
     ! M2.4 biharmonic viscosity (opt_visc=7) — pin the pi/reduced-M2 namelist values
@@ -428,6 +438,58 @@ program fesom_pressuredump
         ' ; max|hbar|=', maxval(abs(mesh%hbar)), ' ; max|w|=', maxval(abs(dyn%w)), &
         ' ; CFL_z>maxcfl on ', n_cflsplit
 
+    ! ============== M2.8 PP (Pacanowski-Philander) vertical mixing ====================
+    ! The Richardson-number mixing coefficients (FESOM2 oce_ale.F90:3728 -> oce_mixing_PP),
+    ! the FIRST operator of the dynamics part of the step (it runs BEFORE compute_vel_rhs;
+    ! here it is appended as a STANDALONE operator on prescribed inputs — wiring it into the
+    ! step order, and sourcing impl_vert_visc_ale's Av from dyn%work%Av, is M2.9). PP reads
+    ! the SMOOTHED N^2 (the M2.1 bvfreq, copied into dyn%work%bvfreq) and the nodal velocity
+    ! shear (dyn%uvnode, prescribed here with a STRONG vertical shear so the Ri factor spans
+    ! [0, ~0.7] and f^2/f^3 are exercised — compute_vel_nodes, the real uvnode source, is an
+    ! area-weighted elem->node average gated with the step at M2.9). Force the pi/reduced-M2
+    ! mixing knobs (mix_coeff_PP=0.01, A_ver=1e-4 [pi NAMELIST, NOT the 1e-3 module default],
+    ! K_ver=1e-5, Kv0_const=.true.). MUST match the FESOM2 oracle src/fesom_pressure_dump.F90.
+    mix_coeff_PP = 0.01_WP
+    A_ver        = 1.0e-4_WP
+    K_ver        = 1.0e-5_WP
+    Kv0_const    = .true.
+
+    ! nodal velocity with strong vertical shear (sin/cos(k*nz)) modulated horizontally so
+    ! the Ri factor varies from ~0 (weak shear) to ~0.7 (strong shear). MUST match the oracle.
+    do n = 1, mesh%nod2D
+        lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
+        do nz = 1, nl-1
+            dyn%uvnode(1,nz,n) =  1.20_WP*cos(lat)*sin(lon)*sin(0.5_WP*real(nz,WP)) &
+                                + 0.20_WP*sin(2.0_WP*lon)*cos(lat)
+            dyn%uvnode(2,nz,n) = -0.90_WP*sin(lat)*cos(2.0_WP*lon)*cos(0.4_WP*real(nz,WP)) &
+                                + 0.15_WP*cos(lon)
+        end do
+    end do
+
+    dyn%work%bvfreq = bvfreq                 ! the M2.1 SMOOTHED N^2 (PP reads dyn%work%bvfreq)
+    dyn%work%Kv = 0.0_WP                      ! caller pre-zeros (PP writes only nzmin+1..nzmax-1)
+    dyn%work%Av = 0.0_WP
+    call oce_mixing_pp(dyn, mesh)
+
+    ! gate-strength diagnostic (NOT dumped): re-derive the Ri factor (the pass-1 Kv) to
+    ! confirm it spans a meaningful range, so the f^2 (Av) and f^3 (Kv) maps are exercised
+    ! across their dynamic range, not just at the near-zero background (the L11/L17 guard).
+    fmin = 1.0_WP; fmax = 0.0_WP; nf = 0; nf_big = 0
+    do n = 1, mesh%nod2D
+        do nz = mesh%ulevels_nod2D(n)+1, mesh%nlevels_nod2D(n)-1
+            dz_inv = 1.0_WP/(mesh%Z_3d_n(nz-1,n) - mesh%Z_3d_n(nz,n))
+            shear  = ((dyn%uvnode(1,nz-1,n)-dyn%uvnode(1,nz,n))**2 &
+                    + (dyn%uvnode(2,nz-1,n)-dyn%uvnode(2,nz,n))**2)*dz_inv*dz_inv
+            factor = shear/(shear + 5.0_WP*max(bvfreq(nz,n),0.0_WP) + 1.0e-14_WP)
+            fmin = min(fmin,factor); fmax = max(fmax,factor); nf = nf + 1
+            if (factor > 0.1_WP) nf_big = nf_big + 1
+        end do
+    end do
+    write(*,'(a,es10.3,a,es10.3,a,es10.3,a,es10.3,a,f5.1,a)') &
+        'fesom_pressuredump: PP mix: factor=[', fmin, ',', fmax, &
+        '] ; max|Kv|=', maxval(dyn%work%Kv), ' ; max|Av|=', maxval(dyn%work%Av), &
+        ' ; factor>0.1 on ', 100.0_WP*real(nf_big,WP)/real(max(nf,1),WP), '% of node-levels'
+
     ! --- dump (same FADVHDMP format / names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'temp',           real(temp,        MP))
@@ -485,6 +547,11 @@ program fesom_pressuredump
     call wr_r2(u, 'cfl_z',          real(dyn%cfl_z(1:nl, :), MP))
     call wr_r2(u, 'w_split_e',      real(dyn%w_e(1:nl, :), MP))
     call wr_r2(u, 'w_split_i',      real(dyn%w_i(1:nl, :), MP))
+    ! M2.8 PP vertical mixing: the prescribed nodal-velocity shear input + the gate
+    ! targets pp_Kv (vertical diffusivity, nodes) and pp_Av (vertical viscosity, elements).
+    call wr_r3(u, 'uvnode',         real(dyn%uvnode,            MP))
+    call wr_r2(u, 'pp_Kv',          real(dyn%work%Kv(1:nl, :),  MP))
+    call wr_r2(u, 'pp_Av',          real(dyn%work%Av(1:nl, :),  MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_pressuredump: wrote '//trim(out_path)
 

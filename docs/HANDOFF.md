@@ -7,7 +7,7 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 - **Milestone:** M2 (minimal ocean dynamical core) — **IN PROGRESS.** **M2.1 `pressure_bv` +
   M2.2 hydrostatic PGF + M2.3 vel_rhs + M2.4 momentum advection (FULL `UV_rhs`) + M2.4 biharmonic
   viscosity + M2.5 implicit vertical viscosity (TDMA) + M2.6 SSH (stiffness + `ssh_rhs` + CG solve) +
-  M2.7 ALE (linfs) velocity/SSH/thickness-W update
+  M2.7 ALE (linfs) velocity/SSH/thickness-W update + M2.8 PP vertical mixing (`Kv`/`Av`)
   COMPLETE ✓** (M2.1: EOS split-form
   `density_m_rho0` + top-down `hpressure` + N²/`bvfreq` raw+smoothed; M2.2: `gradient_sca`-contraction
   `pgf_x`/`pgf_y`; M2.3: `coriolis` geometry field + `compute_vel_rhs` Coriolis+AB2+PGF+SSH-gradient;
@@ -21,8 +21,11 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   M2.7: `update_vel` [`UV += UV_rhs + (-g·θ·dt·grad d_eta)`] + `compute_hbar_ale` [`hbar`/`dhe`/`ssh_rhs_old`]
   + `eta_n=α·hbar+(1−α)·hbar_old` + `vert_vel_ale` [W=−cumsum(div UV·h)/area; linfs `hnode_new=hnode`;
   `compute_CFLz` + `compute_Wvel_split` explicit/implicit split];
+  M2.8: `oce_mixing_pp` Richardson-number mixing [Ri factor → `Av`=mix·mean(f²)+A_ver elements,
+  `Kv`=mix·f³+K_ver nodes], a STANDALONE add on a prescribed strong-shear `uvnode` (factor spans
+  [5.8e-7, 0.93], non-vacuous);
   all `max|Δ|=0` vs FESOM2 on pi 1-rank; one
-  gate `tools/run_pressure_gate.sh`, **43 fields**). **Next: M2.8 PP vertical mixing (`Kv`/`Av`).**
+  gate `tools/run_pressure_gate.sh`, **46 fields**). **Next: M2.8b `mo_convect` convective adjustment.**
   M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
@@ -219,9 +222,31 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `-check all` clean (compute clean — L15 `elem2D_nodes(1:3,·)` slices correct; the I/O dump writer needs
   `ulimit -s unlimited` for the big array temporary, a harness concern not a kernel bug). M1 advhor + 13/13
   ctest still green. See LESSONS L20.
-- **Current task:** M2.8 PP vertical mixing (`oce_ale_mixing_pp.F90` → `Kv` nodes / `Av` elements; dispatch
-  `mix_scheme=='PP'`), then M2.8b `mo_convect` convective adjustment. M1's multi-rank advection gate still
-  rides M2.12.
+- **M2.8 PP vertical mixing byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2 on the prescribed
+  nodal-velocity shear `uvnode` (input) AND the two gate targets `pp_Kv` (vertical diffusivity, nodes) /
+  `pp_Av` (vertical viscosity, elements). Built `src/oce/oce_ale_mixing_pp.F90` (`oce_mixing_pp` — three
+  SEQUENTIAL passes: pass 1 the inverse-Richardson factor `f=shear/(shear+5·max(N²,0)+1e-14)` stored in `Kv`,
+  pass 2 `Av=mix_coeff_PP·mean₃(f²)+A_ver` on elements, pass 3 `Kv=mix_coeff_PP·f³+K_ver` on nodes — the
+  ordering is load-bearing; + `Kv0_background_qiang`/`Kv0_background` transcribed but ungated, the
+  `Kv0_const=.false.` path). Added `Kv`/`Av` to `t_dyn_work` (recomputed each step, NOT serialized) and
+  `Kv0_const`/`use_instabmix`/`instabmix_kv`/`use_momix`/`momix_*`/`use_windmix`/`windmix_*` to
+  `mod_param_phys`. A STANDALONE operator appended after M2.7 (the M2.9 step wires it in FRONT of
+  `compute_vel_rhs`, and sources `impl_vert_visc_ale`'s `Av` from `dyn%work%Av`). **Prescribe `dyn%uvnode`
+  DIRECTLY** (strong vertical shear → Ri factor spans **[5.8e-7, 0.93]**, 62.4% > 0.1, `max|Kv|`=8e-3 [800×
+  K_ver], `max|Av|`=8.7e-3) rather than running `compute_vel_nodes` from the existing `UV` — isolates the add
+  (no M2.3-M2.7 re-gate) and controls non-vacuity (the M2.5 prescribe-the-unsourced-input precedent;
+  `compute_vel_nodes` is gated with the step at M2.9). Force the pi knobs (`A_ver=1e-4` — the pi NAMELIST
+  override of the 1e-3 module default; `mix_coeff_PP=0.01`/`K_ver=1e-5`/`Kv0_const=.true.`). Same gate
+  `tools/run_pressure_gate.sh` (now **46 fields**); the shim saves the M2.5 prescribed `Av` before PP
+  overwrites the shared o_ARRAYS `Av`, dumps `uvnode`/`pp_Kv`/`pp_Av`. `max|Δ|=0` first run (L9 transitive —
+  sequential passes, no scatter/order ambiguity). Debug `-check all` clean (the L15 `elem2D_nodes(1:3)` slice;
+  `target` on the `dyn` dummy for the pointer aliases — the only compile fix). M1 advhor + 13/13 ctest still
+  green. See LESSONS L21.
+- **Current task:** M2.8b `mo_convect` convective adjustment (`oce_mo_conv.F90`, called AFTER PP —
+  `oce_ale.F90:3729`); the instability adjustment `Kv`/`Av`=max(·, `instabmix_kv`) where `bvfreq<0`
+  (`use_instabmix=.true.`/`instabmix_kv=0.1`). Needs unstable T/S (`bvfreq<0` somewhere) for non-vacuity →
+  add a localized unstable band (cascade re-verifies M2.1-M2.8). `use_momix` (TB04, forcing/ice) deferred to
+  M2.10; `use_windmix` guarded off. M1's multi-rank advection gate still rides M2.12.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -357,7 +382,7 @@ The whole byte-gate pipeline is validated end-to-end:
   2022.0.1 + openmpi 4.1.2-intel; gcc 11.2.0 + openmpi 4.1.2-gcc. netCDF loaded (only
   needed M2.10+). Login `gfortran` is 8.5.0 with no MPI — always build via `configure.sh`.
 
-## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH + M2.7 ALE-update byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.8+)
+## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH + M2.7 ALE-update + M2.8 PP mixing byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.8b+)
 
 Same end-of-`ocean_setup` 1-rank shim pattern as the M1 advection gate, the FIRST dynamics
 kernel. `pressure_bv` runs DURING the timestep but 1-rank forcing hangs on the login node (L8),
@@ -464,20 +489,39 @@ FESOM2 code:
   run (L9 transitive — every operand pre-gated). Non-vacuous: the Wvel split fired on 13253 (nz,node), `max|w|=
   0.042` m/s. Debug `-check all` clean (`ulimit -s unlimited` for the I/O writer's big array temp — L20). See
   LESSONS L20.
+- **M2.8-PP extension (DONE):** the SAME gate now also covers PP Richardson-number mixing (FESOM2
+  `oce_ale.F90:3728` → `oce_mixing_PP`, the first dynamics operator, here appended STANDALONE after M2.7).
+  FESOM3 `src/oce/oce_ale_mixing_pp.F90` (`oce_mixing_pp` — 3 sequential passes: Ri factor in `Kv`, then
+  `Av=mix·mean₃(f²)+A_ver` elements, then `Kv=mix·f³+K_ver` nodes; `Kv0_background_qiang`/`Kv0_background`
+  transcribed, ungated). The shim calls the REAL `oce_mixing_PP` via an **explicit interface block** (free
+  subroutine, no auto-gen `*_interface`, like `impl_vert_visc_ale`). **Both PRESCRIBE `dynamics%uvnode`
+  directly** (strong vertical shear, identical formula — the Ri factor spans [5.8e-7, 0.93], non-vacuous)
+  rather than running `compute_vel_nodes` from `UV` (isolates the add; `compute_vel_nodes` gated at M2.9).
+  Force `A_ver=1e-4` (pi NAMELIST, not the 1e-3 module default), `mix_coeff_PP=0.01`/`K_ver=1e-5`/
+  `Kv0_const=.true.`. The shim saves the M2.5 prescribed o_ARRAYS `Av` (`Av_in`) before PP overwrites it; both
+  pre-zero `Kv`/`Av`. 3 new records: `uvnode` (input), `pp_Kv`/`pp_Av` (gate targets); `pressure_diff.py`
+  picks them up automatically (**46 fields**). `max|Δ|=0` first run (L9 transitive — sequential passes, no
+  scatter/order ambiguity). Debug `-check all` clean. See LESSONS L21.
 
 ## Next task
 
-M2.8 PP vertical mixing (plan Task M2.8). FESOM2 `oce_ale_mixing_pp.F90` → `Kv` (nodes) / `Av` (elements);
-dispatch `mix_scheme=='PP'`. Then M2.8b `mo_convect` (convective adjustment, `oce_mo_conv.F90`, called AFTER
-PP — `oce_ale.F90:3729` — applies the instability adjustment to BOTH `Kv` and `Av`; pin `use_instabmix=.true.`,
-`instabmix_kv=0.1`). **Approach:**
-- **Same prescribe-and-stop end-of-`ocean_setup` shim.** PP mixing reads `bvfreq` (M2.1, gated), the
-  Richardson number from the prescribed `UV`/`density`, and mesh; standalone, no forcing/timestep loop needed
-  (the reduced-M2 namelist STILL likely not needed — confirm `mix_scheme_nmb` routing). The `Av` it produces
-  is the SAME `Av` M2.5 `impl_vert_visc_ale` consumes (currently prescribed analytically) — when M2.8 lands the
-  M2.5 caller can source `dyn%work%Av` instead, kernel unchanged. **Watch:** `K_v⁻` deformation bound (the
-  mislabeled M2.7 bullet) belongs HERE if anywhere — verify against `oce_ale_mixing_pp.F90`.
-- **Gate:** operator-diff `max|Δ|=0` on `Kv`/`Av` (+ intermediates: Richardson number, the 3 PP loops).
+M2.8b `mo_convect` convective adjustment (plan Task M2.8b). FESOM2 `oce_mo_conv.F90` (called AFTER PP —
+`oce_ale.F90:3729`). The M2-live part is the instability adjustment: `Kv(nz,node)=max(Kv,instabmix_kv)` where
+`bvfreq(nz,node)<0` (nodes), `Av(nz,elem)=max(Av,instabmix_kv)` where `any(bvfreq(nz,elnodes)<0)` (elements);
+pin `use_instabmix=.true.`/`instabmix_kv=0.1` (the pi defaults). **Approach:**
+- **Same gate; append `mo_convect` after PP** in the driver+shim. FESOM3 `src/oce/oce_mo_conv.F90`. The shim
+  calls the REAL `mo_convect` (a free subroutine → **explicit interface block**, like `oce_mixing_pp`).
+- **Non-vacuity NEEDS `bvfreq<0` somewhere** — the current monotone-stable T/S (T↓, S↑ with depth) gives
+  `bvfreq>0` everywhere, so the convective branch never fires. Add a LOCALIZED unstable T band (e.g. a warm
+  subsurface lens in the warm hemisphere where `dT/dnz>0` overcomes the −0.20·nz) → `bvfreq<0` in a controlled
+  region. This CASCADES (T/S feeds density → hpressure → pgf → … → everything), but all M2.1-M2.8 records
+  re-verify `max|Δ|=0` automatically (both sides identical T/S); only the new `moc_Kv`/`moc_Av` records are
+  added. Keep S>0 (EOS `sqrt(s)`) and T physical.
+- **`use_momix` (TB04 Monin-Obukhov) is DEFERRED to M2.10** — it reads forcing/ice (`water_flux`/`heat_flux`/
+  `stress_node_surf`/ice/`mo`/`mixlength`/`mo_length`) not ported yet, so OMIT it (not just guard — the fields
+  don't exist). `use_windmix` (uses only params+`Kv`/`Av`) can be transcribed guarded-off (`use_windmix=.false.`).
+- **Gate:** operator-diff `max|Δ|=0` on `moc_Kv`/`moc_Av` (the post-adjustment fields). A driver diagnostic
+  counts the (nz,node)/(nz,elem) where `bvfreq<0` fired (the L11 weak-gate guard).
 
 - **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.7 (EOS + PGF +
   vel_rhs + momadv + viscosity + ivertvisc + SSH stiffness/`ssh_rhs`/CG + the ALE velocity/SSH/W update all
@@ -497,8 +541,8 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 
 ## Open notes / risks
 
-- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.7
-  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH/ALE-update gates all `max|Δ|=0`, 43 fields).
+- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.8
+  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH/ALE-update/PP-mixing gates all `max|Δ|=0`, 46 fields).
   Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-`ocean_setup` shim
   pattern (`fesom_pressure_dump.F90` now drives `pressure_bv` + `pressure_force_4_linfs_fullcell` + the
   REAL `compute_vel_rhs` with `momadv_opt=2` → `momentum_adv_scalar` + the REAL `visc_filt_bidiff` with

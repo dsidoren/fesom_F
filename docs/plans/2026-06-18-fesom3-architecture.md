@@ -435,12 +435,15 @@ matches FESOM2's `oce_ale_vel_rhs.F90` layout); viscosity → `src/oce/oce_dyn_v
       split fired on 13253 (nz,node) (`CFL_z>wsplit_maxcfl`), `max|w|=0.042` m/s. Debug `-check all`
       clean (compute clean; the I/O writer needs `ulimit -s unlimited` for the big array temporary). (L20)
 
-#### Task M2.8: PP vertical mixing
-**Files:** Create: `src/oce/oce_mix_pp.F90`
-- [ ] transcribe `oce_ale_mixing_pp.F90` (3 sequential loops; produces `Kv` on nodes, `Av` on
+#### Task M2.8: PP vertical mixing ✅ DONE (byte-gate CLOSED, pi 1-rank)
+**Files:** Created: `src/oce/oce_ale_mixing_pp.F90` (mirrors the FESOM2 filename)
+- [x] transcribe `oce_ale_mixing_pp.F90` (3 sequential loops; produces `Kv` on nodes, `Av` on
       elements); dispatch `mix_scheme=='PP'`. **Convective adjustment is NOT here** — it is `mo_convect`
-      (M2.8b), a separate routine called after PP.
-- [ ] **Gate:** operator-diff `max|Δ|=0`
+      (M2.8b), a separate routine called after PP. (`oce_mixing_pp` + `Kv0_background_qiang` +
+      `Kv0_background`; `Kv`/`Av` added to `t_dyn_work`; `Kv0_const` etc. added to `mod_param_phys`.)
+- [x] **Gate:** operator-diff `max|Δ|=0` (3 new records `uvnode`/`pp_Kv`/`pp_Av`, 46 fields total).
+      Non-vacuous: the Ri factor spans [5.8e-7, 0.93] (62.4% of node-levels > 0.1), `max|Kv|`=8e-3
+      (800× the K_ver background), `max|Av|`=8.7e-3. Debug `-check all` clean. See LESSONS L21.
 
 #### Task M2.8b: `mo_convect` — convective adjustment
 **Files:** Create: `src/oce/oce_mo_conv.F90`

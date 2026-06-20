@@ -95,6 +95,23 @@ module mod_param_phys
     logical       :: N2smth_h    = .true.
     integer       :: N2smth_hidx = 1
 
+    ! --- &tracer_phys: PP background diffusivity + mo_convect enhancements ---
+    ! Members of the FESOM2 &tracer_phys namelist group (oce_modules.F90 cites below)
+    ! read by M2.8 oce_mixing_pp (Kv0_const) and M2.8b mo_convect (the use_*/*_kv set).
+    ! pi does NOT set any of these -> the FESOM2 defaults hold (Kv0_const=.true. routes
+    ! the simple Kv = mix_coeff_PP*factor^3 + K_ver background; use_momix=.true. but it
+    ! needs forcing/ice not present pre-forcing, so the M2.8b gate FORCES use_momix=.false.
+    ! — momix is the deferred forcing-coupled path, gated at M2.10/M2.11).
+    logical       :: Kv0_const     = .true.        ! oce_modules.F90:78 (const vs lat/depth Kv0)
+    logical       :: use_momix     = .true.        ! oce_modules.F90:146 Monin-Obukhov (TB04)
+    real(kind=WP) :: momix_lat     = -50.0_WP      ! oce_modules.F90:147 apply mo where lat<momix_lat
+    real(kind=WP) :: momix_kv      = 0.01_WP       ! oce_modules.F90:148 mixing within MO length
+    logical       :: use_instabmix = .true.        ! oce_modules.F90:152 convective adjustment
+    real(kind=WP) :: instabmix_kv  = 0.1_WP        ! oce_modules.F90:153 Kv/Av floor where N^2<0
+    logical       :: use_windmix   = .false.       ! oce_modules.F90:156 enhanced near-surface wind mixing
+    real(kind=WP) :: windmix_kv    = 1.0e-3_WP     ! oce_modules.F90:157
+    integer       :: windmix_nl    = 2             ! oce_modules.F90:158 # near-surface levels
+
 contains
 
     subroutine read_param_phys(nml_path, ierr)
