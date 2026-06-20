@@ -457,15 +457,21 @@ matches FESOM2's `oce_ale_vel_rhs.F90` layout); viscosity → `src/oce/oce_dyn_v
       9936 elem-levels → the floor fires, `max|ΔKv|`=0.090, `max|ΔAv|`=0.096 (~0.01→0.1). The T/S change
       cascades but M2.1-M2.8 records all re-verify `max|Δ|=0`. Debug `-check all` clean. See LESSONS L22.
 
-#### Task M2.9a: Tracer-solve assembly (`solve_tracers_ale`)
-**Files:** Create: `src/oce/oce_solve_tracers.F90`
-- [ ] accumulate `del_ttf` = horizontal adv + explicit-vertical adv + diffusion (`del_ttf_advhoriz/advvert`,
-      `oce_ale_tracer.F90:232,240`); `del_ttf` zeroed in init
-- [ ] **SSS/SST restoring** `relax_to_clim`/`relax_2_tsurf` (`oce_ale_tracer.F90:255–264`) — it modifies
-      T/S *inside* the solve; pin `surf_relax_S=1.929e-06`, `balance_salt_water=.true.` + virtual-salt balancing
-- [ ] **ALE reconstruct** `T=(T·hnode+del_ttf)/hnode_new` (`oce_ale_tracer.F90:468–471`) → implicit
-      vertical-diffusion TDMA `diff_ver_part_impl_ale` (line 482)
-- [ ] **Gate:** operator-diff `max|Δ|=0` on `del_ttf` and the updated T/S
+#### Task M2.9a: Tracer-solve assembly (`solve_tracers_ale`) ✅ DONE (max|Δ|=0, 1-rank pi)
+**Files:** Added `diff_tracers_ale` + `diff_part_hor_redi` + `diff_ver_part_impl_ale` + `bc_surface`
+to `src/oce/oce_ale_tracer.F90` (mirrors FESOM2's file layout, NOT the plan's `oce_solve_tracers.F90`).
+- [x] accumulate `del_ttf` = advection tendency (M1, prescribed input here) + **horizontal diffusion**
+      (`diff_part_hor_redi`, Redi=.false. branch — `Kh·tr_xy` edge-flux scatter); `del_ttf` reset per tracer
+- [x] **SSS/SST restoring**: on pi the *active* restoring is the **surface** one via `relax_salt`/`virtual_salt`
+      in `bc_surface` (gated, prescribed analytically). The 3D `relax_to_clim` short-circuits (`clim_relax=0`)
+      → deferred to M2.10 (needs Tclim/Sclim + `clim_relax>0`); `surf_relax_S` lives in forcing (M2.10).
+- [x] **ALE reconstruct** `T=(T·hnode+del_ttf)/hnode_new` (linfs: `hnode_new==hnode` → `T += del_ttf/hnode`) →
+      implicit vertical-diffusion TDMA `diff_ver_part_impl_ale`, the **FIRST consumer of the M2.8 `dyn%work%Kv`**
+      (sourced LIVE post-`mo_convect`, no longer prescribed). Redi (isredi=0) + FCT (`do_wimpl=.false.`) +
+      no-KPP/sw/icebergs branches reduce it to pure vertical diffusion + the surface BC.
+- [x] **Gate:** operator-diff `max|Δ|=0` on `tsol_del_ttf_T/S` (post-diffusion `del_ttf`, per tracer) and
+      `tsol_T`/`tsol_S` (the solved T/S), **57 fields total** (9 new `tsol_*`). Non-vacuous: Kv consumed=[0, 0.1]
+      (live), `max|dT|=1.26`°C, `max|dS|=0.11`, `max|del_ttf_T|=0.50`. Debug `-check all` clean. See LESSONS L23.
 
 #### Task M2.9b: `step_oce` sequence assembly + dispatch + thickness commit
 **Files:** Create: `src/step/mod_step_oce.F90`; Modify: `src/step/mod_model.F90`

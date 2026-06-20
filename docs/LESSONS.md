@@ -839,3 +839,56 @@ run (2 new fields `moc_Kv`/`moc_Av` → **48 fields**). Built `src/oce/oce_mo_co
   those three allocated (size `nod2D`) even though `use_momix=.false.` never dereferences them — extend the M2.3
   `ice_dummy` (which only had `data(2)`/`data(3)` for `compute_vel_rhs`'s `m_ice`/`m_snow`). FESOM3's ported
   `mo_convect(dyn, mesh)` drops `ice` entirely (no momix → no ice).
+
+## L23 — Tracer-solve assembly (M2.9a): the FIRST `Kv` consumer (sourced LIVE), `NaN·0` poisoning from Redi-off slope reads, module-procedure vs free-subroutine symbol mangling (PASSED first gate run)
+
+M2.9a (the tracer diffusion solve: `diff_tracers_ale` = `diff_part_hor_redi` horizontal diffusion + ALE
+reconstruct + `diff_ver_part_impl_ale` implicit vertical-diffusion TDMA + `bc_surface`) byte-matched FESOM2
+`max|Δ|=0` on the FIRST gate run (9 new `tsol_*` records → **57 fields**). Built into `src/oce/oce_ale_tracer.F90`
+(mirrors FESOM2's file, NOT the plan's `oce_solve_tracers.F90` — the L16 layout precedent). Specifics:
+
+- **The TDMA is the FIRST consumer of a PP output — source `dyn%work%Kv` LIVE (post-`mo_convect`), don't
+  prescribe it.** Every prior M2 gate PRESCRIBED its diffusivity/viscosity (M2.5 `Av`, M2.8 `uvnode`→`Kv`); here
+  `diff_ver_part_impl_ale` reads the `Kv` that PP+`mo_convect` already wrote into `o_ARRAYS Kv` / FESOM3
+  `dyn%work%Kv` earlier in the SAME gate. Append M2.9a after the M2.8b section so `Kv` is live; both sides consume
+  `Kv∈[0, 0.1]` (the `mo_convect` floor) — non-vacuous AND it realises the integration the step (M2.9b) needs.
+  Gate `max|dT|`=1.26 °C / `max|dS|`=0.11 confirms the solve actually moves T/S.
+
+- **On pi the tracer-solve diffusion reduces to the implicit vertical TDMA ALONE; transcribe THAT path, defer the
+  rest.** `K_hor=0` (horizontal diffusion `diff_part_hor_redi` is a no-op in production), `i_vert_diff=.true.`
+  (skip the explicit `diff_ver_part_expl_ale`), T/S use `'FCT'` → `do_wimpl=.false.` (the implicit vertical
+  ADVECTION terms are off — FCT carries advection explicitly via the full `w`), `Redi=.false.` → `isredi=0` kills
+  every isoneutral `slope_tapered`/`Ki` term, `mix_scheme='PP'` → `use_kpp_nonlclflx=.false.` (no nonlocal flux),
+  `smooth_bh_tra=.false.` (no biharmonic). So the FESOM3 TDMA = `Kv` vertical diffusion + the `bc_surface` row;
+  the do_wimpl advection block is transcribed-but-unexercised, the rest deferred. **linfs makes the ALE
+  reconstruct's `del_ttf += T·(hnode-hnode_new)` term vanish** (`hnode_new==hnode`) → `T* = T + del_ttf/hnode`
+  (the zstar non-trivial case waits for M2.11). To exercise `diff_part_hor_redi` non-vacuously anyway, PRESCRIBE
+  `Ki>0` (the L21 prescribe-the-unsourced-input pattern: `Ki` needs `mesh_resolution`, deferred to M4) and source
+  `tr_xy` from the gated M1.1 `tracer_gradient_elements` (re-run per tracer; `do_oce_adv_tra` normally sets it).
+
+- **Redi-off reads `slope_tapered`/`tr_z` BEFORE multiplying by `isredi=0` → `NaN·0=NaN` poisons the oracle.**
+  The shipped namelist has `Fer_GM=.true.`/`Redi=.true.` so `slope_tapered`/`tr_z` are ALLOCATED but not yet
+  FILLED at end-of-`ocean_setup`; FESOM2 computes `Fx=Kh·(Tx + SxTz·isredi)` where `SxTz=Σ(Tz·slope_tapered)/2` —
+  if `slope_tapered`/`tr_z` are uninitialised garbage/NaN, `SxTz·0 = NaN` and `Fx=NaN`, while FESOM3 (which OMITS
+  the slope terms for Redi-off) computes a finite `Fx=Kh·Tx` → the gate would MISMATCH (or NaN-propagate). Fix:
+  the shim explicitly `slope_tapered=0`/`tr_z=0` (guarded by `allocated`) before the solve, so `SxTz=0` cleanly
+  and both sides agree on `Fx=Kh·Tx` (`Tx+0.0·0.0 == Tx` to the bit). General rule: when transcribing a
+  feature-OFF branch that DROPS a `×flag` term FESOM2 still evaluates, zero the dropped term's operands in the
+  oracle so its `×0` is a clean finite 0, not `NaN·0`.
+
+- **Oracle-side: distinguish module procedures from free subroutines — the symbol mangling differs.** The shim
+  drives REAL FESOM2 routines via either a `use` of an auto-generated `*_interface` module (e.g.
+  `diff_tracers_ale_interface`) OR an explicit `interface` block (for free subroutines with no `*_interface`
+  module, like `impl_vert_visc_ale`/`mo_convect`). `tracer_gradient_elements` is a MODULE PROCEDURE of `o_tracers`
+  → its symbol is mangled (`o_tracers_mp_tracer_gradient_elements_`), so an explicit external `interface` block
+  emits a call to the UNMANGLED `tracer_gradient_elements_` → **`undefined symbol` at load time** (links fine,
+  fails at runtime `symbol lookup error`). Fix: `use o_tracers, only: tracer_gradient_elements` (let the module
+  provide the mangled name). Check `module … contains` membership before choosing interface-block vs `use`.
+
+- **Two transcription gotchas the build caught.** (1) Fortran specification-expression order: a dummy whose
+  array bound references ANOTHER dummy (`tr_xy(2, mesh%nl-1, …)`) must have that dummy (`mesh`) DECLARED EARLIER
+  in the spec part — Intel `#6158`/`#6415`; reorder the type-decls (the arg LIST order is independent and stays
+  matching the call). (2) `real_salt_flux` lives in `g_forcing_arrays`, NOT `o_ARRAYS` with its sibling surface
+  fluxes `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` — `use` the right module per symbol. Keep FESOM2's
+  `zinv1=zinv2` backup bookkeeping in the TDMA verbatim (`1/dz` of the layer above) rather than recomputing
+  `1/(Z_n(nz-1)-Z_n(nz))` inline — byte-identical, but faithful transcription removes reviewer doubt (L7).

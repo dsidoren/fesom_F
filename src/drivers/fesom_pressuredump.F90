@@ -31,6 +31,9 @@ program fesom_pressuredump
     use oce_ale,          only: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
     use oce_ale_mixing_pp, only: oce_mixing_pp
     use oce_mo_conv,      only: mo_convect
+    use mod_tracer,       only: t_tracer
+    use oce_tracer_grad,  only: tracer_gradient_elements
+    use oce_ale_tracer,   only: diff_tracers_ale
     use mod_param_phys,   only: alpha, theta
     use mod_param_phys,   only: mix_coeff_PP, A_ver, K_ver, Kv0_const
     use mod_param_phys,   only: use_instabmix, instabmix_kv, use_momix, use_windmix
@@ -87,6 +90,15 @@ program fesom_pressuredump
     ! pp_Kv/pp_Av records still echo the PP output (mo_convect overwrites Kv/Av in place).
     real(kind=WP), allocatable :: pp_Kv_dump(:,:), pp_Av_dump(:,:)
     integer       :: n_unstab_n, n_unstab_e
+    ! --- M2.9a tracer-solve assembly (diff_tracers_ale: horiz diff + ALE reconstruct +
+    ! implicit vertical-diffusion TDMA, the FIRST consumer of the M2.8 dyn%work%Kv) ---
+    type(t_tracer) :: tracers
+    real(kind=WP), allocatable :: Ki(:,:), del_ttf_in(:,:), tr_xy(:,:,:)
+    real(kind=WP), allocatable :: heat_flux(:), water_flux(:), virtual_salt(:), relax_salt(:)
+    real(kind=WP), allocatable :: real_salt_flux(:)
+    real(kind=WP), allocatable :: t_solved(:,:), s_solved(:,:), del_ttf_t(:,:), del_ttf_s(:,:)
+    real(kind=WP) :: is_nonlinfs, kvmin, kvmax
+    integer       :: tr_num
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -544,6 +556,76 @@ program fesom_pressuredump
         n_unstab_e, ' elem-levels ; max|d Kv|=', maxval(abs(dyn%work%Kv - pp_Kv_dump)), &
         ' ; max|d Av|=', maxval(abs(dyn%work%Av - pp_Av_dump))
 
+    ! ============== M2.9a tracer-solve assembly (diff_tracers_ale) ====================
+    ! The per-tracer diffusion + ALE reconstruct (FESOM2 oce_ale_tracer.F90:335-491), run
+    ! per tracer inside solve_tracers_ale AFTER advection. Here it is ISOLATED on prescribed
+    ! inputs (the M2.8 pattern): del_ttf enters with a prescribed advection tendency, the
+    ! horizontal diffusivity Ki and the surface fluxes are prescribed (Ki needs mesh_resolution
+    ! [M4]; heat_flux/water_flux/virtual_salt/relax_salt come from forcing [M2.10]). The
+    ! implicit vertical-diffusion TDMA CONSUMES dyn%work%Kv — the LIVE post-mo_convect PP
+    ! coefficient (the FIRST consumer of a PP output; no longer prescribed). MUST match the
+    ! FESOM2 oracle src/fesom_pressure_dump.F90.
+    !
+    ! Gate config: Redi=.false. (isredi=0), tra_adv_lim='FCT' (do_wimpl=.false.),
+    ! i_vert_diff=.true. (implicit path), PP (no KPP nonlocal), linfs (is_nonlinfs=0).
+    is_nonlinfs = 0.0_WP
+    allocate(Ki(nl-1, mesh%nod2D), del_ttf_in(nl-1, mesh%nod2D), tr_xy(2, nl-1, mesh%elem2D))
+    allocate(heat_flux(mesh%nod2D), water_flux(mesh%nod2D), virtual_salt(mesh%nod2D), &
+             relax_salt(mesh%nod2D), real_salt_flux(mesh%nod2D))
+    allocate(t_solved(nl-1, mesh%nod2D), s_solved(nl-1, mesh%nod2D))
+    allocate(del_ttf_t(nl-1, mesh%nod2D), del_ttf_s(nl-1, mesh%nod2D))
+
+    ! prescribed horizontal diffusivity Ki (>0 so diff_part_hor_redi is non-vacuous; pi
+    ! production K_hor=0 makes it a no-op, so exercise it synthetically — the L21 pattern).
+    ! Surface fluxes: heat_flux (T BC), virtual_salt + relax_salt (S BC; the active surface
+    ! salinity restoring). water_flux/real_salt_flux drop on linfs (x is_nonlinfs=0) but are
+    ! referenced, so prescribe them too. MUST match the FESOM2 oracle.
+    do n = 1, mesh%nod2D
+        lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
+        do nz = 1, nl-1
+            Ki(nz,n)         = 300.0_WP + 150.0_WP*cos(lat)*cos(lon) + 10.0_WP*real(nz,WP)
+            del_ttf_in(nz,n) = 0.50_WP*sin(2.0_WP*lon)*cos(lat)*cos(0.3_WP*real(nz,WP))
+        end do
+        heat_flux(n)      =  50.0_WP*cos(lat)*sin(lon)
+        water_flux(n)     =  1.0e-6_WP*sin(2.0_WP*lon)*cos(lat)
+        virtual_salt(n)   =  3.0e-5_WP*sin(lon)*cos(lat)
+        relax_salt(n)     =  2.0e-5_WP*cos(2.0_WP*lon)*cos(lat)
+        real_salt_flux(n) =  0.0_WP
+    end do
+
+    ! build the tracer state: T (ID=1) / S (ID=2), values = the prescribed (M2.1) T/S (a COPY,
+    ! so the 'temp'/'salt' dump records keep echoing the prescription). FCT + implicit vertical
+    ! diffusion (pi namelist.tra). use_wsplit stays .true. (M2.7) but FCT -> do_wimpl=.false.
+    tracers%num_tracers = 2
+    allocate(tracers%data(2))
+    allocate(tracers%data(1)%values(nl-1, mesh%nod2D), tracers%data(2)%values(nl-1, mesh%nod2D))
+    allocate(tracers%work%del_ttf(nl-1, mesh%nod2D))
+    tracers%data(1)%values = temp;  tracers%data(1)%ID = 1
+    tracers%data(2)%values = salt;  tracers%data(2)%ID = 2
+    tracers%data(1)%tra_adv_lim = 'FCT';  tracers%data(1)%i_vert_diff = .true.
+    tracers%data(2)%tra_adv_lim = 'FCT';  tracers%data(2)%i_vert_diff = .true.
+
+    do tr_num = 1, 2
+        tracers%work%del_ttf = del_ttf_in                                  ! prescribed advection tendency
+        call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh)  ! M1.1 tr_xy (horiz diff)
+        call diff_tracers_ale(tr_num, dt_velrhs, dyn, tracers, mesh, tr_xy, Ki, &
+                              heat_flux, water_flux, virtual_salt, relax_salt, &
+                              real_salt_flux, is_nonlinfs)
+        if (tr_num == 1) then
+            del_ttf_t = tracers%work%del_ttf;  t_solved = tracers%data(1)%values
+        else
+            del_ttf_s = tracers%work%del_ttf;  s_solved = tracers%data(2)%values
+        end if
+    end do
+
+    ! gate-strength diagnostic (NOT dumped): the consumed Kv range + how much the solve moved
+    ! T/S, confirming the TDMA + bc_surface + horizontal diffusion are non-vacuous.
+    kvmin = minval(dyn%work%Kv); kvmax = maxval(dyn%work%Kv)
+    write(*,'(a,es10.3,a,es10.3,a,es10.3,a,es10.3,a,es10.3)') &
+        'fesom_pressuredump: tracer solve: Kv consumed=[', kvmin, ',', kvmax, &
+        '] ; max|del_ttf_T|=', maxval(abs(del_ttf_t)), &
+        ' ; max|dT|=', maxval(abs(t_solved-temp)), ' ; max|dS|=', maxval(abs(s_solved-salt))
+
     ! --- dump (same FADVHDMP format / names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'temp',           real(temp,        MP))
@@ -609,6 +691,18 @@ program fesom_pressuredump
     ! M2.8b mo_convect: the post-adjustment Kv/Av (floored to instabmix_kv where bvfreq<0).
     call wr_r2(u, 'moc_Kv',         real(dyn%work%Kv(1:nl, :),  MP))
     call wr_r2(u, 'moc_Av',         real(dyn%work%Av(1:nl, :),  MP))
+    ! M2.9a tracer solve: prescribed inputs (Ki, surface fluxes, the advection tendency
+    ! del_ttf_in) + the gate targets per tracer — del_ttf after diffusion (del_ttf_T/S) and
+    ! the solved temperature/salinity (tsol_T/tsol_S). The TDMA consumed the live moc_Kv.
+    call wr_r2(u, 'tsol_Ki',           real(Ki(1:nl-1, :),     MP))
+    call wr_r1(u, 'tsol_heat_flux',    real(heat_flux,         MP))
+    call wr_r1(u, 'tsol_virtual_salt', real(virtual_salt,      MP))
+    call wr_r1(u, 'tsol_relax_salt',   real(relax_salt,        MP))
+    call wr_r2(u, 'tsol_del_ttf_in',   real(del_ttf_in,        MP))
+    call wr_r2(u, 'tsol_del_ttf_T',    real(del_ttf_t,         MP))
+    call wr_r2(u, 'tsol_del_ttf_S',    real(del_ttf_s,         MP))
+    call wr_r2(u, 'tsol_T',            real(t_solved,          MP))
+    call wr_r2(u, 'tsol_S',            real(s_solved,          MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_pressuredump: wrote '//trim(out_path)
 

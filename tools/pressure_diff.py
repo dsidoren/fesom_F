@@ -125,8 +125,11 @@ def main():
     if extra3:
         print(f"\n(only in FESOM3, ignored: {extra3})")
 
-    print("\n" + ("PRESSURE/EOS/N2/PGF/VELRHS/VISC/IVERTVISC BYTE-GATE (M2.1 density+hpressure+bvfreq; M2.2 pgf; M2.3 coriolis+vel_rhs; M2.4 momentum advection -> full UV_rhs + biharmonic viscosity opt_visc=7; M2.5 implicit vertical viscosity TDMA): PASS (max|delta|=0)" if ok else
-                  "PRESSURE/EOS/N2/PGF/VELRHS/VISC/IVERTVISC BYTE-GATE (M2.1 density+hpressure+bvfreq; M2.2 pgf; M2.3 coriolis+vel_rhs; M2.4 momentum advection -> full UV_rhs + biharmonic viscosity opt_visc=7; M2.5 implicit vertical viscosity TDMA): FAIL"))
+    tag = ("M2.1 density+hpressure+bvfreq; M2.2 pgf; M2.3 coriolis+vel_rhs; M2.4 momentum advection -> full "
+           "UV_rhs + biharmonic viscosity opt_visc=7; M2.5 implicit vertical viscosity TDMA; M2.6 SSH CG; M2.7 "
+           "ALE update; M2.8 PP mixing; M2.8b mo_convect; M2.9a tracer solve diff_tracers_ale [TDMA consumes Kv]")
+    print("\n" + (f"PRESSURE/EOS/N2/PGF/VELRHS/VISC/IVERTVISC/SSH/ALE/PP/TRACER-SOLVE BYTE-GATE ({tag}): PASS (max|delta|=0)" if ok else
+                  f"PRESSURE/EOS/N2/PGF/VELRHS/VISC/IVERTVISC/SSH/ALE/PP/TRACER-SOLVE BYTE-GATE ({tag}): FAIL"))
     sys.exit(0 if ok else 1)
 
 

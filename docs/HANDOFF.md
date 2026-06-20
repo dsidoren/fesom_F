@@ -26,8 +26,12 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `Kv`=mix·f³+K_ver nodes], a STANDALONE add on a prescribed strong-shear `uvnode` (factor → ~1, non-vacuous);
   M2.8b: `mo_convect` convective adjustment [`Kv`/`Av`=max(·, `instabmix_kv`=0.1) where `bvfreq<0`], with a
   localized unstable T band making `bvfreq<0` on 5165 node-levels (fires);
+  M2.9a: `diff_tracers_ale` tracer-solve [`diff_part_hor_redi` horizontal diffusion + ALE reconstruct +
+  `diff_ver_part_impl_ale` implicit vertical-diffusion TDMA — the FIRST consumer of the M2.8 `dyn%work%Kv`,
+  sourced LIVE post-`mo_convect` — + `bc_surface` surface fluxes], reduced to the pi path (Redi off, FCT
+  `do_wimpl=.false.`, `i_vert_diff=.true.`, no KPP/sw/icebergs);
   all `max|Δ|=0` vs FESOM2 on pi 1-rank; one
-  gate `tools/run_pressure_gate.sh`, **48 fields**). **Next: M2.9a tracer-solve assembly (`solve_tracers_ale`).**
+  gate `tools/run_pressure_gate.sh`, **57 fields**). **Next: M2.9b `step_oce` sequence assembly.**
   M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
@@ -258,11 +262,29 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   `uice`/`vice`/`data(1)` (FESOM2 `mo_convect` pointer-assigns them unconditionally), and calls the REAL
   `mo_convect` via an explicit interface block. `max|Δ|=0` first run (L9 transitive — `max()` is order-free).
   Debug `-check all` clean; M1 advhor + 13/13 ctest still green. See LESSONS L22.
-- **Current task:** M2.9a tracer-solve assembly (`solve_tracers_ale`, plan Task M2.9a) — accumulate `del_ttf`
-  (M1 advection + diffusion), SSS/SST restoring, ALE reconstruct `T=(T·hnode+del_ttf)/hnode_new` + the implicit
-  vertical-diffusion TDMA (`diff_ver_part_impl_ale`, which CONSUMES the M2.8 `Kv`). Then M2.9b `step_oce`
-  sequence assembly (where `compute_vel_nodes` — the real `uvnode` source — and the PP/mo_convect step-order
-  wiring get gated). M1's multi-rank advection gate still rides M2.12.
+- **M2.9a tracer-solve assembly byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2 on the per-tracer
+  post-diffusion `del_ttf` (`tsol_del_ttf_T`/`tsol_del_ttf_S`) AND the solved T/S (`tsol_T`/`tsol_S`), plus the
+  prescribed inputs (`Ki`, `heat_flux`, `virtual_salt`, `relax_salt`, the advection tendency `del_ttf_in`). Built
+  `diff_tracers_ale` + `diff_part_hor_redi` (horizontal diffusion, Redi-off `Kh·tr_xy` edge scatter) +
+  `diff_ver_part_impl_ale` (implicit vertical-diffusion Thomas/TDMA) + `bc_surface` (surface heat/virtual-salt/
+  relaxation flux) into `src/oce/oce_ale_tracer.F90` (mirrors FESOM2's file). **The TDMA is the FIRST consumer of
+  a PP output** — it reads `dyn%work%Kv` sourced LIVE post-`mo_convect` (no longer prescribed; the M2.8/M2.5
+  prescribe-the-input precedent ends here). On pi it reduces to pure vertical diffusion + the surface BC (Redi off
+  → `isredi=0`; FCT → `do_wimpl=.false.`; `i_vert_diff=.true.`; PP → no KPP nonlocal; `smooth_bh_tra=.false.`; linfs
+  `hnode_new==hnode` → the ALE-reconstruct `T·(hnode−hnode_new)` term vanishes). Same gate
+  `tools/run_pressure_gate.sh` (now **57 fields**): the shim prescribes `Ki`/surface-fluxes/`del_ttf_in`, sets the
+  FCT/`i_vert_diff`/Redi-off config, computes `tr_xy` via the REAL `o_tracers::tracer_gradient_elements`, and drives
+  the REAL FESOM2 `diff_tracers_ale` per tracer (T,S). Non-vacuous: Kv consumed=[0, 0.1] (live), `max|dT|`=1.26 °C,
+  `max|dS|`=0.11, `max|del_ttf_T|`=0.50. PASSED first gate run. Debug `-check all` clean; M1 advhor + 13/13 ctest
+  green. Two oracle traps fixed: `slope_tapered`/`tr_z` must be ZEROED in the shim (Redi-off reads them ×`isredi=0`
+  before the multiply → uninitialised `NaN·0=NaN` would mismatch FESOM3 which omits the terms); and
+  `tracer_gradient_elements` is a `o_tracers` MODULE procedure → `use` it (an explicit external interface gives
+  `undefined symbol`). See LESSONS L23.
+- **Current task:** M2.9b `step_oce` sequence assembly (plan Task M2.9b) — assemble the faithful D6 substep
+  sequence with feature dispatch, wire `compute_vel_nodes` (the REAL `uvnode` source, prescribed at M2.8), the
+  PP/`mo_convect` step-order, `impl_vert_visc_ale` sourcing `dyn%work%Av`, the full `solve_tracers_ale` wrapper
+  (advection + the M2.9a diffusion + relax + the salinity clamp + `exchange_nod`), and the `update_thickness_ale`
+  commit; gate per-substep `max|Δ|=0` across the whole ocean step. M1's multi-rank advection gate still rides M2.12.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -398,7 +420,7 @@ The whole byte-gate pipeline is validated end-to-end:
   2022.0.1 + openmpi 4.1.2-intel; gcc 11.2.0 + openmpi 4.1.2-gcc. netCDF loaded (only
   needed M2.10+). Login `gfortran` is 8.5.0 with no MPI — always build via `configure.sh`.
 
-## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH + M2.7 ALE-update + M2.8 PP mixing + M2.8b mo_convect byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.9+)
+## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH + M2.7 ALE-update + M2.8 PP mixing + M2.8b mo_convect + M2.9a tracer-solve byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.9b+)
 
 Same end-of-`ocean_setup` 1-rank shim pattern as the M1 advection gate, the FIRST dynamics
 kernel. `pressure_bv` runs DURING the timestep but 1-rank forcing hangs on the login node (L8),
@@ -530,20 +552,38 @@ FESOM2 code:
   re-verify `max|Δ|=0` (both sides identical T). Save the PP output (`pp_Kv_save`/`pp_Av_save`) before
   `mo_convect` overwrites `Kv`/`Av` (the L20 pattern); 2 new records `moc_Kv`/`moc_Av` (**48 fields**). `max|Δ|=0`
   first run. Debug `-check all` clean. See LESSONS L22.
+- **M2.9a-tracer-solve extension (DONE):** the SAME gate now also covers the per-tracer diffusion solve (FESOM2
+  `oce_ale_tracer.F90:335` → `diff_tracers_ale`, run per tracer inside `solve_tracers_ale` after advection). FESOM3
+  `src/oce/oce_ale_tracer.F90` grew `diff_tracers_ale` + `diff_part_hor_redi` + `diff_ver_part_impl_ale` +
+  `bc_surface`. The shim drives the REAL FESOM2 `diff_tracers_ale` (via `diff_tracers_ale_interface`) per tracer
+  (T,S), ISOLATED on prescribed inputs (the M2.8 pattern): `del_ttf` enters with a prescribed advection tendency
+  (`del_ttf_in`), the horizontal diffusivity `Ki` + surface fluxes (`heat_flux`/`water_flux`/`virtual_salt`/
+  `relax_salt`) are prescribed, `tr_xy` is set by the REAL `o_tracers::tracer_gradient_elements`, and the implicit
+  vertical-diffusion TDMA CONSUMES the LIVE `o_ARRAYS Kv` (post-`mo_convect`, the **FIRST consumer of a PP
+  output**). Force the gate config: `Redi=.false.` (isredi=0), `tra_adv_lim='FCT'` (`do_wimpl=.false.`),
+  `i_vert_diff=.true.`, `use_sw_pene`/`use_kpp_nonlclflx`/`use_icebergs=.false.`, `smooth_bh_tra=.false.`,
+  `is_nonlinfs=0`. **CRITICAL oracle trap:** zero `slope_tapered`/`tr_z` in the shim — Redi-off reads them
+  ×`isredi=0` BEFORE the multiply, and the shipped `Fer_GM/Redi=.true.` namelist allocated-but-didn't-fill them →
+  uninitialised `NaN·0=NaN` would poison the result (FESOM3 omits those terms). 9 new records: `tsol_Ki`/
+  `tsol_heat_flux`/`tsol_virtual_salt`/`tsol_relax_salt`/`tsol_del_ttf_in` (inputs) + `tsol_del_ttf_T`/
+  `tsol_del_ttf_S`/`tsol_T`/`tsol_S` (gate targets); `pressure_diff.py` picks them up automatically (**57 fields**).
+  Non-vacuous (Kv consumed=[0,0.1] live, `max|dT|`=1.26 °C, `max|dS|`=0.11). `max|Δ|=0` first run; Debug `-check
+  all` clean. The 3D `relax_to_clim` (`clim_relax=0` on pi) + the explicit `diff_ver_part_expl_ale` (`i_vert_diff`)
+  + biharmonic `diff_part_bh` (`smooth_bh_tra=.false.`) are transcribed-deferred (not on the pi path). See LESSONS L23.
 
 ## Next task
 
-M2.9a tracer-solve assembly (`solve_tracers_ale`, plan Task M2.9a) — FESOM2 `oce_ale_tracer.F90`. **Approach:**
-- Accumulate `del_ttf` = horizontal adv + explicit-vertical adv (M1, gated) + diffusion; SSS/SST restoring
-  (`relax_to_clim`/`relax_2_tsurf`, modifies T/S inside the solve — pin `surf_relax_S`/`balance_salt_water`);
-  ALE reconstruct `T=(T·hnode+del_ttf)/hnode_new` → the implicit vertical-diffusion TDMA
-  `diff_ver_part_impl_ale` — which **CONSUMES the M2.8 `Kv`** (the first consumer of a PP output; can stop
-  prescribing `Kv` and source `dyn%work%Kv`).
-- **Same prescribe-and-stop shim** (still no reduced-M2 namelist if it runs pre-forcing). Gate `max|Δ|=0` on
-  `del_ttf` + the updated T/S.
-- Then **M2.9b `step_oce` sequence assembly** — where `compute_vel_nodes` (the real `uvnode` source, prescribed
-  at M2.8), the PP/mo_convect step-order wiring, and `impl_vert_visc_ale` sourcing `dyn%work%Av` all get gated
-  in the assembled per-substep `step_oce` byte-gate.
+M2.9b `step_oce` sequence assembly (plan Task M2.9b) — FESOM2 `oce_ale.F90` step / `oce_setup_step.F90`. **Approach:**
+- Assemble the faithful D6 ocean-substep sequence with feature dispatch (`select case`) + byte-identical
+  off-switches: pressure/EOS/N² → PP mixing + `mo_convect` → `compute_vel_nodes` (the REAL `uvnode` source — gate
+  it here, was prescribed at M2.8) → `compute_vel_rhs` (momadv) → viscosity → `impl_vert_visc_ale` (now sourcing
+  `dyn%work%Av` from PP, was a prescribed arg at M2.5) → SSH solve → ALE update → the full `solve_tracers_ale`
+  wrapper (init_tracers_AB + `do_oce_adv_tra` + the M2.9a `diff_tracers_ale` + relax + the salinity clamp +
+  `exchange_nod`) → final `update_thickness_ale` commit.
+- This is the FIRST kernel that genuinely needs the **reduced-M2 oracle namelist** (PP/no-GM/no-Redi/linfs/
+  `opt_visc=7`) running PAST forcing in a real timestep loop — assemble it from `work_pi/namelist.*` (it was NOT
+  needed for M2.1–M2.9a, all of which run on prescribed state at end-of-`ocean_setup`).
+- **Gate:** **per-substep `max|Δ|=0` on pi** across the whole ocean step.
 
 - **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.7 (EOS + PGF +
   vel_rhs + momadv + viscosity + ivertvisc + SSH stiffness/`ssh_rhs`/CG + the ALE velocity/SSH/W update all
@@ -564,8 +604,8 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 ## Open notes / risks
 
 - The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.8b
-  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH/ALE-update/PP-mixing/convective-adjustment gates
-  all `max|Δ|=0`, 48 fields).
+  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH/ALE-update/PP-mixing/convective-adjustment/tracer-solve gates
+  all `max|Δ|=0`, 57 fields).
   Self-tests run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-`ocean_setup` shim
   pattern (`fesom_pressure_dump.F90` now drives `pressure_bv` + `pressure_force_4_linfs_fullcell` + the
   REAL `compute_vel_rhs` with `momadv_opt=2` → `momentum_adv_scalar` + the REAL `visc_filt_bidiff` with
