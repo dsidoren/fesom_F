@@ -6,16 +6,20 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 
 - **Milestone:** M2 (minimal ocean dynamical core) — **IN PROGRESS.** **M2.1 `pressure_bv` +
   M2.2 hydrostatic PGF + M2.3 vel_rhs + M2.4 momentum advection (FULL `UV_rhs`) + M2.4 biharmonic
-  viscosity + M2.5 implicit vertical viscosity (TDMA) COMPLETE ✓** (M2.1: EOS split-form
+  viscosity + M2.5 implicit vertical viscosity (TDMA) + M2.6 SSH (stiffness + `ssh_rhs` + CG solve)
+  COMPLETE ✓** (M2.1: EOS split-form
   `density_m_rho0` + top-down `hpressure` + N²/`bvfreq` raw+smoothed; M2.2: `gradient_sca`-contraction
   `pgf_x`/`pgf_y`; M2.3: `coriolis` geometry field + `compute_vel_rhs` Coriolis+AB2+PGF+SSH-gradient;
   M2.4: `momentum_adv_scalar` (w·du/dz + u·du/dx) ADDED into the same `UV_rhsAB(1,1:2,·)` slot → the
   FULL `UV_rhs`, THEN `viscosity_filter(7)` `visc_filt_bidiff` biharmonic viscosity as a SEPARATE
   operator on the post-`compute_vel_rhs` `UV_rhs`; M2.5: `impl_vert_visc_ale` per-element tridiagonal
   Thomas solve [implicit `Av` + vertical advection `w_i` + wind-stress/bottom-drag BCs] OVERWRITING
-  `UV_rhs`, a SEPARATE operator after `viscosity_filter`; all `max|Δ|=0` vs FESOM2 on pi 1-rank; one
-  gate `tools/run_pressure_gate.sh`, **28 fields**). **Next: M2.6 SSH — stiffness matrix + `ssh_rhs` +
-  CG solve.** M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
+  `UV_rhs`, a SEPARATE operator after `viscosity_filter`; M2.6: `init_stiff_mat_ale` CSR stiffness
+  [`g·dt·α·θ·H·div` + `areasvol/dt` mass] + `compute_ssh_rhs_ale` edge-divergence + `solve_ssh_ale`
+  preconditioned CG → `d_eta` (converged in 37 iters, byte-identical) — the FIRST iterative solver;
+  all `max|Δ|=0` vs FESOM2 on pi 1-rank; one
+  gate `tools/run_pressure_gate.sh`, **32 fields**). **Next: M2.7 ALE (linfs) + velocity/SSH update.**
+  M1 (tracer advection) — **COMPLETE ✓ at the 1-rank anchor** (tag `m1`).
   M1.1–M1.4 byte-gates `max|Δ|=0` vs FESOM2 on pi 1-rank (geometry + horiz/vert advection +
   FCT limiter + the assembled driver/step). **M1.5 (multi-rank) is FOLDED INTO M2.12**
   (decision 2026-06-19): a multi-rank advection byte-gate needs the local-mesh remap
@@ -173,9 +177,26 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   (`max|d(uv_rhs)|=0.985`, `w_i>0/<0` both branches fire). Debug `-check all` clean — pi has NO single-layer
   columns (min elem `nlevels=5`) so the FESOM2 single-layer `Z_n(0)`/`UV(:,0)` benign-OOB never triggers
   (deferred to M2.11 CORE2 shelf columns). M1 advhor gate + 13/13 ctest still green. See LESSONS L18.
-- **Current task:** M2.6 SSH — stiffness matrix + `ssh_rhs` + CG solve (`oce_ale_ssh_splitexpl_*` / the
-  implicit-SSH solver path). First M2 kernel that runs PAST forcing → assemble the reduced-M2 namelist
-  (PP/no-GM/no-Redi/linfs/opt_visc=7) from `work_pi/namelist.*`. M1's multi-rank advection gate still rides M2.12.
+- **M2.6 SSH (stiffness + `ssh_rhs` + CG solve) byte-gate CLOSED ✓ (on pi 1-rank).** `max|Δ|=0` vs FESOM2 on
+  `ssh_stiff_diag` (the stiffness diagonal = mass + self-stiffness), `ssh_Aeta` (the FULL matvec `A·eta_n` →
+  exercises every CSR non-zero), `ssh_rhs` (the edge-divergence rhs) AND `d_eta` (the CG solution — the gate
+  target). Built `src/oce/oce_ssh_rhs.F90` (`init_stiff_mat_ale` CSR stiffness [`factor=g·dt·α·θ` ×
+  `(zbar_e_bot−zbar_e_srf)`·gradient·edge_cross + mass `areasvol/dt`] + `compute_ssh_rhs_ale` edge-scatter
+  divergence of `α(UV+UV_rhs)`) + `src/oce/oce_ssh_solve.F90` (`ssh_solve_preconditioner` MITgcm Jacobi-
+  symmetrised M⁻¹ + `ssh_solve_cg` + `solve_ssh_ale`) — the **FIRST iterative solver** in the port.
+  linfs builds the matrix ONCE (`update_stiff_mat_ale` skipped, `oce_ale.F90:3921`); the prescribe-and-stop
+  shim STILL works (`init_stiff_mat_ale` runs at `ocean_setup:140`, before the shim → reduced-M2 namelist NOT
+  needed). The CG converged in **37 iters** (byte-identical → the whole recurrence matches by L9). Same gate
+  `tools/run_pressure_gate.sh` (now **32 fields**); the shim drives the REAL `compute_ssh_rhs_ale` +
+  `solve_ssh_ale` via explicit interfaces (no auto-gen `*_interface`). 1-rank drops the global remap +
+  `exchange_nod`/`MPI_Allreduce` (CG on local CSR `colind_loc`/`rowptr_loc`); `α=θ=1` ⇒ `(1−α)·ssh_rhs_old=0`;
+  stiffness dt = pi namelist 86400/36=2400 (NOT the shim's 1800). `Σ ssh_rhs ≈ −3.7e-5` = ~1e-13 relative
+  (telescoping). **CLEAN-rebuild footgun:** the first gate FAILED at uniform ~few-ULP on EVERY field because
+  the incremental build (CMake reconfigure on the 2 NEW files → mixed `.mod` interfaces) ULP-drifted the
+  codegen; `./configure.sh --clean --build` restored `max|Δ|=0`. Debug `-check all` clean; M1 advhor +
+  13/13 ctest still green. See LESSONS L19.
+- **Current task:** M2.7 ALE (linfs) + velocity/SSH update (`update_vel` `UV += UV_rhs`; `hbar`/`eta_n` update
+  from `d_eta`; ALE thickness/W; `K_v⁻` deformation bound). M1's multi-rank advection gate still rides M2.12.
 
 ## Geometry byte-gate (CLOSED ✓) — the 1-rank FESOM2 oracle recipe
 
@@ -311,7 +332,7 @@ The whole byte-gate pipeline is validated end-to-end:
   2022.0.1 + openmpi 4.1.2-intel; gcc 11.2.0 + openmpi 4.1.2-gcc. netCDF loaded (only
   needed M2.10+). Login `gfortran` is 8.5.0 with no MPI — always build via `configure.sh`.
 
-## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.6+)
+## M2.1 pressure/EOS/N² + M2.2 PGF + M2.3 vel_rhs + M2.4 momadv + M2.4 viscosity + M2.5 ivertvisc + M2.6 SSH byte-gate (CLOSED ✓) — the dynamics-kernel-gate recipe (reusable for M2.7+)
 
 Same end-of-`ocean_setup` 1-rank shim pattern as the M1 advection gate, the FIRST dynamics
 kernel. `pressure_bv` runs DURING the timestep but 1-rank forcing hangs on the login node (L8),
@@ -386,32 +407,45 @@ FESOM2 code:
   so `max|Δ|=0` first run by pure L9 transitivity; non-vacuous (`max|d(uv_rhs)|=0.985`, `w_i>0/<0` both fire).
   Debug `-check all` clean (pi min `nlevels=5` → the single-layer `Z_n(0)` benign-OOB never triggers). See
   LESSONS L18.
+- **M2.6-SSH extension (DONE):** the SAME gate now also covers the free-surface solve — `init_stiff_mat_ale`
+  (CSR stiffness, FESOM2 `oce_ale.F90:1584`) + `compute_ssh_rhs_ale` (`:2012`) + `solve_ssh_ale` (`:3272`)
+  + the CG/preconditioner (`solver.F90`), run AFTER `impl_vert_visc_ale` (FESOM2 `oce_ale.F90:3920-3930`).
+  FESOM3 `src/oce/oce_ssh_rhs.F90` + `oce_ssh_solve.F90` (the FIRST iterative solver). The shim drives the
+  REAL `compute_ssh_rhs_ale` + `solve_ssh_ale` via **explicit interface blocks** (no auto-gen `*_interface`,
+  like `impl_vert_visc_ale`); the stiffness was ALREADY built by `init_stiff_mat_ale` at `ocean_setup:140`
+  (BEFORE the shim, with the pi namelist dt=2400 — NOT the shim's 1800), and linfs never updates it. Both
+  force `α=θ=1.0` (FESOM2 default ⇒ `(1−α)·ssh_rhs_old=0`), zero `d_eta` (CG x0) + `ssh_rhs_old`, chain the
+  rhs off the post-TDMA `uv_rhs`. FESOM3 builds its stiffness with `dt_ssh=86400._WP/real(36,WP)` (FESOM2's
+  formula, NOT a 2400.0 literal — the L7 trap). 4 new records: `ssh_stiff_diag` (matrix diagonal), `ssh_Aeta`
+  (full matvec `A·eta_n` → every CSR non-zero), `ssh_rhs`, `d_eta` (CG solution). `pressure_diff.py` picks
+  them up automatically (**32 fields**). CG converged in **37 iters** (byte-identical ⇒ the whole recurrence
+  matches by L9); `Σ ssh_rhs≈−3.7e-5` (~1e-13 relative). 1-rank drops the global remap + `exchange_nod`/
+  `MPI_Allreduce` (local CSR `colind_loc`/`rowptr_loc`); serial DO-loop dot-products (OpenMP-off form) +
+  `sum()` matvecs. **The first gate FAILED at uniform ~few-ULP on EVERY field — the incremental build's
+  CMake-reconfigure-on-new-files left mixed `.mod` codegen; a CLEAN `./configure.sh --clean --build` fixed
+  it (always clean-rebuild after adding NEW files).** Debug `-check all` clean. See LESSONS L19.
 
 ## Next task
 
-M2.6 SSH — stiffness matrix + `ssh_rhs` + CG solve (plan Task M2.6). FESOM2 `oce_ale.F90` SSH path:
-build `ssh_stiff` (CSR; negative factor `-g·dt·α·hbar`), assemble `ssh_rhs`, then the CG solve
-(`soltol=1e-5`, `maxiter`). **Approach:**
-- **This is the FIRST M2 kernel that runs PAST forcing** (the prior M2.1–M2.5 kernels depend only on
-  prescribed T/S/UV/eta/w_e/w_i/Av/stress_surf + mesh, so the end-of-`ocean_setup` shim — which STOPS
-  before forcing — sufficed). The CG solve needs the assembled stiffness matrix + `ssh_rhs`; decide
-  whether the same prescribe-inputs-at-end-of-`ocean_setup` shim still works (prescribe `eta`/`d_eta`/
-  `UV`/`hbar` and drive the REAL `ssh` assembly + CG) OR whether it needs the **reduced-M2 namelist**
-  (PP/no-GM/no-Redi/linfs/opt_visc=7) assembled from `work_pi/namelist.*` to run the timestep further.
-  Prefer the prescribe-and-stop shim if the SSH assembly + CG can be driven standalone.
-- **Gate:** operator-diff `max|Δ|=0` on `ssh_rhs` / the CG solution / `d_eta`; plus the
-  **`Σ ssh_rhs` over owned nodes telescopes to ~1e-13** consistency check (plan M2.6). The CG iteration
-  is a sequence of dot-products + SpMVs — like the TDMA a deterministic recurrence given byte-identical
-  operands, BUT the reduction order in the dot-products is the new bit-identity risk (1-rank: a single
-  serial sum, so order-stable; the multi-rank reduction order is an M2.12 concern).
-- **Watch:** the CSR stiffness matrix construction (sparsity pattern + values) is new structure; the
-  `pcg` preconditioner choice; `g`/`alpha`/`hbar` operands. The L15 `elem2D_nodes(1:3,·)` MAX_NV-slice
-  trap on any new element-indexed code.
+M2.7 ALE (linfs) + velocity/SSH update (plan Task M2.7). FESOM2 `oce_ale.F90` post-CG path: `update_vel`
+(`UV += UV_rhs` + the `d_eta` SSH-gradient correction), `compute_hbar_ale` (`hbar`/`hbar_old`/`ssh_rhs_old`),
+the `eta_n` update from `d_eta`, the ALE thickness/`W` update, `K_v⁻` deformation bound. **Approach:**
+- **Same prescribe-and-stop end-of-`ocean_setup` shim** (the reduced-M2 namelist is STILL not needed — like
+  M2.6, these kernels run on prescribed `UV`/`UV_rhs`/`d_eta`/`eta_n`/`hbar` + mesh, standalone). Chain off
+  the M2.6 outputs (the byte-gated `d_eta`) where natural, or prescribe fresh.
+- **Gate:** operator-diff `max|Δ|=0` on the updated `UV`, `hbar`, `eta_n`, the ALE thicknesses (`hnode_new`
+  on linfs = `hnode`), `W`. linfs (`which_ale='linfs'`) is the simple branch (`hnode_new=hnode`, no
+  thickness evolution from `eta`); the zstar thickness redistribution is deferred to its own later gate.
+- **Watch:** `update_vel` reads `d_eta` and applies `-g·dt·grad(α·d_eta + ...)` to `UV` — a `gradient_sca`
+  contraction like M2.2/M2.3 (operands pre-gated). The L15 `elem2D_nodes(1:3,·)` MAX_NV-slice trap on any
+  new element-indexed code; the L19 clean-rebuild rule if M2.7 adds a NEW `oce_ale.F90` source file.
 
-- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.5 (EOS + PGF +
-  vel_rhs + momadv + viscosity + ivertvisc depend only on prescribed T/S/UV/eta/w_e/w_i/Av/stress_surf +
-  mesh). Assemble it from `work_pi/namelist.*` if/when a kernel that runs PAST forcing (PP mixing, SSH CG)
-  needs the full timestep (M2.6+).
+- **Reduced-M2 namelist** (PP/no-GM/no-Redi/linfs/opt_visc=7) was NOT needed for M2.1–M2.6 (EOS + PGF +
+  vel_rhs + momadv + viscosity + ivertvisc + the SSH stiffness/`ssh_rhs`/CG all depend only on prescribed
+  T/S/UV/eta/w_e/w_i/Av/stress_surf/`d_eta` + mesh, AND `init_stiff_mat_ale` runs at `ocean_setup:140` →
+  the stiffness is already built when the end-of-`ocean_setup` shim fires). Assemble it from
+  `work_pi/namelist.*` if/when a kernel that runs PAST forcing (PP mixing M2.8, full `step_oce` M2.9b)
+  genuinely needs the timestep loop.
 
 **M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
 numbering/connectivity/`nod_in_elem2D` order/geometry, com-structs) needed for ANY multi-rank
@@ -424,13 +458,18 @@ to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity c
 
 ## Open notes / risks
 
-- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.5
-  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc gates all `max|Δ|=0`, 28 fields). Self-tests
+- The FESOM2 oracle is built + PROVEN (M0.7 geometry + M1.1–M1.4 advection + M2.1–M2.6
+  pressure/EOS/N²/PGF/vel_rhs/momadv/viscosity/ivertvisc/SSH gates all `max|Δ|=0`, 32 fields). Self-tests
   run standalone (13/13 ctest). M2+ kernel gates extend the proven 1-rank end-of-`ocean_setup` shim
   pattern (`fesom_pressure_dump.F90` now drives `pressure_bv` + `pressure_force_4_linfs_fullcell` + the
   REAL `compute_vel_rhs` with `momadv_opt=2` → `momentum_adv_scalar` + the REAL `visc_filt_bidiff` with
-  `opt_visc=7` + the REAL `impl_vert_visc_ale` on the post-`viscosity_filter` `UV_rhs`); the next gate
-  (M2.6 SSH stiffness/`ssh_rhs`/CG) is the FIRST that may need to run PAST forcing — see "Next task".
+  `opt_visc=7` + the REAL `impl_vert_visc_ale` + the REAL `compute_ssh_rhs_ale`/`solve_ssh_ale` CG on the
+  post-`viscosity_filter`/TDMA `UV_rhs`); the prescribe-and-stop shim STILL sufficed for M2.6 (the
+  stiffness is built at `ocean_setup:140`, before forcing) — M2.7 ALE/update is next, see "Next task".
+- **⚠️ CLEAN-rebuild rule (L19):** when a milestone adds NEW `src/**/*.F90` files (not just edits), run
+  `./configure.sh --compiler intel --precision dp --clean --build` before trusting the byte-gate — an
+  incremental build re-runs CMake configure (GLOB `CONFIGURE_DEPENDS`) and can link objects against a MIX
+  of stale/fresh `.mod` interfaces, ULP-drifting EVERY field (the M2.6 first-gate red herring).
 - **M2.12 is now heavy** (the local-mesh remap + the folded M1 advection multi-rank gate + the
   whole-model multi-rank byte-match + the deferred cavity/CW-swap caveats). Consider splitting the
   local-mesh remap into its own early-M2 task once a dynamics kernel first needs halos at multi-rank.

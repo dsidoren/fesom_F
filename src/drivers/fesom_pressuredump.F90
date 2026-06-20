@@ -26,12 +26,21 @@ program fesom_pressuredump
     use oce_dyn_velrhs,   only: compute_vel_rhs
     use oce_dyn_visc,     only: viscosity_filter
     use oce_dyn_ivertvisc, only: impl_vert_visc_ale
+    use oce_ssh_rhs,      only: init_stiff_mat_ale, compute_ssh_rhs_ale
+    use oce_ssh_solve,    only: solve_ssh_ale
+    use mod_param_phys,   only: alpha, theta
     use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3
     implicit none
 
     ! Pinned shared constant (NOT pi's namelist dt=86400/36=2400 s): the vel_rhs gate
     ! only needs BOTH codes to use the same dt in the dt*(...)/elem_area scaling.
     real(kind=WP), parameter :: dt_velrhs = 1800.0_WP
+    ! M2.6 SSH stiffness dt: the FESOM2 oracle built ssh_stiff at ocean_setup (line 140)
+    ! with the pi NAMELIST dt = 86400/step_per_day, step_per_day=36 -> 2400 s, BEFORE the
+    ! shim overrides dt to dt_velrhs. So the stiffness matrix uses this value; compute it
+    ! the SAME way FESOM2 does (gen_model_setup.F90:92) — NOT a 2400.0 literal — so the
+    ! -no-prec-div bits agree (the only dt-dependent part of M2.6).
+    real(kind=WP), parameter :: dt_ssh = 86400.0_WP / real(36, WP)
 
     character(len=512) :: mesh_dir, out_path
     type(t_partit)      :: partit
@@ -54,6 +63,10 @@ program fesom_pressuredump
     ! --- M2.5 implicit vertical viscosity (TDMA / Thomas solve, impl_vert_visc_ale) ---
     real(kind=WP), allocatable :: Av(:,:), stress_surf(:,:), uv_rhs_ivv(:,:,:)
     integer       :: nwp, nwm
+    ! --- M2.6 SSH (stiffness matrix + ssh_rhs + CG solve) ---
+    real(kind=WP), allocatable :: ssh_diag(:), ssh_Aeta(:)
+    integer       :: n_ssh_iter, row, ni, ne2
+    real(kind=WP) :: sum_ssh_rhs, resid_inf
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -311,6 +324,48 @@ program fesom_pressuredump
         ' ; max|d(uv_rhs)|=', maxval(abs(uv_rhs_ivv - uv_rhs_visc)), &
         ' ; w_i>0/<0 = ', nwp, '/', nwm
 
+    ! ============== M2.6 SSH: stiffness matrix + ssh_rhs + CG solve ===================
+    ! The free-surface implicit solve, run AFTER impl_vert_visc_ale and BEFORE the
+    ! velocity/SSH update in the timestep (FESOM2 oce_ale.F90:3920-3930). For which_ale=
+    ! 'linfs' the stiffness matrix is built ONCE (init_stiff_mat_ale; update_stiff_mat_ale
+    ! is skipped, oce_ale.F90:3921), then compute_ssh_rhs_ale assembles the rhs from the
+    ! prescribed UV + post-TDMA UV_rhs (dyn%uv_rhs = uv_rhs_ivv) and solve_ssh_ale CG-solves
+    ! for d_eta. The FESOM2 oracle drives the REAL routines on the same inputs.
+    alpha = 1.0_WP; theta = 1.0_WP      ! pi/reduced-M2: full implicitness (FESOM2 default)
+    allocate(dyn%ssh_rhs(mesh%nod2D), dyn%ssh_rhs_old(mesh%nod2D), dyn%d_eta(mesh%nod2D))
+    dyn%ssh_rhs_old = 0.0_WP            ! (1-alpha)*ssh_rhs_old = 0 since alpha=1
+    dyn%d_eta       = 0.0_WP            ! CG initial guess x0 = 0
+
+    call init_stiff_mat_ale(mesh, dt_ssh)              ! build ssh_stiff (sparsity + values)
+    call compute_ssh_rhs_ale(dyn, mesh)               ! assemble dyn%ssh_rhs
+    call solve_ssh_ale(dyn, mesh, n_iter=n_ssh_iter)  ! CG -> dyn%d_eta
+
+    ! gate-strength diagnostics (NOT dumped):
+    !  (1) the stiffness diagonal + a full matvec A*eta_n (DUMPED, gated) localise the
+    !      matrix assembly; computed here only for the prints below,
+    !  (2) sum(ssh_rhs) telescopes to ~1e-13 (a proper edge-divergence; plan M2.6),
+    !  (3) the CG converged in n_ssh_iter iters and ||A*d_eta - ssh_rhs||_inf shows d_eta
+    !      actually solves the system (non-vacuity, the L11 weak-gate guard).
+    allocate(ssh_diag(mesh%nod2D), ssh_Aeta(mesh%nod2D))
+    do row = 1, mesh%nod2D
+        ni  = mesh%ssh_stiff%rowptr_loc(row)
+        ne2 = mesh%ssh_stiff%rowptr_loc(row+1) - 1
+        ssh_diag(row) = mesh%ssh_stiff%values(ni)
+        ssh_Aeta(row) = sum(mesh%ssh_stiff%values(ni:ne2) * dyn%eta_n(mesh%ssh_stiff%colind_loc(ni:ne2)))
+    end do
+    sum_ssh_rhs = sum(dyn%ssh_rhs(1:mesh%nod2D))
+    resid_inf   = 0.0_WP
+    do row = 1, mesh%nod2D
+        ni  = mesh%ssh_stiff%rowptr_loc(row)
+        ne2 = mesh%ssh_stiff%rowptr_loc(row+1) - 1
+        resid_inf = max(resid_inf, abs( &
+            sum(mesh%ssh_stiff%values(ni:ne2) * dyn%d_eta(mesh%ssh_stiff%colind_loc(ni:ne2))) - dyn%ssh_rhs(row)))
+    end do
+    write(*,'(a,i0,a,i0,a,es10.3,a,es10.3,a,es10.3)') &
+        'fesom_pressuredump: ssh: nza=', mesh%ssh_stiff%nza, ' ; CG iters=', n_ssh_iter, &
+        ' ; max|d_eta|=', maxval(abs(dyn%d_eta)), ' ; sum(ssh_rhs)=', sum_ssh_rhs, &
+        ' ; ||A d_eta - rhs||inf=', resid_inf
+
     ! --- dump (same FADVHDMP format / names as the FESOM2 oracle) ---
     call advhor_dump_open(u, trim(out_path), mesh%nod2D, mesh%elem2D, mesh%edge2D, nl)
     call wr_r2(u, 'temp',           real(temp,        MP))
@@ -347,6 +402,12 @@ program fesom_pressuredump
     call wr_r2(u, 'stress_surf',    real(stress_surf,      MP))
     call wr_r2(u, 'w_i',            real(dyn%w_i(1:nl, :), MP))
     call wr_r3(u, 'uv_rhs_ivv',     real(uv_rhs_ivv,       MP))
+    ! M2.6 SSH: the stiffness diagonal + matvec A*eta_n (localise the matrix assembly),
+    ! the assembled ssh_rhs, and the CG solution d_eta (the gate target).
+    call wr_r1(u, 'ssh_stiff_diag', real(ssh_diag,    MP))
+    call wr_r1(u, 'ssh_Aeta',       real(ssh_Aeta,    MP))
+    call wr_r1(u, 'ssh_rhs',        real(dyn%ssh_rhs, MP))
+    call wr_r1(u, 'd_eta',          real(dyn%d_eta,   MP))
     call advhor_dump_close(u)
     write(*,'(a)') 'fesom_pressuredump: wrote '//trim(out_path)
 

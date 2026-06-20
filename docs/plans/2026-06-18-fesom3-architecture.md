@@ -402,11 +402,20 @@ matches FESOM2's `oce_ale_vel_rhs.F90` layout); viscosity → `src/oce/oce_dyn_v
       (`max|d(uv_rhs)|=0.985`, `w_i>0/<0` both fire). Debug `-check all` clean (pi min nlevels=5 → no
       single-layer OOB). (L18)
 
-#### Task M2.6: SSH — stiffness, ssh_rhs, CG solve
-**Files:** Create: `src/oce/oce_ssh_rhs.F90`, `src/oce/oce_ssh_solve.F90`
-- [ ] build `ssh_stiff` (CSR; negative factor `-g·dt·α·hbar`); `ssh_rhs`; CG (`soltol=1e-5`,
-      **fixed iteration-count determinism**); preconditioner; exchange preconditioner diagonal
-- [ ] **Gate:** operator-diff `max|Δ|=0`; **`Σ ssh_rhs` over owned nodes telescopes to ~1e-13**
+#### Task M2.6: SSH — stiffness, ssh_rhs, CG solve — ✅ DONE (max|Δ|=0)
+**Files:** Created: `src/oce/oce_ssh_rhs.F90` (`init_stiff_mat_ale` + `compute_ssh_rhs_ale`),
+`src/oce/oce_ssh_solve.F90` (`ssh_solve_preconditioner` + `ssh_solve_cg` + `solve_ssh_ale`)
+- [x] build `ssh_stiff` (CSR; stiffness `factor=g·dt·α·θ` × `(zbar_e_bot−zbar_e_srf)`·gradient·edge_cross +
+      mass `areasvol/dt`); `ssh_rhs` (edge-divergence of `α(UV+UV_rhs)`); preconditioned CG (`soltol=1e-5`,
+      **fixed iteration-count determinism** — converged in 37 iters, byte-identical). linfs builds the matrix
+      ONCE (`update_stiff_mat_ale` skipped); 1-rank drops the global remap + `exchange_nod`/`MPI_Allreduce`
+      (CG on local CSR `colind_loc`/`rowptr_loc`). `α=θ=1` ⇒ `(1−α)·ssh_rhs_old=0`; stiffness dt = pi
+      namelist 86400/36 (NOT the shim's 1800).
+- [x] **Gate:** operator-diff `max|Δ|=0` on `ssh_stiff_diag` + `ssh_Aeta` (full matvec A·eta_n) + `ssh_rhs` +
+      `d_eta` (CG solution) — 4 new records → **32 fields** in `run_pressure_gate.sh`. **`Σ ssh_rhs` ≈ −3.7e-5
+      = ~1e-13 relative** (edge-divergence telescoping at the ~1e8-scale bumped-UV rhs). Debug `-check all`
+      clean; M1 advhor + 13/13 ctest still green. (L19; **CLEAN-rebuild footgun** — new files force a clean
+      Release rebuild before the byte-gate is byte-reliable.)
 
 #### Task M2.7: ALE (linfs) + velocity/SSH update
 **Files:** Create: `src/oce/oce_ale.F90`

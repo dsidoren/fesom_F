@@ -608,3 +608,84 @@ Reusable specifics:
   `ke_wind`/`ke_drag` (no `ke_*` in FESOM3 `t_dyn`, as `compute_vel_rhs`), and the `toy_ocean`
   dbgyre/neverworld2/soufflet constant-`C_d` friction (pi `toy_ocean=.false.` → quadratic bottom drag
   `-C_d·|UV_bottom|`).
+
+## L19 — SSH stiffness + CG solve (M2.6): the first iterative solver byte-matches; the incremental-build ULP-drift footgun (PASSED after a clean rebuild)
+
+M2.6 SSH (CSR stiffness `init_stiff_mat_ale` + `compute_ssh_rhs_ale` + preconditioned-CG `solve_ssh_ale`,
+FESOM2 `oce_ale.F90:1584/2012/3272` + `solver.F90`) byte-matched FESOM2 `max|Δ|=0` on all 4 new fields
+(`ssh_stiff_diag`, `ssh_Aeta`, `ssh_rhs`, `d_eta` → **32 fields** total). Built `src/oce/oce_ssh_rhs.F90`
+(stiffness + rhs) + `src/oce/oce_ssh_solve.F90` (precond + CG). The FIRST iterative solver in the port.
+
+- **THE FOOTGUN (cost me one red gate): after ADDING NEW module files, an incremental FESOM3 build is
+  byte-UNRELIABLE — clean-rebuild before gating.** The first gate run FAILED with a *uniform ~few-ULP
+  relative* delta on EVERY field — including prescribed trig-derived inputs (`temp` 7e-15, `coriolis` 5e-20)
+  while integer/geometry fields (`zbar`, `hnode`) stayed exactly 0. That split is the L10 "uniform flag/
+  codegen effect" signature, NOT a kernel bug. Root cause: CMake's `GLOB CONFIGURE_DEPENDS` detected the 2
+  new `oce_ssh_*.F90`, re-ran `cmake` configure mid-incremental-build, and the partial recompile linked
+  objects built against a MIX of stale/fresh `.mod` interfaces → ULP-drifted FP codegen vs the FESOM2
+  oracle. `./configure.sh --clean --build` (full recompile, consistent `.mod` set) restored `max|Δ|=0` on
+  all 32 fields on the next run. **Rule: when a milestone adds NEW source files (not just edits), do a CLEAN
+  Release rebuild before trusting the byte-gate.** (Edits-only incremental builds stayed byte-exact through
+  M2.1–M2.5; it is specifically NEW files + the reconfigure that drift.)
+
+- **A CG solve byte-matches by the same L9 transitivity as the M2.5 TDMA — given byte-identical operands the
+  iteration is a deterministic recurrence.** Same matrix + rhs + x0 ⇒ identical per-iteration scalars ⇒ the
+  convergence test (`sqrt(Σrr²/nod2D) < soltol·sqrt(Σb²/nod2D)`, soltol=1e-5) fires at the SAME iteration
+  (here **37**) ⇒ identical `d_eta`. So a byte-matching `d_eta` proves the entire 37-iteration recurrence
+  (matvecs + dot-products + preconditioner) is bit-identical. The operands are all pre-gated: `ssh_stiff`
+  (geometry-proven `edge_tri`/`edges`/`gradient_sca`/`edge_cross_dxdy`/`zbar_e_bot`/`areasvol` + the edge-
+  scatter accumulation order), `ssh_rhs` (same edge order + the M2.5-gated `uv_rhs`/`helem`), `g`/`dt`/`α`/`θ`.
+
+- **REDUCTION FORM is part of the bits.** The FESOM2 oracle is `ENABLE_OPENMP=OFF` and `__openmp_reproducible`
+  undefined, so its dot-products compile to the explicit serial `DO row; s=s+…; END DO` (the `!$OMP REDUCTION`
+  is an inert comment). Transcribe THAT serial form for `s_old`/`s_aux`/`sprod` — NOT a `sum()` intrinsic
+  (the compiler may reduce it in a different order). The matrix-vector products DO use `sum()` over a CSR
+  slice, exactly as FESOM2 — both codes `sum()` the same slice ⇒ byte-identical. (Same OpenMP-off reasoning
+  as L16/L17's serial edge scatter.)
+
+- **dt for the stiffness is the pi NAMELIST dt (=86400/36=2400 s), NOT the shim's `dt=1800`, and must be
+  computed the SAME way (not a `2400.0` literal).** `init_stiff_mat_ale` runs at `ocean_setup` (oce_setup_step
+  :140) where dt is still the namelist value, BEFORE the shim overrides it to 1800 for the vel_rhs gates. dt
+  enters M2.6 ONLY via the stiffness (`factor=g·dt·α·θ`, mass `areasvol/dt`); compute_ssh_rhs has no dt. So
+  the FESOM3 driver builds the stiffness with `dt_ssh = 86400._WP/real(36,WP)` (FESOM2's `gen_model_setup`
+  formula) — a literal `2400.0_WP` could differ by an ULP under `-no-prec-div` (the L7 trap) and break the
+  whole matrix.
+
+- **`α=θ=1.0` on pi (FESOM2 default, namelist doesn't set them) ⇒ two simplifications:** the linfs water-flux
+  term `(1-α)·ssh_rhs_old` VANISHES (so `ssh_rhs_old` is multiplied by 0 — set it to 0, don't bother
+  prescribing it), and `factor = g·dt`. Force `α=θ=1.0` in BOTH shim and driver defensively (the stiffness
+  already used 1.0; compute_ssh_rhs re-reads them).
+
+- **linfs builds the stiffness ONCE and never updates it** (`oce_ale.F90:3921` calls `update_stiff_mat_ale`
+  only for NON-linfs). So the single `init_stiff_mat_ale` assembly with the unperturbed depth IS the
+  production matrix on pi/reduced-M2 — no `update_stiff_mat_ale` port needed for M2.
+
+- **1-rank collapses the global-numbering machinery to the identity.** The CG uses `colind_loc`/`rowptr_loc`
+  (LOCAL CSR); the FESOM2 global remap (`rpart.out` mapping, the per-PE nza offset, `myList_nod2D`) is
+  identity at 1-rank and is dropped — build the local CSR and set `colind=colind_loc`, `rowptr=rowptr_loc`.
+  `exchange_nod`(diag/rr/pp/x) and the `MPI_Allreduce`(s_old/s_aux/sprod) are no-ops (the local serial sum
+  IS the global sum), dropped. The new multi-rank bit-identity risk — the cross-rank dot-product reduction
+  ORDER — is an M2.12 concern.
+
+- **Gate the matrix with a MATVEC, not just the diagonal.** `ssh_stiff_diag` (the row-diagonal = mass +
+  self-stiffness) localises the assembly, but `ssh_Aeta = A·eta_n` (full CSR matvec against the prescribed
+  `eta_n`) exercises EVERY non-zero — the off-diagonals are the bulk of the operator. Both `max|Δ|=0`.
+
+- **The `Σ ssh_rhs` telescoping check is ~1e-13 RELATIVE, not absolute.** `ssh_rhs` is an edge-divergence
+  (`+/-（c1+c2)` scattered into the two edge nodes) so `Σ_nodes` telescopes to 0 in exact arithmetic; the FP
+  roundoff scales with the `ssh_rhs` magnitude. With UV bumped to 2.0/1.5 m/s (the M2.4-visc strength test)
+  `ssh_rhs ~ 1e8`, so `Σ = -3.7e-5` (≈1e-13 relative) — consistent, non-vacuous. The plan's "~1e-13" was the
+  small-UV estimate.
+
+- **The prescribe-and-stop shim STILL works for M2.6** (the worry it might need to "run past forcing" was
+  unfounded): `init_stiff_mat_ale` runs at `ocean_setup` line 140, BEFORE the end-of-`ocean_setup` shim, so
+  the matrix is already assembled; the shim just prescribes `UV`/post-TDMA `UV_rhs`/`d_eta`=0/`ssh_rhs_old`=0
+  and drives the REAL `compute_ssh_rhs_ale` + `solve_ssh_ale`. The reduced-M2 namelist is still NOT needed.
+  No auto-gen `*_interface` module for `compute_ssh_rhs_ale`/`solve_ssh_ale` (internal interface blocks) →
+  declare explicit interfaces in the shim (as for `impl_vert_visc_ale`, L18).
+
+- **`zbar_e_srf` = `zbar(ulevels(elem))` = `zbar(1)` = 0 on pi (no cavity).** init_stiff's H factor is
+  `(zbar_e_bot − zbar_e_srf)`; computed inline from `zbar`+`ulevels` (no new mesh field — faithful to the
+  FESOM2 non-cavity default `oce_ale.F90:525`). The CG `nod2D` divisor (`rtol`, exit test) is the global
+  `nod2D=3140`. Debug `-check all` clean (RC=0): `n_pos(12,nod2D)` is wide enough (pi max node degree < 11),
+  no CSR-slice OOB.
