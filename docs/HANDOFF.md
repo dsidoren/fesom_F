@@ -389,7 +389,8 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   whole dynamical core is byte-exact across multiple steps on CORE2. Localisation method + generalisable lessons in
   **LESSONS L29**. Debug `-check all` clean; FESOM3 lifecycle step-1 diagnostics match the oracle (eta_n=0.34864,
   uv=0.23185). M2.11c-2 (forced: prescribe the oracle's per-step `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt`/
-  `stress_surf` via a flux dump shim, `use_ice=.true.`) is now UNBLOCKED — it inherits the same byte-exact CG.
+  `stress_surf` via a flux dump shim, `use_ice=.true.`) is ✅ DONE — it inherited the same byte-exact CG; the forced
+  gate `tools/run_lifecycle_forced_gate_core2.sh` MATCHes (195 records, worst |Δ|=0, re-verified post-L29 2026-06-21).
   **M2.11a geometry ✅ + M2.11b initial conditions ✅ + M2.11c dynamical-core-on-CORE2 ✅** (`run_geom_gate_core2.sh` 19,
   `run_ic_gate_core2.sh` 3, `run_pressure_gate_core2.sh` 27, all CORE2 1-rank `max|Δ|=0`). **SCOPE carried (L25):**
   `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` air-sea budget = M3; M1 multi-rank gate rides M2.12.
@@ -722,9 +723,11 @@ runs `do_ic3d`, dumps). The oracle namelist gets the reduced-M2 override (`which
 
 ## Next task
 
-**M2.10 forcing DONE + M2.11a geometry DONE + M2.11b initial conditions DONE + M2.11c lifecycle DONE — the multi-step
-CORE2 lifecycle is `max|Δ|=0` (the "CG floor" was SOLVED 2026-06-21).** Next is unblocked: M2.11c-2 forced multi-step
-gate / M3 (ice + `oce_fluxes` air-sea budget) / M2.12 (multi-rank). No open decision blocks it.
+**M2.10 forcing DONE + M2.11a geometry DONE + M2.11b initial conditions DONE + M2.11c lifecycle DONE (unforced AND
+forced) — the multi-step CORE2 lifecycle is `max|Δ|=0` (the "CG floor" was SOLVED 2026-06-21; the forced re-verify
+CONFIRMED 2026-06-21: 195 records, worst |Δ|=0).** **All of M2 is now byte-exact end-to-end on CORE2.** Next is
+unblocked: M3 (ice + `oce_fluxes` air-sea budget — ends the flux-prescription gap) / M2.12 (multi-rank, with the
+local-mesh remap + folded M1 advection gate). No open decision blocks either; the choice is the user's.
 
 ✅ **RESOLVED — the free-surface CG "reproducibility floor" was a bug, now fixed (2026-06-21; LESSONS L29).** The L28
 "iterative-solver floor" diagnosis was WRONG (a CG with byte-identical `A`/`b`/`x0`/kernels cannot manufacture
@@ -777,19 +780,20 @@ passes — all input paths verified: CORE2 mesh `/pool/data/AWICM/FESOM2/MESHES_
   bug hits BOTH output and restart-write); `use_sw_pene=.false.` in the run dir (else `sw_3d` unallocated → segfault, L28).
   **After the L29 fix the CORE2 pressure gate is `max|Δ|=0` on all 28 dynamical-core fields INCLUDING `d_eta`, and the
   multi-step `run_lifecycle_gate_core2.sh` MATCHes (195 records, worst |Δ|=0).** Debug `-check all` clean. See LESSONS L29.
-- **M2.11c-2 — FORCED lifecycle — ✅ BUILT/RUN (2026-06-21; forced dynamical core byte-matches on CORE2; CG floor resolved by L29 — see the re-verify note).**
+- **M2.11c-2 — FORCED lifecycle — ✅ DONE (2026-06-21; forced dynamical core byte-exact on CORE2, CG floor resolved by L29, re-verify CONFIRMED).**
   The REAL forced FESOM2 lifecycle (`use_ice=.true.`, real CORE2 NCAR forcing at the 1948 stubs + pool runoff/SSS, the ice
   EVP + `oce_fluxes` producing the air-sea fluxes) runs cleanly at 1-rank on CORE2 — **the ice-at-1-rank unknown is
   DE-RISKED** (`tools/run_lifecycle_forced_core2.sh`). Built: oracle `port2/fesom2/src/fesom_flux_dump.F90` (per-step
   full-field dump of `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` [nod2D] + `stress_surf` [2,elem2D] BEFORE
   `oce_timestep_ale`, env `FESOM_FLUX_DUMP`, wired in `fesom_module.F90` runloop), FESOM3 `fesom_lifecycle` reads them per
   step (`FESOM3_FLUX_FILE`) and prescribes into `step_oce` (the M2.5/M2.8 prescribe-the-unsourced-input pattern), gate
-  `tools/run_lifecycle_forced_gate_core2.sh`. **Result identical to unforced:** every pre-CG substep `max|Δ|=0` (incl.
-  `ssh_rhs`, which now consumes the prescribed wind stress). So **the M3-gap flux prescription is byte-exact.** Calendar: CORE (noleap) forcing
-  REQUIRES `include_fleapyear=.false.`; `use_sw_pene=.false.` (matches the ported step_oce — no `sw_3d` term). Debug
-  `-check all` clean (incl. the flux-read path). **⚠️ RE-VERIFY (small next-session task):** the forced gate was last run
-  PRE-L29 (d_eta diverged 5.5e-17 → 3.5e-6 over 3 steps, the old floor); the L29 NOVECTOR fix makes the CG byte-exact, so
-  re-running `tools/run_lifecycle_forced_gate_core2.sh` should now give `max|Δ|=0` like the unforced gate — confirm it.
+  `tools/run_lifecycle_forced_gate_core2.sh`. **Result identical to unforced — now byte-exact on ALL substeps:** the
+  re-verify ran 2026-06-21 POST-L29 and `tools/run_lifecycle_forced_gate_core2.sh` MATCHes — **195 records (13 substeps ×
+  5 probes × 3 steps), worst |Δ| = 0** (the pre-L29 `d_eta` drift 5.5e-17 → 3.5e-6 is GONE; the NOVECTOR fix makes the
+  forced CG byte-exact exactly like the unforced). FESOM3 step diagnostics match the oracle to all printed digits
+  (step 1 uv=0.23283/eta=0.34914 … step 3 uv=0.45194/eta=0.67866). So **the M3-gap flux prescription is byte-exact.**
+  Calendar: CORE (noleap) forcing REQUIRES `include_fleapyear=.false.`; `use_sw_pene=.false.` (matches the ported step_oce
+  — no `sw_3d` term). Debug `-check all` clean (incl. the flux-read path).
 - **SCOPE (LESSONS L25):** `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` air-sea budget = **M3** (the `obudget`
   in `ice_thermo_oce.F90` + `oce_fluxes`) → prescribed from the oracle dump at M2.11c. The SSS/runoff/chl climatology
   reads + the JRA55 (gregorian) forcing variant are deferred (CORE2 NCAR stubs suffice). M1's multi-rank advection gate

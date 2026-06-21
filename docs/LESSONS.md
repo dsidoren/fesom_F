@@ -1189,7 +1189,8 @@ reproducibility floor. Reusable specifics:
   `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` + `stress_surf`, BEFORE `oce_timestep_ale`); FESOM3 `fesom_lifecycle`
   reads them (`FESOM3_FLUX_FILE`) and prescribes them into `step_oce` (the M2.5/M2.8 prescribe-the-unsourced-input pattern).
   **Result identical to unforced:** every pre-CG substep `max|Δ|=0` — INCLUDING `ssh_rhs`, which now consumes the prescribed
-  wind stress (so the stress prescription is byte-exact) — only `d_eta`+downstream at the CG floor (first divergence `5.5e-17`).
+  wind stress (so the stress prescription is byte-exact). *(Pre-L29 only `d_eta`+downstream diverged at the CG floor, first
+  divergence `5.5e-17`; **POST-L29 the forced gate is `max|Δ|=0` on ALL substeps** — 195 records, re-verified 2026-06-21. See L29.)*
   So the forced dynamical core is byte-exact on CORE2 with REAL air-sea fluxes; the M3 ice/thermo budget is the only piece
   prescribed (it's genuinely M3). Debug `-check all` clean (incl. the flux-read). This is the M2-MVP capstone with real forcing.
 
@@ -1222,7 +1223,10 @@ forcing the oracle's scalar `divsd`. After it, the F3 precond disassembles to `d
 oracle — and `pr_values` is `max|Δ|=0`. **Verified:** `tools/run_pressure_gate_core2.sh` PASS `max|Δ|=0` on all 28
 fields INCLUDING `d_eta`/`eta_n`/`uv_upd`/`hbar`; and the previously-blocked **multi-step gate**
 `tools/run_lifecycle_gate_core2.sh` now MATCHes — **195 records (13 substeps × 5 probes × 3 steps), worst |Δ| = 0**.
-The whole dynamical core is byte-exact across multiple steps on CORE2.
+The whole dynamical core is byte-exact across multiple steps on CORE2. **The FORCED gate too (re-verified 2026-06-21):**
+`tools/run_lifecycle_forced_gate_core2.sh` (real CORE2 forcing + ice + prescribed air-sea fluxes) now MATCHes —
+**195 records, worst |Δ| = 0** — where pre-L29 its `d_eta` drifted `5.5e-17 → 3.5e-6` over 3 steps. So the NOVECTOR
+fix makes BOTH the unforced and forced free-surface CG byte-exact; M2 is byte-identical end-to-end on CORE2.
 
 **How it was localised (reusable method).** (1) A per-iteration scalar trace of `s_old/s_aux/al/sprod(1)/sprod(2)`
 written to a file from BOTH binaries (env-guarded, dumped AFTER the loop so the loop codegen is unperturbed). The

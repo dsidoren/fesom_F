@@ -542,6 +542,9 @@ FESOM2 shim `port2/fesom2/src/fesom_step_dump.F90`, `tools/run_step{dump_pi,_gat
       **Gate `tools/run_lifecycle_gate_core2.sh`: MATCH, 195 records (13 substeps × 5 probes × 3 steps), worst |Δ|=0** —
       whole dynamical core byte-exact across multiple CORE2 steps INCLUDING the free-surface CG `d_eta`. The CORE2 CG
       "reproducibility floor" was SOLVED (it was an auto-vectorised preconditioner divide; one `!DIR$ NOVECTOR`; LESSONS L29).
+      **The FORCED variant too (M2.11c-2, re-verified post-L29 2026-06-21): `tools/run_lifecycle_forced_gate_core2.sh`
+      MATCHes, 195 records worst |Δ|=0** (real CORE2 forcing + ice + the M3-gap air-sea fluxes prescribed from
+      `fesom_flux_dump.F90`) — so ALL of M2 is byte-identical end-to-end on CORE2. M3/M2.12 unblocked.
 
 #### Task M2.12: Multi-rank + production validation (MVP exit)
 **Files:** Create: the local-mesh remap in `mod_mesh_read`/a new builder; Modify: tests/scripts; `docs/HANDOFF.md`

@@ -4,10 +4,11 @@
 # lifecycle driver PRESCRIBING the oracle's per-step air-sea fluxes (the M3 gap). Compares
 # the 13 NODE substeps x 5 probes over N steps (--ignore-substep=2).
 #
-# Like the unforced gate (run_lifecycle_gate_core2.sh + LESSONS L28): every substep that
-# does NOT depend on the free-surface CG is byte-identical (max|delta|=0) — now with REAL
-# wind stress + heat/freshwater/salt fluxes prescribed from the oracle. The CG d_eta and
-# its downstream are at the iterative-solver reproducibility floor (see L28). The companion
+# Like the unforced gate (run_lifecycle_gate_core2.sh): EVERY substep is byte-identical
+# (max|delta|=0), INCLUDING the free-surface CG d_eta and its downstream — with REAL wind
+# stress + heat/freshwater/salt fluxes prescribed from the oracle. The CG "reproducibility
+# floor" (old L28) was SOLVED (LESSONS L29): one !DIR$ NOVECTOR on the preconditioner divide.
+# Confirmed max|delta|=0 on the forced path 2026-06-21 (195 records, 3 steps). The companion
 # run_pressure_gate_core2.sh proves the whole dynamical core max|delta|=0 on CORE2.
 #
 #   tools/run_lifecycle_forced_gate_core2.sh [run_dir] [nsteps]
