@@ -11,6 +11,9 @@ build_*/
 # External reference clones (cloned design docs / prior ports — not part of this repo)
 design_refs/
 
+# Manuscript draft (kept out of the code repo)
+paper/
+
 # Large ancillary artifacts
 *.zip
 
