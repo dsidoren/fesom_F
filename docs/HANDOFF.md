@@ -4,7 +4,13 @@ Single source of truth for "where are we / what's next". Update at the end of ev
 
 ## Where we are
 
-- **Milestone:** M2 (minimal ocean dynamical core) — **IN PROGRESS.** **M2.1 `pressure_bv` +
+- **Milestone:** M2 (minimal ocean dynamical core) — **IN PROGRESS.**
+  **CURRENT STATUS (2026-06-21):** the whole M2 dynamical core is BYTE-COMPLETE — `max|Δ|=0` vs FESOM2 on pi 1-rank
+  (per-kernel + whole-step) AND across multi-step CORE2 (unforced + forced lifecycle, incl. the free-surface CG).
+  Now in **M2.12 (multi-rank, MVP exit): M2.12a — the local-mesh remap + per-rank geometry byte-gate — is ✅ DONE
+  (`max|Δ|=0` on pi dist_2 + dist_8); ACTIVE NEXT = M2.12b** (multi-rank advection). See "Next task". *History
+  (cumulative, oldest first) follows.*
+  **M2.1 `pressure_bv` +
   M2.2 hydrostatic PGF + M2.3 vel_rhs + M2.4 momentum advection (FULL `UV_rhs`) + M2.4 biharmonic
   viscosity + M2.5 implicit vertical viscosity (TDMA) + M2.6 SSH (stiffness + `ssh_rhs` + CG solve) +
   M2.7 ALE (linfs) velocity/SSH/thickness-W update + M2.8 PP vertical mixing (`Kv`/`Av`) +
@@ -826,19 +832,21 @@ passes — all input paths verified: CORE2 mesh `/pool/data/AWICM/FESOM2/MESHES_
   correction; guarded with `error stop`). M2.9b forced `use_wsplit=.false.` (M1.4 precedent). Port it + integrate
   the M2.7 explicit/implicit w-split into a real multi-step run in a later dynamics pass.
 
-**M1 multi-rank gate (folded into M2.12):** M2.12 builds the local-mesh remap (global→local
-numbering/connectivity/`nod_in_elem2D` order/geometry, com-structs) needed for ANY multi-rank
-byte-match, then gates the WHOLE model (incl. advection) on 1/8/32-rank. Re-confirm there that
-the M1.1–M1.4 kernels' dropped halo exchanges (tr_xy/edge_up_dn_grad/fct_LO/fct_plus_minus/
-del_ttf) + loop bounds (myDim vs myDim+eDim) are correctly lifted; the gate target is the
-post-exchange OWNED values on the SAME partition (L8 accumulation-order caveat). Also deferred
-to a richer mesh (M2.11 CORE2): the FCT `AUX`/`edge_up_dn_grad`-scratch cavity caveat (L11);
-`enforce_cw_orientation`'s swap path (L8, pi has 0 swaps).
+**M1 multi-rank gate (folded into M2.12b):** the local-mesh remap (global→local
+numbering/connectivity/geometry, com-structs) is ✅ DONE (M2.12a — geometry byte-gated `max|Δ|=0` on dist_2+dist_8;
+the multi-rank `enforce_cw_orientation` swap path is CLOSED). **M2.12b** then lifts M1.1–M1.4 advection to multi-rank
++ adds the `find_neighbors` halo `nod_in_elem2D` dance, and **M2.12c** gates the WHOLE model on 1/8/32-rank. For
+M2.12b re-confirm the M1.1–M1.4 kernels' dropped halo exchanges (tr_xy/edge_up_dn_grad/fct_LO/fct_plus_minus/
+del_ttf) + loop bounds (myDim vs myDim+eDim) are correctly lifted; the gate target is the post-exchange OWNED values
+on the SAME partition (L8 accumulation-order caveat). Still deferred to a richer mesh: the FCT
+`AUX`/`edge_up_dn_grad`-scratch cavity caveat (L11).
 
-## M2.12 entry notes (read before starting — scoped 2026-06-21)
+## M2.12 entry notes (scoped 2026-06-21; M2.12a DONE — the rest carries to M2.12b/c)
 
 The full decomposition (M2.12a/b/c) lives in `docs/plans/2026-06-18-fesom3-architecture.md` Task M2.12.
-Active next = **M2.12a: local-mesh remap + per-rank GEOMETRY byte-gate (pi dist_2/dist_8).**
+**M2.12a (local-mesh remap + per-rank geometry gate) is ✅ DONE** (`max|Δ|=0` pi dist_2+dist_8, see "Next task").
+**Active next = M2.12b** (multi-rank advection gate). The notes below still hold; what M2.12a consumed vs what
+carries to M2.12b is flagged inline (⟶done / ⟶M2.12b).
 
 - **Foundation EXISTS — do NOT rebuild it.** `src/infra/mod_halo.F90` is a real multi-rank MPI exchange
   (manual pack → Isend/Irecv → `MPI_Waitall` → broadcast-only owner→halo unpack; `exchange_nod` 2D/3D-real +
@@ -852,23 +860,24 @@ Active next = **M2.12a: local-mesh remap + per-rank GEOMETRY byte-gate (pi dist_
   OWNED entries (1..myDim). NOT vs 1-rank global: both `dist_N` runs share the same `myList` order → local idx
   i ↔ same global id AND the per-node area sum order matches → byte-identical; the 1-rank global uses a
   different element permutation (non-associative FP) → would mismatch at ~ULP.
-- **Algorithm to transcribe (FESOM2 `port2/fesom2/src/oce_mesh.F90`):** `read_mesh` :212 (chunked global→local
-  `mapping` scatter — replace with a full-size inverse map, identical result); `find_neighbors` :1969 (local
-  `nod_in_elem2D` build from OWNED elems skipping halo nodes `node>myDim`, then `exchange_nod(num)` :2051, pack
-  global elem-ids :2057 → `exchange_nod` → re-localize through **eXDim** :2066-2073); `mesh_areas` :2162 (area
-  over owned+halo nodes :2258 using the COMPLETE `nod_in_elem2D`, with `exchange_elem(elem_area)` :2220 over the
-  FULL halo); `setup_vertical` exchanges :1669 (`exchange_nod(nlevels_nod2D_min/ulevels_nod2D_max)`); edges read
-  :1787 (same scatter + negative-localize trick :1860/1908). `elem2D_nodes` is `(3,myDim_elem2D)` — OWNED only.
-- **Likely the one NEW infra bit:** `mesh_areas` exchanges `elem_area` over eDim+eXDim → may need an
-  `exchange_elem_full` on `com_elem2D_full` (current `exchange_elem` uses `com_elem2D` = eDim only). The gate
-  catches it (boundary-node areas would be short). SKIP `elem_neighbors`/`elem_edges` (not needed for geometry).
-- **Oracle:** extend `port2/fesom2/src/fesom_geom_dump.F90` (currently npes==1 no-op, oce_mesh.F90 wired) to
-  dump per-rank LOCAL OWNED arrays at npes>1; rebuild `libfesom.so`. **Gate:** new
-  `tools/run_geom_gate_multirank.sh` (FESOM2 dist_2 dump vs FESOM3 dist_2 dump, per-rank owned, `geom_diff.py
-  --glob`), target `max|Δ|=0`; then dist_8. CLOSES the deferred multi-rank `enforce_cw_orientation` swap path.
+- **Algorithm (FESOM2 `port2/fesom2/src/oce_mesh.F90`):** ⟶DONE in M2.12a (`read_mesh_local`): `read_mesh` :212
+  (scatter — implemented with a full-size inverse map, not FESOM2's chunked `mapping`; identical result); edges read
+  :1787 (scatter + negative-localize); owned `nod_in_elem2D` build (`find_neighbors` :2021-2049, OWNED part);
+  `setup_vertical` `exchange_nod(nlevels_nod2D_min)` :1669. `elem2D_nodes` is `(MAX_NV,myDim_elem2D)` — OWNED only.
+  ⟶M2.12b (still to port): the `find_neighbors` HALO dance — `exchange_nod(num)` :2051, pack global elem-ids :2057
+  → `exchange_nod` → re-localize through **eXDim** :2066-2073 (completes halo `nod_in_elem2D` for MUSCL/advection);
+  and `mesh_areas` :2162 area over owned+halo nodes :2258 with `exchange_nod(area)` :2322 + `exchange_elem(elem_area)`
+  :2220 (fills the HALO area that the dynamics read).
+- **Infra note (corrected by M2.12a):** the owned-entry GEOMETRY gate did NOT need `exchange_elem_full` — owned-edge
+  `edge_cross_dxdy` only reads an eDim neighbour's CENTER, covered by the existing `exchange_elem` (com_elem2D); the
+  fix was precompute owned element centers + `exchange_elem` them (centers are WP; route the MP `elem_cos` via a WP
+  scratch). `exchange_elem_full` (com_elem2D_full, eDim+eXDim) may still be needed in M2.12b for `elem_area` over
+  eXDim. SKIP `elem_neighbors`/`elem_edges` (not needed for geometry; M2.12b may need `elem_neighbors`).
+- **Oracle (⟶DONE):** `port2/fesom2/src/fesom_geom_dump.F90` extended to npes>1 (per-rank LOCAL OWNED dump,
+  `<path>.<mype5>`); `libfesom.so` rebuilt. **Gate (⟶DONE):** `tools/run_geom_gate_multirank.sh [np]`
+  (FESOM2 dist_N dump vs FESOM3 dist_N dump, per-rank owned, `geom_diff.py`); `max|Δ|=0` on dist_2 + dist_8.
+  CLOSED the deferred multi-rank `enforce_cw_orientation` swap path. Lessons in **L30**.
 - **Build discipline:** clean-rebuild after adding NEW files (L19); `ulimit -s unlimited` for the dump writer (L20).
-- **First concrete step:** extend the oracle geom-dump shim to multi-rank + produce the pi dist_2 reference dumps
-  (oracle side, self-contained), THEN implement the FESOM3 remap against it, THEN gate `max|Δ|=0`.
 
 ## Open notes / risks
 
@@ -885,9 +894,9 @@ Active next = **M2.12a: local-mesh remap + per-rank GEOMETRY byte-gate (pi dist_
   `./configure.sh --compiler intel --precision dp --clean --build` before trusting the byte-gate — an
   incremental build re-runs CMake configure (GLOB `CONFIGURE_DEPENDS`) and can link objects against a MIX
   of stale/fresh `.mod` interfaces, ULP-drifting EVERY field (the M2.6 first-gate red herring).
-- **M2.12 is now heavy** (the local-mesh remap + the folded M1 advection multi-rank gate + the
-  whole-model multi-rank byte-match + the deferred cavity/CW-swap caveats). Consider splitting the
-  local-mesh remap into its own early-M2 task once a dynamics kernel first needs halos at multi-rank.
+- **M2.12 is decomposed (M2.12a/b/c) and underway.** M2.12a (local-mesh remap + geometry gate) is DONE; the
+  remaining weight is M2.12b (folded M1 advection multi-rank gate + the `find_neighbors` halo dance) + M2.12c
+  (whole-model 1/8/32-rank byte-match + the deferred cavity caveat). The remap landed cleanly without splitting.
 - The FESOM2 oracle shim edits (`fesom_advhor_dump.F90`, `fesom_pressure_dump.F90`, `fesom_step_dump.F90`,
   `fesom_forcing_dump.F90`, `fesom_ic_dump.F90` [M2.11b], `oce_setup_step.F90`, `fesom_module.F90`, geom/ale shims) **+
   the M2.10a `io_netcdf_workaround_module.F90` np=1 fix** live as UNCOMMITTED working-tree instrumentation in
