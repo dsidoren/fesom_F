@@ -369,7 +369,7 @@ Single source of truth for "where are we / what's next". Update at the end of ev
   stops before forcing). `max|Δ|=0` FIRST gate run; Debug `-check all` clean; pressure gate (57) + ctest (13) still green. The
   T/S `do_ic3d` "global min" print loops WET levels only (5.628) vs the FESOM3 driver's full-array `minval` (0.0, bottom-zeroed)
   — a print-mask red herring, NOT a data mismatch (the full-array byte-gate is 0). See LESSONS L27.
-- **M2.11c (full multi-step lifecycle on CORE2) — BUILT + RUNS; dynamical core byte-matches; CG at the reproducibility floor (NEEDS A USER DECISION).** Built the FIRST real time-stepping run (not a prescribe-and-stop shim):
+- **M2.11c (full multi-step lifecycle on CORE2) — ✅ DONE; the WHOLE dynamical core (incl. the CG `d_eta`) byte-matches `max|Δ|=0` over multiple steps (the "CG floor" was SOLVED — L29).** Built the FIRST real time-stepping run (not a prescribe-and-stop shim):
   FESOM3 `src/drivers/fesom_lifecycle.F90` (cold-start CORE2 mesh + `do_ic3d` phc3.0 IC + N-step runloop calling
   `mod_step_oce::step_oce`, multi-step AB2 evolving in place) vs the REAL FESOM2 multi-step lifecycle
   (`tools/run_lifecycle_core2.sh`, the built-in per-substep `dump_shim` over N steps, `use_ice=.false.` UNFORCED).
@@ -766,8 +766,8 @@ passes — all input paths verified: CORE2 mesh `/pool/data/AWICM/FESOM2/MESHES_
   `phc3.0_winter.nc`** (360×180×33, the work_core production file — NOT woa18; the test harness path also has it). phc3.0 land
   = NaN (no `_FillValue`) → missing-value mask = `ieee_is_nan`. `idlist=2,1` ⇒ salt→data(2) FIRST, temp→data(1) SECOND,
   `t_insitu=.true.`. Oracle shim `fesom_ic_dump.F90` dumps the live `Tclim`/`Sclim` (no prescribe). See LESSONS L27.
-- **M2.11c-1 — unforced multi-step lifecycle + CORE2 dynamics-kernel gate — ✅ BUILT/RUN (2026-06-21; dynamical core
-  `max|Δ|=0` on CORE2; CG at the floor).** Built: FESOM3 `src/drivers/fesom_lifecycle.F90` (cold-start CORE2 + `do_ic3d`
+- **M2.11c-1 — unforced multi-step lifecycle + CORE2 dynamics-kernel gate — ✅ DONE (2026-06-21; whole dynamical core
+  incl. CG `d_eta` `max|Δ|=0` over multiple steps post-L29).** Built: FESOM3 `src/drivers/fesom_lifecycle.F90` (cold-start CORE2 + `do_ic3d`
   IC + N-step `step_oce` loop, multi-step AB2 in place), oracle `tools/run_lifecycle_core2.sh` (REAL multi-step
   `oce_timestep_ale` + built-in dump_shim, `use_ice=.false.` unforced — `forcing_setup` is then a no-op, all surface
   fluxes 0), `tools/run_lifecycle_gate_core2.sh` (compares 13 NODE substeps × 5 probes × N steps), AND the NEW
@@ -775,9 +775,9 @@ passes — all input paths verified: CORE2 mesh `/pool/data/AWICM/FESOM2/MESHES_
   `fesom_pressuredump` now env-configurable `FESOM3_STEP_PER_DAY=48`). Oracle fixes (uncommitted): `io_meandata.F90::output`
   + `io_restart.F90::write_initial_conditions` both `if(partit%npes==1) return` (the 1-rank `io_gather init_nod2D_lists`
   bug hits BOTH output and restart-write); `use_sw_pene=.false.` in the run dir (else `sw_3d` unallocated → segfault, L28).
-  **The CORE2 pressure gate is `max|Δ|=0` on all 27 dynamical-core fields; only `d_eta` (CG) is at the floor.** Debug
-  `-check all` clean. See LESSONS L28. **STATUS: blocked on the DECISION POINT above for the strict multi-step `max|Δ|=0`.**
-- **M2.11c-2 — FORCED lifecycle — ✅ BUILT/RUN (2026-06-21; forced dynamical core byte-matches on CORE2; CG at the floor).**
+  **After the L29 fix the CORE2 pressure gate is `max|Δ|=0` on all 28 dynamical-core fields INCLUDING `d_eta`, and the
+  multi-step `run_lifecycle_gate_core2.sh` MATCHes (195 records, worst |Δ|=0).** Debug `-check all` clean. See LESSONS L29.
+- **M2.11c-2 — FORCED lifecycle — ✅ BUILT/RUN (2026-06-21; forced dynamical core byte-matches on CORE2; CG floor resolved by L29 — see the re-verify note).**
   The REAL forced FESOM2 lifecycle (`use_ice=.true.`, real CORE2 NCAR forcing at the 1948 stubs + pool runoff/SSS, the ice
   EVP + `oce_fluxes` producing the air-sea fluxes) runs cleanly at 1-rank on CORE2 — **the ice-at-1-rank unknown is
   DE-RISKED** (`tools/run_lifecycle_forced_core2.sh`). Built: oracle `port2/fesom2/src/fesom_flux_dump.F90` (per-step
@@ -785,10 +785,11 @@ passes — all input paths verified: CORE2 mesh `/pool/data/AWICM/FESOM2/MESHES_
   `oce_timestep_ale`, env `FESOM_FLUX_DUMP`, wired in `fesom_module.F90` runloop), FESOM3 `fesom_lifecycle` reads them per
   step (`FESOM3_FLUX_FILE`) and prescribes into `step_oce` (the M2.5/M2.8 prescribe-the-unsourced-input pattern), gate
   `tools/run_lifecycle_forced_gate_core2.sh`. **Result identical to unforced:** every pre-CG substep `max|Δ|=0` (incl.
-  `ssh_rhs`, which now consumes the prescribed wind stress), only `d_eta` + downstream at the CG floor (first divergence
-  `5.5e-17`, worst `3.5e-6` over 3 steps). So **the M3-gap flux prescription is byte-exact.** Calendar: CORE (noleap) forcing
+  `ssh_rhs`, which now consumes the prescribed wind stress). So **the M3-gap flux prescription is byte-exact.** Calendar: CORE (noleap) forcing
   REQUIRES `include_fleapyear=.false.`; `use_sw_pene=.false.` (matches the ported step_oce — no `sw_3d` term). Debug
-  `-check all` clean (incl. the flux-read path). **M2.11c-2 inherits the same CG floor → same DECISION POINT.**
+  `-check all` clean (incl. the flux-read path). **⚠️ RE-VERIFY (small next-session task):** the forced gate was last run
+  PRE-L29 (d_eta diverged 5.5e-17 → 3.5e-6 over 3 steps, the old floor); the L29 NOVECTOR fix makes the CG byte-exact, so
+  re-running `tools/run_lifecycle_forced_gate_core2.sh` should now give `max|Δ|=0` like the unforced gate — confirm it.
 - **SCOPE (LESSONS L25):** `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` air-sea budget = **M3** (the `obudget`
   in `ice_thermo_oce.F90` + `oce_fluxes`) → prescribed from the oracle dump at M2.11c. The SSS/runoff/chl climatology
   reads + the JRA55 (gregorian) forcing variant are deferred (CORE2 NCAR stubs suffice). M1's multi-rank advection gate
