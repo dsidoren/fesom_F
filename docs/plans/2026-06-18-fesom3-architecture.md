@@ -528,9 +528,20 @@ FESOM2 shim `port2/fesom2/src/fesom_step_dump.F90`, `tools/run_step{dump_pi,_gat
       `enforce_cw_orientation` swaps — ≈100%, mesh stored CCW; pi had 0 — post-swap geometry max|Δ|=0). `tools/make_dist1.py`
       hand-crafts the single-rank dist_1; `tools/run_geom_gate_core2.sh`; `fesom_geomdump` unchanged (`FESOM3_MESH_DIR`).
       Confirmed safe: min nlevels=5 (no single-layer cols, L18 N/A), cavity+partial-cell OFF. See LESSONS L26.
-- [ ] **M2.11b** `fesom` driver: read CORE2 mesh + **PHC IC (partition-matched)** + JRA55; `model_init/step/finalize`
-- [ ] PHC IC: in-situ→potential T conversion; `extrap_nod3D` fill (accept partition-order dependence)
-- [ ] **Gate:** **per-substep `max|Δ|=0` vs FESOM2 on single-rank CORE2**
+- [x] **M2.11b initial conditions (`do_ic3d`) — ✅ DONE (2026-06-21, max|Δ|=0, 3 fields, CORE2 1-rank).** Ported the
+      3D-climatology IC: `src/oce/oce_initial_state.F90` (`do_ic3d` + `nc_readGrid` + `nc_ic3d_ini` + `getcoeffld` +
+      `extrap_nod3D`) reading **phc3.0_winter.nc** (360×180×33) — netCDF 3D-double read (`nc_get_var3d_dp`) + NaN→dummy +
+      periodic-lon halo + spatial bilinear + vertical LINEAR interp onto `Z_3d_n` + `extrap_nod3D` (Gauss-Seidel
+      neighbour-average + downward fill — the partition-order step, deterministic at 1-rank) + Kelvin guard +
+      **`insitu2pot`** (Bryden-1973 RK4 `ptheta`/`atg` in `oce_pressure_bv.F90`). `idlist=2,1` → salt (data(2)) read FIRST,
+      temp (data(1)) SECOND, `t_insitu=.true.`. Reused `forcing_binarysearch` + `mod_io_netcdf`. Gate: `tools/run_ic_gate_core2.sh`
+      (Z_3d_n input + ic_temp/ic_salt) vs the oracle's live `Tclim`/`Sclim` (`fesom_ic_dump.F90` shim). PASSED first run;
+      Debug `-check all` clean; pressure gate (57) + ctest (13) still green. See LESSONS L27.
+- [x] ✅ **M2.11c — full lifecycle + multi-step CORE2 gate.** DONE 2026-06-21. `src/drivers/fesom_lifecycle.F90` (cold-start
+      CORE2 + do_ic3d IC + N-step `step_oce` loop, multi-step AB2); forcing/flux M3-gap prescribed from the oracle dump.
+      **Gate `tools/run_lifecycle_gate_core2.sh`: MATCH, 195 records (13 substeps × 5 probes × 3 steps), worst |Δ|=0** —
+      whole dynamical core byte-exact across multiple CORE2 steps INCLUDING the free-surface CG `d_eta`. The CORE2 CG
+      "reproducibility floor" was SOLVED (it was an auto-vectorised preconditioner divide; one `!DIR$ NOVECTOR`; LESSONS L29).
 
 #### Task M2.12: Multi-rank + production validation (MVP exit)
 **Files:** Create: the local-mesh remap in `mod_mesh_read`/a new builder; Modify: tests/scripts; `docs/HANDOFF.md`

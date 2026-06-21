@@ -48,9 +48,13 @@ program fesom_pressuredump
     ! shim overrides dt to dt_velrhs. So the stiffness matrix uses this value; compute it
     ! the SAME way FESOM2 does (gen_model_setup.F90:92) — NOT a 2400.0 literal — so the
     ! -no-prec-div bits agree (the only dt-dependent part of M2.6).
-    real(kind=WP), parameter :: dt_ssh = 86400.0_WP / real(36, WP)
+    ! step_per_day is env-configurable (FESOM3_STEP_PER_DAY) so the SAME driver gates
+    ! the SSH stiffness on pi (36 -> dt=2400) AND CORE2 (48 -> dt=1800); the oracle built
+    ! ssh_stiff at ocean_setup with its namelist step_per_day, so they MUST match.
+    real(kind=WP) :: dt_ssh
+    integer       :: spd_ssh
 
-    character(len=512) :: mesh_dir, out_path
+    character(len=512) :: mesh_dir, out_path, env_spd
     type(t_partit)      :: partit
     type(t_mesh)        :: mesh
     integer :: nsw, n, nz, nl, u, nzmin, nzmax, e
@@ -103,6 +107,10 @@ program fesom_pressuredump
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
         mesh_dir = '/home/a/a270088/port2/fesom2/tests/data/MESHES/pi'
+    spd_ssh = 36
+    call get_environment_variable('FESOM3_STEP_PER_DAY', env_spd)
+    if (len_trim(env_spd) > 0) read(env_spd, *) spd_ssh
+    dt_ssh = 86400.0_WP / real(spd_ssh, WP)
     call get_environment_variable('FESOM3_PRESSURE_OUT', out_path)
     if (len_trim(out_path) == 0) out_path = 'pressure_f3.bin'
 

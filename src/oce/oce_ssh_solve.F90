@@ -35,7 +35,12 @@ module oce_ssh_solve
     !    products DO use the sum() intrinsic over a CSR slice, exactly as FESOM2 — both
     !    codes use sum() there, same flags, byte-identical operands -> byte-identical.
     !  - The many runtime divisors (1/a_rr in the precond, al=rho/s_aux, be) are
-    !    byte-identical on both sides (same operands), so -no-prec-div matches (L7/L14).
+    !    byte-identical on both sides (same operands), so -no-prec-div matches (L7/L14)
+    !    -- BUT the precond off-diagonal divide also needs the !DIR$ NOVECTOR below to
+    !    stay scalar like the oracle: packed divpd != scalar divsd at ~1 ULP, which was
+    !    THE seed of the CORE2 d_eta "CG floor" (L28 -> RESOLVED in L29). See the note
+    !    at the divide. A divide byte-matches only when BOTH operands AND the SIMD width
+    !    match the oracle.
     !
     ! 1-RANK SCOPE (multi-rank lifted at M2.12):
     !  - exchange_nod(diag_values/rr/pp/x/d_eta) are halo broadcasts -> no-ops at 1-rank,
@@ -93,6 +98,18 @@ contains
             offset = ssh_stiff%rowptr_loc(row) - ssh_stiff%rowptr_loc(1)
             nend   = ssh_stiff%rowptr_loc(row+1) - ssh_stiff%rowptr_loc(row)
             ssh_stiff%pr_values(offset+1) = 1.0_WP/ssh_stiff%values(offset+1)
+            ! BIT-IDENTITY (L29): force SCALAR codegen to match the FESOM2 oracle.
+            ! The oracle (solver.F90:81) writes this off-diagonal via the LOCAL pointer
+            ! pr_values, which the compiler can't prove non-aliasing against the
+            ! ssh_stiff%values reads -> it stays SCALAR (divsd). We write the component
+            ! ssh_stiff%pr_values (provably distinct from %values) -> the compiler AUTO-
+            ! VECTORISES the divide (divpd). Packed and scalar division differ by ~1 ULP
+            ! under -no-prec-div/-fimf-use-svml, so ~1299/870146 pr_values entries drift,
+            ! seeding z=M^-1 r; the seed is sub-ULP in the early CG dot-products but
+            ! surfaces in the residual at ~iter 6 and breaks d_eta byte-identity on CORE2
+            ! (126858 nodes, 136 iters). It stayed below the last bit on pi (37 iters).
+            ! NOVECTOR makes the divide scalar, so pr_values is byte-identical to FESOM2.
+            !DIR$ NOVECTOR
             do n = 2, nend
                 node = ssh_stiff%colind_loc(offset+n)
                 ssh_stiff%pr_values(n+offset) =                                          &
