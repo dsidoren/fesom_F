@@ -548,18 +548,44 @@ FESOM2 shim `port2/fesom2/src/fesom_step_dump.F90`, `tools/run_step{dump_pi,_gat
 
 #### Task M2.12: Multi-rank + production validation (MVP exit)
 **Files:** Create: the local-mesh remap in `mod_mesh_read`/a new builder; Modify: tests/scripts; `docs/HANDOFF.md`
-- [ ] **local-mesh remap** (prerequisite for ALL multi-rank): from the global mesh + `dist_<NP>/`
-      (myList, com-structs already read), build the per-rank LOCAL mesh — remap global→local node/
-      elem/edge ids, local `elem2D_nodes`/`edges`/`edge_tri`, local `nod_in_elem2D` IN LOCAL ELEMENT
-      ORDER (L8), local geometry via `compute_geometry`. Replace the `npes/=1` error in
-      `mod_mesh_read.F90`. Byte-gate the local geometry per rank vs a multi-rank FESOM2 geom dump.
-- [ ] **M1 advection multi-rank gate (folded from M1.5):** lift the M1.1–M1.4 kernels/driver to
+
+**Foundation readiness (scoped 2026-06-21).** The multi-rank halo + partition infra ALREADY EXISTS and is
+tested 1/2/8-rank: `mod_halo.F90` is a real MPI exchange (manual pack → Isend/Irecv → broadcast-only
+owner→halo unpack via `com_struct`; `exchange_nod` 2D/3D-real + 2D-int, `exchange_elem` 2D/3D-real), and
+`mod_partitioning.read_dist_partition` already loads `myList_nod2D/elem2D/edge2D` + the three com-structs
+(`com_nod2D`/`com_elem2D`/`com_elem2D_full`). FESOM2 uses precompiled MPI_TYPE_INDEXED datatypes instead of
+manual pack, but that moves the SAME bytes with NO arithmetic → byte-identical result. So M2.12 is faithful
+transcription on a working foundation, NOT a from-scratch parallel build. **Gate rule (L8):** compare FESOM3
+`dist_N` vs FESOM2 `dist_N` PER-RANK on OWNED entries (NOT vs 1-rank global) — both share the same `myList`
+order so local index i ↔ same global id, and the per-node area accumulation order matches → byte-identical;
+the 1-rank global uses a different element permutation (non-associative FP) so it would NOT match.
+
+- [ ] **M2.12a — local-mesh remap + per-rank GEOMETRY byte-gate (pi dist_2/dist_8).** THE prerequisite.
+      Replace the `npes/=1` error in `mod_mesh_read.F90:28` with the local-mesh remap, transcribed from
+      FESOM2 `read_mesh`/`find_neighbors`/`mesh_areas` (oce_mesh.F90:212/1969/2162):
+      (1) full-size global→local inverse maps from `myList_*` (simpler than FESOM2's chunked `mapping`;
+      identical result — pure deterministic scatter). (2) Scatter local `coord_nod2D` (read global nod2d.out,
+      rotate, place at local idx), `elem2D_nodes` (OWNED elems only `(3,myDim_elem2D)`, localize node ids),
+      `edges`/`edge_tri` (localize node + elem ids, boundary `edge_tri`→0), `nlevels`/`nlevels_nod2D`/`depth`;
+      `nl`/`zbar`/`Z` are global. (3) `enforce_cw_orientation` on local owned elems (per-element deterministic
+      → consistent across ranks; CLOSES the multi-rank CW-swap caveat). (4) `nod_in_elem2D` via the
+      `find_neighbors` exchange dance: build from owned elems (skip halo nodes `node>myDim`), `exchange_nod`
+      the count, pack global elem-ids → `exchange_nod` → re-localize through the **eXDim** extended-halo
+      (`myList_elem2D(1:myDim+eDim+eXDim)`). SKIP `elem_neighbors`/`elem_edges` (not needed for geometry).
+      (5) `setup_vertical` with `exchange_nod(nlevels_nod2D_min)` (oce_mesh.F90:1669). (6) `compute_geometry`
+      runs on local arrays UNCHANGED, EXCEPT `mesh_areas` needs `exchange_elem(elem_area)` over the FULL halo
+      (oce_mesh.F90:2220) — likely a NEW `exchange_elem_full` on `com_elem2D_full` (eDim+eXDim); the gate
+      catches if `com_elem2D` is insufficient. **Oracle:** extend `fesom_geom_dump.F90` (currently npes==1
+      no-op) to dump per-rank LOCAL OWNED arrays. **Gate:** `tools/run_geom_gate_multirank.sh` (FESOM2 dist_2
+      dump vs FESOM3 dist_2 dump, per-rank owned, `geom_diff.py --glob`); target `max|Δ|=0`; repeat dist_8.
+- [ ] **M2.12b — M1 advection multi-rank gate (folded from M1.5):** lift the M1.1–M1.4 kernels/driver to
       FESOM2's multi-rank structure — exchange_nod/elem of tr_xy/edge_up_dn_grad/fct_LO/fct_plus_minus/
       del_ttf at the FESOM2 sites; scatter over `myDim_edge2D`/`myDim_nod2D`; then byte-gate
       `del_ttf` on pi `dist_2`/`dist_8` vs a multi-rank FESOM2 advection reference (post-exchange
-      OWNED values, same partition); exchange-and-compare probe clean.
-- [ ] rest-stays-at-rest; SSH gravity wave at expected speed
-- [ ] **1/8/32-rank byte-match** T/S at step 200 (accept only `extrap_nod3D` diff); halo-identity clean
+      OWNED values, same partition); exchange-and-compare probe clean. (FCT AUX/edge_up_dn_grad cavity caveat L11.)
+- [ ] **M2.12c — whole-model multi-rank byte-match (MVP exit):** rest-stays-at-rest; SSH gravity wave at
+      expected speed; **1/8/32-rank byte-match** T/S at step 200 (accept only `extrap_nod3D` order diff);
+      halo-identity probe clean (`stale_halo_max_*`).
 - [ ] **production dt=1800 (reduced M2 namelist): PRIMARY gate = per-substep `max|Δ|=0` vs the FESOM2
       reduced-config run**; SECONDARY sanity = run past the historical blow-up step, non-drifting
 - [ ] **Gate:** all green ⇒ **architectural MVP**; tag `m2-mvp`; write `docs/LESSONS.md` updates
