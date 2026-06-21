@@ -17,7 +17,7 @@ module mod_io_netcdf
     implicit none
     private
     public :: nc_open_read, nc_close, nc_dimlen, nc_get_axis_dp, &
-              nc_get_slice_r4, nc_get_att_text, nc_varid
+              nc_get_slice_r4, nc_get_var3d_dp, nc_get_att_text, nc_varid
 
 contains
 
@@ -96,6 +96,24 @@ contains
              start=[1, 1, t_indx], count=[size(buf,1), size(buf,2), 1]), &
              'get_slice '//trim(names(1)))
     end subroutine nc_get_slice_r4
+
+    ! Read a full real(8) (lon,lat,depth) cube from a 3-D variable into buf, whose
+    ! shape (nLon, nLat, nDepth) must match the on-disk extents. Mirrors the FESOM2
+    ! 3D-IC read (gen_ic3d.F90 getcoeffld:369, nf_get_vara_double, start=1, edges=full)
+    ! into a real(WP) ncdata buffer — the bytes are identical (netCDF converts the
+    ! on-disk type, here double, to real64 deterministically; no auto fill/scale in
+    ! the base library, so NaN land sentinels pass through verbatim for the caller's
+    ! ieee_is_nan mask).
+    subroutine nc_get_var3d_dp(ncid, names, buf)
+        integer, intent(in) :: ncid
+        character(len=*), intent(in) :: names(:)
+        real(real64), intent(out) :: buf(:,:,:)
+        integer :: vid
+        vid = nc_varid(ncid, names)
+        call nc_check(nf90_get_var(ncid, vid, buf, &
+             start=[1, 1, 1], count=[size(buf,1), size(buf,2), size(buf,3)]), &
+             'get_var3d '//trim(names(1)))
+    end subroutine nc_get_var3d_dp
 
     ! Read a text attribute (e.g. 'calendar') from a variable; returns '' if absent.
     function nc_get_att_text(ncid, varnames, attname) result(txt)

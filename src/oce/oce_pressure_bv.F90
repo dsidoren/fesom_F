@@ -43,7 +43,7 @@ module oce_pressure_bv
     use mod_param_phys,  only: state_equation, N2smth_h, N2smth_v, N2smth_hidx
     implicit none
     private
-    public :: pressure_bv, densityJM_components
+    public :: pressure_bv, densityJM_components, insitu2pot
 
 contains
 
@@ -304,5 +304,74 @@ contains
 
         deallocate(vol, work_array)
     end subroutine smooth_nod
+
+    !===========================================================================
+    ! Convert in-situ temperature -> potential temperature, IN PLACE (temp), using
+    ! salinity (read-only) at reference pressure pr=0. Transcribed from FESOM2
+    ! oce_ale_pressure_bv.F90 insitu2pot (3074-3118): per-node loop, the in-situ T
+    ! at each level is replaced by ptheta(S, T, |Z(nz)|, 0). FESOM2 uses the 1-D
+    ! mid-depth Z(nz) for the pressure proxy pp=abs(Z(nz)) (NOT Z_3d_n — the comment
+    ! at :3108 keeps Z for partial-cell stability at init). The IC driver feeds
+    ! tracers%data(1)%values (in-situ T) / data(2)%values (S) here (M2.11b do_ic3d,
+    ! t_insitu=.true.). 1-rank: the FESOM2 loop runs n=1..myDim+eDim; here n=1..nod2D.
+    subroutine insitu2pot(temp, salt, mesh)
+        type(t_mesh),  intent(in)    :: mesh
+        real(kind=WP), intent(inout) :: temp(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(in)    :: salt(mesh%nl-1, mesh%nod2D)
+        integer       :: n, nz, nzmin, nzmax
+        real(kind=WP) :: pp, pr, tt, ss
+        pr = 0.0_WP
+        do n = 1, mesh%nod2D
+            nzmin = mesh%ulevels_nod2D(n)
+            nzmax = mesh%nlevels_nod2D(n)
+            do nz = nzmin, nzmax-1
+                tt = temp(nz, n)
+                ss = salt(nz, n)
+                pp = abs(mesh%Z(nz))
+                temp(nz, n) = ptheta(ss, tt, pp, pr)
+            end do
+        end do
+    end subroutine insitu2pot
+
+    !===========================================================================
+    ! Local potential temperature at reference pressure pr, via Bryden-1973
+    ! adiabatic lapse rate + 4th-order Runge-Kutta. Verbatim from FESOM2
+    ! oce_ale_pressure_bv.F90 ptheta (2674-2714). Args are mutated locally (t,p);
+    ! the caller passes scalar temporaries so the mutation is harmless. checkvalue:
+    ! theta = 36.89073 C for s=40, t=40, p=10000, pr=0.
+    function ptheta(s, t, p, pr) result(theta)
+        real(kind=WP) :: theta
+        real(kind=WP) :: s, t, p, pr
+        real(kind=WP) :: h, xk, q
+        h  = pr - p
+        xk = h*atg(s, t, p)
+        t  = t + 0.5_WP*xk
+        q  = xk
+        p  = p + 0.5_WP*h
+        xk = h*atg(s, t, p)
+        t  = t + 0.29289322_WP*(xk-q)
+        q  = 0.58578644_WP*xk + 0.121320344_WP*q
+        xk = h*atg(s, t, p)
+        t  = t + 1.707106781_WP*(xk-q)
+        q  = 3.414213562_WP*xk - 4.121320344_WP*q
+        p  = p + 0.5_WP*h
+        xk = h*atg(s, t, p)
+        theta = t + (xk-2.0_WP*q)/6.0_WP
+    end function ptheta
+
+    !===========================================================================
+    ! Adiabatic temperature gradient deg C / decibar (Bryden 1973). Verbatim from
+    ! FESOM2 oce_ale_pressure_bv.F90 atg (2719-2746). checkvalue: atg=3.255976e-4
+    ! C/dbar for s=40, t=40, p=10000.
+    function atg(s, t, p) result(g_atg)
+        real(kind=WP) :: g_atg
+        real(kind=WP) :: s, t, p, ds
+        ds = s - 35.0_WP
+        g_atg = (((-2.1687e-16_WP*t+1.8676e-14_WP)*t-4.6206e-13_WP)*p   &
+              +((2.7759e-12_WP*t-1.1351e-10_WP)*ds+((-5.4481e-14_WP*t        &
+              +8.733e-12_WP)*t-6.7795e-10_WP)*t+1.8741e-8_WP))*p             &
+              +(-4.2393e-8_WP*t+1.8932e-6_WP)*ds                          &
+              +((6.6228e-10_WP*t-6.836e-8_WP)*t+8.5258e-6_WP)*t+3.5803e-5_WP
+    end function atg
 
 end module oce_pressure_bv
