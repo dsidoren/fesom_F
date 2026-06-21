@@ -727,13 +727,24 @@ runs `do_ic3d`, dumps). The oracle namelist gets the reduced-M2 override (`which
 forced) — the multi-step CORE2 lifecycle is `max|Δ|=0` (the "CG floor" was SOLVED 2026-06-21; the forced re-verify
 CONFIRMED 2026-06-21: 195 records, worst |Δ|=0).** **All of M2 is now byte-exact end-to-end on CORE2.**
 
-**→ M2.12 (multi-rank, MVP exit) CHOSEN + SCOPED (2026-06-21).** Decomposed into M2.12a/b/c in the plan
+**→ M2.12 (multi-rank, MVP exit) IN PROGRESS.** Decomposed into M2.12a/b/c in the plan
 (`docs/plans/2026-06-18-fesom3-architecture.md` Task M2.12) — see "M2.12 entry notes" below. **Key finding: the
 multi-rank foundation ALREADY EXISTS** (`mod_halo.F90` real MPI exchange_nod/elem + `mod_partitioning` myList/com,
 tested 1/2/8-rank), so M2.12 is faithful transcription of FESOM2's `read_mesh`/`find_neighbors`/`mesh_areas` (with
-their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scratch parallel build. **ACTIVE NEXT:
-M2.12a** (local-mesh remap + per-rank geometry byte-gate on pi dist_2/dist_8). M3 (ice + `oce_fluxes` air-sea
-budget) remains the other unblocked milestone if priorities change.
+their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scratch parallel build.
+- **M2.12a — local-mesh remap + per-rank GEOMETRY byte-gate — ✅ DONE (2026-06-21).** `max|Δ|=0` on ALL 19 geometry
+  fields, every rank, on pi **dist_2 (2 ranks) AND dist_8 (8 ranks)** vs same-partition FESOM2
+  (`tools/run_geom_gate_multirank.sh`). Built `mod_mesh_read.read_mesh_local` (global→local scatter via full-size
+  inverse maps + owned `nod_in_elem2D` + `enforce_cw`(owned) — CLOSES the multi-rank CW-swap caveat) and made
+  `mod_mesh_areas.compute_geometry` partition-aware (`local_bounds`; owned element CENTERS precomputed +
+  `exchange_elem`'d so owned-edge `edge_cross_dxdy` resolves halo-element centers; owned-node areas computed
+  locally). Per-rank owned dump in `mod_geom_dump` + the oracle shim `fesom_geom_dump.F90` (npes>1). **No
+  regression:** 1-rank geom gate (19), 1-rank pressure gate (57), 13/13 ctest all still `max|Δ|=0`/green.
+  **DEFERRED to M2.12b** (not needed for the owned-entry geometry gate; needed when dynamics consume halos): the
+  `find_neighbors` `nod_in_elem2D` halo dance (eXDim re-localize) + the area/elem_area halo exchanges.
+- **ACTIVE NEXT: M2.12b** (lift M1.1–M1.4 advection to multi-rank: exchange_nod/elem of the intermediates + the
+  `find_neighbors` dance; gate `del_ttf` on pi dist_2/dist_8). M3 (ice + `oce_fluxes` air-sea budget) remains the
+  other unblocked milestone if priorities change.
 
 ✅ **RESOLVED — the free-surface CG "reproducibility floor" was a bug, now fixed (2026-06-21; LESSONS L29).** The L28
 "iterative-solver floor" diagnosis was WRONG (a CG with byte-identical `A`/`b`/`x0`/kernels cannot manufacture

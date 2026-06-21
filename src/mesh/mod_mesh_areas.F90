@@ -10,27 +10,59 @@ module mod_mesh_areas
     !
     ! BYTE-FAITHFULNESS (M1 geometry byte-gate). FESOM2 splits this work across two
     ! routines whose ORDER of operations the bits depend on:
-    !   mesh_areas (oce_mesh.F90:2157)         -> elem_area (UNSCALED), area accumulate
+    !   mesh_areas (oce_mesh.F90:2162)         -> elem_area (UNSCALED), area accumulate
     !                                             (still UNSCALED), THEN one *r_earth^2
     !                                             on elem_area/area/areasvol together,
     !                                             then area_inv/areasvol_inv.
-    !   mesh_auxiliary_arrays (oce_mesh.F90:2453) -> elem_cos/metric_factor (via
+    !   mesh_auxiliary_arrays (oce_mesh.F90:2425) -> elem_cos/metric_factor (via
     !                                             elem_center), edge_dxdy,
     !                                             edge_cross_dxdy, gradient_sca
     !                                             (the latter uses the *scaled*
     !                                             elem_area). We reproduce that exact
     !                                             ordering and the elem_center /
     !                                             edge_center wrap arithmetic verbatim.
+    !
+    ! MULTI-RANK (M2.12a). The geometry is partition-agnostic in arithmetic; only the
+    ! loop bounds + allocation sizes become LOCAL. local_bounds() returns mesh global
+    ! counts at npes==1 (the proven 1-rank path is byte-for-byte unchanged) and the
+    ! partit myDim/eDim dims at npes>1. Element CENTERS are precomputed for OWNED
+    ! elements and halo-exchanged, because edge_cross_dxdy of an owned edge can read the
+    ! center of a halo (eDim) neighbour element whose elem2D_nodes is not stored (FESOM2
+    ! mesh_auxiliary_arrays:2526-2529 + 2552-2578). Owned-node areas are computed locally
+    ! (the partition guarantees an owned node's full element-neighbourhood is owned), so
+    ! the area/elem_area halo exchanges (FESOM2 mesh_areas:2220/2322) are NOT needed for
+    ! the owned-entry gate and are deferred to M2.12b (where the dynamics consume halos).
     use mod_precision,   only: WP, MP
     use mod_constants,   only: r_earth, omega
-    use mod_mesh,        only: t_mesh
+    use mod_mesh,        only: t_mesh, MAX_NV
     use mod_partit,      only: t_partit
+    use mod_halo,        only: exchange_elem
     use mod_mesh_rotate, only: trim_cyclic, get_cyclic_length, r2g
     implicit none
     private
     public :: compute_geometry
 
 contains
+
+    subroutine local_bounds(mesh, partit, nNodO, nNodL, nElemO, nElemF, nEdgeO, nEdgeL)
+        ! Local array bounds. npes==1: the global mesh counts (proven path, unchanged).
+        ! npes>1: owned (myDim) and local (myDim+eDim[+eXDim]) dims from the partition.
+        type(t_mesh),   intent(in)  :: mesh
+        type(t_partit), intent(in)  :: partit
+        integer,        intent(out) :: nNodO, nNodL, nElemO, nElemF, nEdgeO, nEdgeL
+        if (partit%npes == 1) then
+            nNodO  = mesh%nod2D;  nNodL  = mesh%nod2D
+            nElemO = mesh%elem2D; nElemF = mesh%elem2D
+            nEdgeO = mesh%edge2D; nEdgeL = mesh%edge2D
+        else
+            nNodO  = partit%myDim_nod2D
+            nNodL  = partit%myDim_nod2D + partit%eDim_nod2D
+            nElemO = partit%myDim_elem2D
+            nElemF = partit%myDim_elem2D + partit%eDim_elem2D + partit%eXDim_elem2D
+            nEdgeO = partit%myDim_edge2D
+            nEdgeL = partit%myDim_edge2D + partit%eDim_edge2D
+        end if
+    end subroutine local_bounds
 
     subroutine compute_geometry(mesh, partit, cartesian)
         ! Same data-dependency order as FESOM2 mesh_areas + mesh_auxiliary_arrays:
@@ -39,16 +71,56 @@ contains
         type(t_mesh),   intent(inout) :: mesh
         type(t_partit), intent(in)    :: partit
         logical,        intent(in)    :: cartesian
-        call compute_elem_metric(mesh, cartesian)   ! elem_cos, metric_factor
-        call compute_coriolis(mesh, cartesian)      ! coriolis, coriolis_node (M2.3)
-        call compute_elem_area(mesh, cartesian)     ! elem_area (UNSCALED radians^2)
-        call compute_node_areas(mesh)               ! accumulate area, then scale *r_earth^2
-        call compute_edge_geometry(mesh)            ! edge_dxdy, edge_cross_dxdy (uses elem_cos)
-        call compute_gradient_sca(mesh)             ! uses SCALED elem_area + elem_cos
+        integer :: nNodO, nNodL, nElemO, nElemF, nEdgeO, nEdgeL
+        real(kind=WP), allocatable :: center_x(:), center_y(:)
+        call local_bounds(mesh, partit, nNodO, nNodL, nElemO, nElemF, nEdgeO, nEdgeL)
+        allocate(center_x(nElemF), center_y(nElemF))
+        center_x = 0.0_WP; center_y = 0.0_WP
+        call compute_centers(mesh, nElemO, center_x, center_y)          ! owned element centers
+        call compute_elem_metric(mesh, cartesian, nElemO, nElemF, center_y) ! elem_cos, metric_factor
+        call compute_coriolis(mesh, cartesian, nNodL, nElemO)           ! coriolis, coriolis_node (M2.3)
+        call compute_elem_area(mesh, cartesian, nElemO, nElemF)         ! elem_area (UNSCALED radians^2)
+        if (partit%npes > 1) then
+            ! Halo element centers for owned-edge edge_cross_dxdy (FESOM2:2528-2529).
+            call exchange_elem(center_x, partit)
+            call exchange_elem(center_y, partit)
+            call exchange_elem_cos(mesh, partit, nElemF)
+        end if
+        call compute_node_areas(mesh, nNodO, nNodL)                     ! accumulate area, then scale
+        call compute_edge_geometry(mesh, nEdgeO, center_x, center_y)    ! edge_dxdy, edge_cross_dxdy
+        call compute_gradient_sca(mesh, nElemO)                         ! uses SCALED elem_area + elem_cos
+        deallocate(center_x, center_y)
     end subroutine compute_geometry
 
+    subroutine exchange_elem_cos(mesh, partit, nElemF)
+        ! Halo-fill elem_cos via a WP scratch (elem_cos is MP; MP==WP at dp/sp).
+        type(t_mesh),   intent(inout) :: mesh
+        type(t_partit), intent(in)    :: partit
+        integer,        intent(in)    :: nElemF
+        real(kind=WP), allocatable :: tmp(:)
+        allocate(tmp(nElemF))
+        tmp = real(mesh%elem_cos(1:nElemF), WP)
+        call exchange_elem(tmp, partit)
+        mesh%elem_cos(1:nElemF) = real(tmp, MP)
+        deallocate(tmp)
+    end subroutine exchange_elem_cos
+
+    subroutine compute_centers(mesh, nElemO, cx, cy)
+        ! Element centers for OWNED elements (elem_center needs elem2D_nodes, stored
+        ! owned-only). The halo entries are filled by exchange in compute_geometry.
+        type(t_mesh),  intent(in)  :: mesh
+        integer,       intent(in)  :: nElemO
+        real(kind=WP), intent(out) :: cx(:), cy(:)
+        integer :: n
+        real(kind=WP) :: ax, ay
+        do n = 1, nElemO
+            call elem_center(mesh, n, ax, ay)
+            cx(n) = ax; cy(n) = ay
+        end do
+    end subroutine compute_centers
+
     !--------------------------------------------------------------------------
-    subroutine compute_coriolis(mesh, cartesian)
+    subroutine compute_coriolis(mesh, cartesian, nNodL, nElemO)
         ! Coriolis parameter f = 2*omega*sin(lat_geo) at elements (coriolis) and nodes
         ! (coriolis_node). FESOM2 mesh_auxiliary_arrays (oce_mesh.F90:2476-2503): the
         ! geographical latitude is r2g applied to the ROTATED element centroid
@@ -58,15 +130,16 @@ contains
         ! coriolis (elements); coriolis_node (nodes) is faithful + cheap, used later.
         type(t_mesh), intent(inout) :: mesh
         logical,      intent(in)    :: cartesian
+        integer,      intent(in)    :: nNodL, nElemO
         integer :: n
         real(kind=WP) :: ax, ay, lon, lat
-        allocate(mesh%coriolis(mesh%elem2D), mesh%coriolis_node(mesh%nod2D))
+        allocate(mesh%coriolis(nElemO), mesh%coriolis_node(nNodL))
         if (.not. cartesian) then
-            do n = 1, mesh%nod2D
+            do n = 1, nNodL
                 call r2g(lon, lat, mesh%coord_nod2D(1, n), mesh%coord_nod2D(2, n))
                 mesh%coriolis_node(n) = 2 * omega * sin(lat)
             end do
-            do n = 1, mesh%elem2D
+            do n = 1, nElemO
                 call elem_center(mesh, n, ax, ay)
                 call r2g(lon, lat, ax, ay)
                 mesh%coriolis(n) = 2 * omega * sin(lat)
@@ -75,10 +148,10 @@ contains
             ! cartesian/analytic mesh (no rotated->geo transform): use the stored
             ! latitude directly. coriolis is NOT byte-gated on the analytic mesh; this
             ! is a benign finite fill that avoids r2g/asin on cartesian coords.
-            do n = 1, mesh%nod2D
+            do n = 1, nNodL
                 mesh%coriolis_node(n) = 2 * omega * sin(mesh%coord_nod2D(2, n))
             end do
-            do n = 1, mesh%elem2D
+            do n = 1, nElemO
                 call elem_center(mesh, n, ax, ay)
                 mesh%coriolis(n) = 2 * omega * sin(ay)
             end do
@@ -131,34 +204,37 @@ contains
     end subroutine edge_center
 
     !--------------------------------------------------------------------------
-    subroutine compute_elem_metric(mesh, cartesian)
-        ! elem_cos = cos(lat_center); metric_factor = tan(lat_center)/r_earth.
-        ! (oce_mesh.F90:2508-2528)
-        type(t_mesh), intent(inout) :: mesh
-        logical,      intent(in)    :: cartesian
+    subroutine compute_elem_metric(mesh, cartesian, nElemO, nElemF, cy)
+        ! elem_cos = cos(lat_center); metric_factor = tan(lat_center)/r_earth, using
+        ! the precomputed owned centers cy. (oce_mesh.F90:2508-2528)
+        type(t_mesh),  intent(inout) :: mesh
+        logical,       intent(in)    :: cartesian
+        integer,       intent(in)    :: nElemO, nElemF
+        real(kind=WP), intent(in)    :: cy(:)
         integer :: n
-        real(kind=WP) :: cx, cy
-        allocate(mesh%elem_cos(mesh%elem2D), mesh%metric_factor(mesh%elem2D))
-        do n = 1, mesh%elem2D
-            call elem_center(mesh, n, cx, cy)
-            mesh%elem_cos(n)      = cos(cy)
-            mesh%metric_factor(n) = tan(cy) / r_earth
+        allocate(mesh%elem_cos(nElemF), mesh%metric_factor(nElemF))
+        mesh%elem_cos = 0.0_MP; mesh%metric_factor = 0.0_MP
+        do n = 1, nElemO
+            mesh%elem_cos(n)      = cos(cy(n))
+            mesh%metric_factor(n) = tan(cy(n)) / r_earth
         end do
         if (cartesian) then
             mesh%elem_cos = 1.0_MP; mesh%metric_factor = 0.0_MP
         end if
     end subroutine compute_elem_metric
 
-    subroutine compute_elem_area(mesh, cartesian)
+    subroutine compute_elem_area(mesh, cartesian, nElemO, nElemF)
         ! oce_mesh.F90:2202-2214. ay = cos(sum(lat)/nv). elem_area is left UNSCALED
         ! here (radians^2); the *r_earth^2 happens in compute_node_areas, matching
         ! FESOM2's mesh_areas where the scaling is deferred to after area accumulation.
         type(t_mesh), intent(inout) :: mesh
         logical,      intent(in)    :: cartesian
+        integer,      intent(in)    :: nElemO, nElemF
         integer :: n, nv, n1
         real(kind=WP) :: ay, a1, a2, b1, b2
-        allocate(mesh%elem_area(mesh%elem2D))
-        do n = 1, mesh%elem2D
+        allocate(mesh%elem_area(nElemF))
+        mesh%elem_area = 0.0_MP
+        do n = 1, nElemO
             nv = mesh%elem2D_nnodes(n)
             n1 = mesh%elem2D_nodes(1, n)
             ! literal 3.0_WP divisor (see elem_center: -no-prec-div arity caveat)
@@ -175,15 +251,16 @@ contains
         end do
     end subroutine compute_elem_area
 
-    subroutine compute_gradient_sca(mesh)
+    subroutine compute_gradient_sca(mesh, nElemO)
         ! Linear shape-function gradient coefficients (oce_mesh.F90:2619-2641).
-        ! Uses the SCALED elem_area (dfactor = -0.5*r_earth/elem_area).
+        ! Uses the SCALED elem_area (dfactor = -0.5*r_earth/elem_area). Owned elements.
         type(t_mesh), intent(inout) :: mesh
+        integer,      intent(in)    :: nElemO
         integer :: e, n1, n2, n3
         real(kind=WP) :: dX31, dX21, dY31, dY21, dfac
-        allocate(mesh%gradient_sca(2*size(mesh%elem2D_nodes,1), mesh%elem2D))  ! (2*MAX_NV, elem2D)
+        allocate(mesh%gradient_sca(2*MAX_NV, nElemO))   ! (2*MAX_NV, owned elems)
         mesh%gradient_sca = 0.0_MP
-        do e = 1, mesh%elem2D
+        do e = 1, nElemO
             n1 = mesh%elem2D_nodes(1, e); n2 = mesh%elem2D_nodes(2, e); n3 = mesh%elem2D_nodes(3, e)
             dX31 = mesh%coord_nod2D(1, n3) - mesh%coord_nod2D(1, n1); call trim_cyclic(dX31)
             dX31 = mesh%elem_cos(e) * dX31
@@ -201,30 +278,32 @@ contains
         end do
     end subroutine compute_gradient_sca
 
-    subroutine compute_edge_geometry(mesh)
+    subroutine compute_edge_geometry(mesh, nEdgeO, center_x, center_y)
         ! edge_dxdy (along-edge, radians) + edge_cross_dxdy (edge-center to elem
-        ! centers, metres). oce_mesh.F90:2534-2573.
-        type(t_mesh), intent(inout) :: mesh
+        ! centers, metres). oce_mesh.F90:2534-2573. Uses the precomputed (and, at
+        ! npes>1, halo-exchanged) element centers so an owned edge with a halo (eDim)
+        ! neighbour element resolves its center without elem_center on a halo element.
+        type(t_mesh),  intent(inout) :: mesh
+        integer,       intent(in)    :: nEdgeO
+        real(kind=WP), intent(in)    :: center_x(:), center_y(:)
         integer :: n, el1, el2
-        real(kind=WP) :: a1, a2, ecx, ecy, cx, cy, b1, b2
-        allocate(mesh%edge_dxdy(2, mesh%edge2D), mesh%edge_cross_dxdy(4, mesh%edge2D))
-        do n = 1, mesh%edge2D
+        real(kind=WP) :: a1, a2, ecx, ecy, b1, b2
+        allocate(mesh%edge_dxdy(2, nEdgeO), mesh%edge_cross_dxdy(4, nEdgeO))
+        do n = 1, nEdgeO
             a1 = mesh%coord_nod2D(1, mesh%edges(2, n)) - mesh%coord_nod2D(1, mesh%edges(1, n))
             a2 = mesh%coord_nod2D(2, mesh%edges(2, n)) - mesh%coord_nod2D(2, mesh%edges(1, n))
             call trim_cyclic(a1)
             mesh%edge_dxdy(1, n) = a1; mesh%edge_dxdy(2, n) = a2
         end do
-        do n = 1, mesh%edge2D
+        do n = 1, nEdgeO
             call edge_center(mesh, n, ecx, ecy)
             el1 = mesh%edge_tri(1, n); el2 = mesh%edge_tri(2, n)
-            call elem_center(mesh, el1, cx, cy)
-            b1 = cx - ecx; b2 = cy - ecy; call trim_cyclic(b1)
+            b1 = center_x(el1) - ecx; b2 = center_y(el1) - ecy; call trim_cyclic(b1)
             b1 = b1 * mesh%elem_cos(el1)
             mesh%edge_cross_dxdy(1, n) = b1 * r_earth
             mesh%edge_cross_dxdy(2, n) = b2 * r_earth
             if (el2 > 0) then
-                call elem_center(mesh, el2, cx, cy)
-                b1 = cx - ecx; b2 = cy - ecy; call trim_cyclic(b1)
+                b1 = center_x(el2) - ecx; b2 = center_y(el2) - ecy; call trim_cyclic(b1)
                 b1 = b1 * mesh%elem_cos(el2)
                 mesh%edge_cross_dxdy(3, n) = b1 * r_earth
                 mesh%edge_cross_dxdy(4, n) = b2 * r_earth
@@ -234,18 +313,21 @@ contains
         end do
     end subroutine compute_edge_geometry
 
-    subroutine compute_node_areas(mesh)
+    subroutine compute_node_areas(mesh, nNodO, nNodL)
         ! Control-volume area per level (oce_mesh.F90:2252-2351). area(nz,n) gathers
         ! elem_area/nv from adjacent elements deep enough to reach level nz. The
         ! accumulation runs on UNSCALED elem_area; then elem_area, area and areasvol
         ! are all multiplied by r_earth^2 together (a single deferred scaling, as in
-        ! FESOM2 mesh_areas:2313-2315) so the per-node sums round identically.
+        ! FESOM2 mesh_areas:2313-2315) so the per-node sums round identically. Owned
+        ! nodes are accumulated locally (the partition guarantees a complete owned
+        ! element-neighbourhood); the area halo exchange is deferred to M2.12b.
         type(t_mesh), intent(inout) :: mesh
+        integer,      intent(in)    :: nNodO, nNodL
         integer :: n, j, elem, nz, nzmin, nzmax
-        allocate(mesh%area(mesh%nl, mesh%nod2D), mesh%area_inv(mesh%nl, mesh%nod2D))
-        allocate(mesh%areasvol(mesh%nl, mesh%nod2D), mesh%areasvol_inv(mesh%nl, mesh%nod2D))
+        allocate(mesh%area(mesh%nl, nNodL), mesh%area_inv(mesh%nl, nNodL))
+        allocate(mesh%areasvol(mesh%nl, nNodL), mesh%areasvol_inv(mesh%nl, nNodL))
         mesh%area = 0.0_MP
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             do j = 1, mesh%nod_in_elem2D_num(n)
                 elem = mesh%nod_in_elem2D(j, n)
                 nzmin = mesh%ulevels(elem)
@@ -260,7 +342,7 @@ contains
         end do
         ! non-cavity: "mid" cell area == upper-edge area
         mesh%areasvol = 0.0_MP
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             nzmin = mesh%ulevels_nod2D(n)
             nzmax = mesh%nlevels_nod2D(n) - 1
             do nz = nzmin, nzmax
@@ -273,7 +355,7 @@ contains
         mesh%areasvol  = mesh%areasvol  * r_earth * r_earth
         ! inverse areas (mesh_areas:2321-2351); non-cavity areasvol_inv == area_inv
         mesh%area_inv = 0.0_MP
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             nzmin = mesh%ulevels_nod2D(n)
             nzmax = mesh%nlevels_nod2D(n)
             do nz = nzmin, nzmax
@@ -285,7 +367,7 @@ contains
             end do
         end do
         mesh%areasvol_inv = mesh%area_inv
-        mesh%ocean_area = sum(mesh%area(1, 1:mesh%nod2D))
+        mesh%ocean_area = sum(mesh%area(1, 1:nNodO))
     end subroutine compute_node_areas
 
 end module mod_mesh_areas

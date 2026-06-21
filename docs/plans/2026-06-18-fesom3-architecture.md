@@ -560,7 +560,15 @@ transcription on a working foundation, NOT a from-scratch parallel build. **Gate
 order so local index i ↔ same global id, and the per-node area accumulation order matches → byte-identical;
 the 1-rank global uses a different element permutation (non-associative FP) so it would NOT match.
 
-- [ ] **M2.12a — local-mesh remap + per-rank GEOMETRY byte-gate (pi dist_2/dist_8).** THE prerequisite.
+- [x] ✅ **M2.12a — local-mesh remap + per-rank GEOMETRY byte-gate (pi dist_2/dist_8).** DONE 2026-06-21:
+      `max|Δ|=0` on all 19 geometry fields, every rank, dist_2 (2) AND dist_8 (8) vs same-partition FESOM2
+      (`tools/run_geom_gate_multirank.sh`). Built `read_mesh_local` (scatter via full-size inverse maps + owned
+      `nod_in_elem2D` + `enforce_cw`(owned) — closes the multi-rank CW-swap caveat) + partition-aware
+      `compute_geometry` (`local_bounds`; owned centers precomputed + `exchange_elem`'d for owned-edge
+      `edge_cross_dxdy`; owned-node areas local). Per-rank owned dump (FESOM3 `mod_geom_dump` + oracle
+      `fesom_geom_dump.F90`). No regression: 1-rank geom (19) + pressure (57) gates + 13/13 ctest still pass.
+      DEFERRED to M2.12b (not needed for the owned-entry gate): the `find_neighbors` nod_in_elem2D halo dance
+      (eXDim) + area/elem_area halo exchanges. THE prerequisite.
       Replace the `npes/=1` error in `mod_mesh_read.F90:28` with the local-mesh remap, transcribed from
       FESOM2 `read_mesh`/`find_neighbors`/`mesh_areas` (oce_mesh.F90:212/1969/2162):
       (1) full-size global→local inverse maps from `myList_*` (simpler than FESOM2's chunked `mapping`;

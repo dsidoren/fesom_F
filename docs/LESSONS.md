@@ -1250,3 +1250,37 @@ trace localised the iteration, the array dump localised the array, the disasm lo
   bisect it to the first differing scalar, then to the array, then to the instruction — don't accept a "floor".
 - **A sub-ULP seed can hide for many iterations.** `pr_values` drift was invisible in `sum(rhs²)`, `sum(r0·z0)`,
   and iters 1–5; value-dependent rounding only surfaced it at iter 6. Matching a few early probes ≠ byte-identity.
+
+## L30 — Multi-rank local-mesh remap (M2.12a): the geometry pipeline is partition-agnostic; gate per-rank vs same-partition
+
+The first multi-rank byte-gate. FESOM3's local mesh at npes>1 byte-matches FESOM2 per-rank on all 19 geometry
+fields (pi dist_2 + dist_8), via `tools/run_geom_gate_multirank.sh`. Reusable lessons:
+
+- **The geometry math is partition-agnostic — only the BOUNDS are local.** `compute_geometry` reads only local
+  arrays (`coord_nod2D`, `elem2D_nodes`, `edges`, `edge_tri`) and never global ids. So multi-rank = build the
+  LOCAL mesh arrays (scatter the global files through the `myList_*` inverse map) + run the SAME geometry with
+  local loop bounds. A `local_bounds(mesh, partit, ...)` helper returns the mesh global counts at npes==1 (the
+  proven 1-rank path is byte-for-byte unchanged) and `partit%myDim/eDim[/eXDim]` at npes>1.
+- **Gate PER-RANK vs SAME-PARTITION FESOM2, NOT vs 1-rank global (L8).** Both `dist_N` runs read the same
+  `my_list<rank>.out`, so local index i ↔ the same global id AND the per-node area accumulation order is the same
+  → byte-identical. The 1-rank global uses a different element permutation; non-associative FP would diverge ~ULP.
+  Dump per-rank OWNED slices (`1..myDim_*`); at npes==1 owned==global so the existing 1-rank gate is untouched.
+- **Owned-entry geometry needs ONLY the element-CENTER halo exchange — not the area or nod_in_elem2D machinery.**
+  The one place an OWNED quantity reads a HALO value is `edge_cross_dxdy`: an owned edge can border a halo (eDim)
+  element whose center it needs, and `elem2D_nodes` is stored OWNED-only (so `elem_center` can't run on a halo
+  element). FESOM2 solves this by precomputing owned element centers and `exchange_elem`-ing them
+  (oce_mesh.F90:2528-2529); `edge_cross_dxdy` then reads the exchanged center array, never `elem_center` on a
+  halo. Everything else owned is local: owned-node `area` sums over owned adjacent elements (the partition
+  guarantees an owned node's full element-neighbourhood is owned), so FESOM2's `exchange_nod(area)` and the
+  `find_neighbors` nod_in_elem2D halo dance only fix HALO entries (which the owned gate doesn't compare). Defer
+  them until the dynamics actually consume halos (M2.12b) — don't build machinery the current gate can't exercise.
+- **File-read arrays fill owned+halo for free; computed arrays need the exchange.** Because the remap reads the
+  GLOBAL files, `coord_nod2D`/`nlevels`/`nlevels_nod2D`/`depth` can be scattered to BOTH owned and halo local
+  slots directly (no exchange). Only COMPUTED geometry (centers/elem_cos) needs a halo exchange. `elem2D_nodes`
+  is the exception — stored owned-only, since a halo element's nodes may not all be local.
+- **MP vs WP in the exchange.** Mesh arrays are `MP=max(WP,4)`; `exchange_elem` takes `WP`. At dp/sp `MP==WP` so
+  it compiles, but route `elem_cos` (MP) through a `WP` scratch to stay correct if a future build has `MP/=WP`
+  (NVHPC half). Element centers are kept `WP` and exchanged directly.
+- **`enforce_cw_orientation` is per-element deterministic → consistent across ranks** (a function of the element's
+  node coords only), so the swap decision is identical on every rank with no communication. Closes the deferred
+  multi-rank CW-swap caveat (pi had 0 swaps at 1-rank; the swap path was first exercised on CORE2 at M2.11a).

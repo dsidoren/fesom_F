@@ -10,21 +10,34 @@ module mod_geom_dump
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use mod_precision, only: WP, MP
     use mod_mesh,      only: t_mesh
+    use mod_partit,    only: t_partit
     implicit none
     private
     public :: geom_dump_write
 
 contains
 
-    subroutine geom_dump_write(mesh, path)
+    subroutine geom_dump_write(mesh, partit, path)
+        ! M2.12a: dump per-rank LOCAL OWNED arrays (1..myDim_*), mirroring the FESOM2
+        ! oracle shim (src/fesom_geom_dump.F90). At npes==1 the owned counts equal the
+        ! global counts and the path is unchanged, so the proven 1-rank geom gate is
+        ! byte-for-byte unaffected; at npes>1 each rank writes <path>.<mype5>.
         type(t_mesh),     intent(in) :: mesh
+        type(t_partit),   intent(in) :: partit
         character(len=*), intent(in) :: path
+        character(len=6)  :: rsuf
+        character(len=:), allocatable :: fpath
         integer :: u, ios, ne, nn, n2, nl
-        ne = mesh%elem2D; nn = mesh%nod2D; n2 = mesh%edge2D; nl = mesh%nl
-        open(newunit=u, file=trim(path), status='replace', form='unformatted', &
+        ne = partit%myDim_elem2D; nn = partit%myDim_nod2D; n2 = partit%myDim_edge2D; nl = mesh%nl
+        fpath = trim(path)
+        if (partit%npes /= 1) then
+            write(rsuf,'(i5.5)') partit%mype
+            fpath = trim(path)//'.'//rsuf
+        end if
+        open(newunit=u, file=fpath, status='replace', form='unformatted', &
              access='stream', action='write', iostat=ios)
         if (ios /= 0) then
-            write(*,'(a)') 'geom_dump_write: cannot open '//trim(path); error stop 1
+            write(*,'(a)') 'geom_dump_write: cannot open '//fpath; error stop 1
         end if
         write(u) 'FGEOMDMP'
         write(u) int(nn,int32), int(ne,int32), int(n2,int32), int(nl,int32)
@@ -48,7 +61,7 @@ contains
         call wr_i1(u, 'nlevels_nod2D',     mesh%nlevels_nod2D(1:nn))
         call wr_i1(u, 'nlevels_nod2D_min', mesh%nlevels_nod2D_min(1:nn))
         close(u)
-        write(*,'(a)') 'geom_dump_write: wrote '//trim(path)
+        write(*,'(a,i0,a)') 'geom_dump_write: rank ', partit%mype, ' wrote '//fpath
     end subroutine geom_dump_write
 
     subroutine wr_r1(u, name, a)

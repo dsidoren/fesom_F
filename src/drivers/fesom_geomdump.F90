@@ -11,7 +11,7 @@ program fesom_geomdump
     use mod_precision,    only: WP
     use mod_mesh,         only: t_mesh
     use mod_partit,       only: t_partit
-    use mod_partitioning, only: par_init, par_ex
+    use mod_partitioning, only: par_init, par_ex, set_partition
     use mod_mesh_read,    only: read_mesh
     use mod_mesh_areas,   only: compute_geometry
     use mod_geom_dump,    only: geom_dump_write
@@ -28,17 +28,17 @@ program fesom_geomdump
     if (len_trim(out_path) == 0) out_path = 'geom_f3.bin'
 
     call par_init(partit)
-    if (partit%npes /= 1) then
-        if (partit%mype == 0) write(*,'(a)') 'fesom_geomdump: requires 1 rank'
-        call par_ex(partit%MPI_COMM_FESOM, partit%mype); error stop 1
-    end if
+    ! Populate the partition (myList_* + com-structs): identity synthesis at npes==1,
+    ! dist_<npes>/ read at npes>1. read_mesh then builds the LOCAL mesh (M2.12a).
+    call set_partition(partit, trim(mesh_dir))
 
     call read_mesh(mesh, partit, trim(mesh_dir), 50.0_WP, 15.0_WP, -90.0_WP, 360.0_WP, &
                    force_rotation=.true., n_cw_swaps=nsw)
     call compute_geometry(mesh, partit, cartesian=.false.)
-    write(*,'(a,i0,a,i0,a,i0,a,i0)') 'fesom_geomdump: nod2D=', mesh%nod2D, &
+    if (partit%mype == 0) &
+        write(*,'(a,i0,a,i0,a,i0,a,i0)') 'fesom_geomdump: nod2D=', mesh%nod2D, &
         ' elem2D=', mesh%elem2D, ' edge2D=', mesh%edge2D, ' nl=', mesh%nl
-    write(*,'(a,i0)') 'fesom_geomdump: CW swaps = ', nsw
-    call geom_dump_write(mesh, trim(out_path))
+    write(*,'(a,i0,a,i0)') 'fesom_geomdump: rank ', partit%mype, ' CW swaps = ', nsw
+    call geom_dump_write(mesh, partit, trim(out_path))
     call par_ex(partit%MPI_COMM_FESOM, partit%mype)
 end program fesom_geomdump
