@@ -343,12 +343,18 @@ contains
         end do
         close(u)
 
-        deallocate(imap_nod, imap_elem, imap_edge)
+        deallocate(imap_nod, imap_edge)
 
         ! ---- topology + orientation + vertical structure (LOCAL) ----
         call build_nod_in_elem_local(mesh, partit)
+        ! M2.12b: complete nod_in_elem2D for HALO nodes (the find_neighbors halo dance)
+        ! — needed by MUSCL fill_up_dn_grad / find_up_downwind_triangles, which read a
+        ! halo node's full element list (reaching eXDim). imap_elem is the full-halo
+        ! global->local inverse map (1..nElemF) used to re-localize.
+        call complete_nod_in_elem_halo(mesh, partit, imap_elem)
         call enforce_cw_orientation(mesh, n_cw_swaps, nelem=nElemO)
         call setup_vertical_local(mesh, partit)
+        deallocate(imap_elem)
     end subroutine read_mesh_local
 
     subroutine build_nod_in_elem_local(mesh, partit)
@@ -387,6 +393,48 @@ contains
             end do
         end do
     end subroutine build_nod_in_elem_local
+
+    subroutine complete_nod_in_elem_halo(mesh, partit, imap_elem)
+        ! M2.12b find_neighbors halo dance (FESOM2 oce_mesh.F90:2051-2074). On entry
+        ! nod_in_elem2D holds LOCAL element indices for OWNED nodes only (halo nodes
+        ! empty, build_nod_in_elem_local). Completes it for HALO nodes:
+        !   (1) exchange_nod the per-node count (owner -> halo);
+        !   (2) per slot: convert OWNED entries local->GLOBAL, exchange owner->halo,
+        !       store back (now GLOBAL on owned+halo);
+        !   (3) re-localize every entry GLOBAL->LOCAL via the full-halo inverse map
+        !       imap_elem (covers myDim+eDim+eXDim). The eXDim element halo guarantees
+        !       a halo node's full element neighbourhood is local, so imap_elem(g)>0.
+        ! After this every owned+halo node's element list is LOCAL and complete.
+        type(t_mesh),   intent(inout) :: mesh
+        type(t_partit), intent(in)    :: partit
+        integer,        intent(in)    :: imap_elem(:)
+        integer :: slot, n, kmax, g, nNodO, nNodL
+        integer, allocatable :: temp_i(:)
+        nNodO = partit%myDim_nod2D
+        nNodL = partit%myDim_nod2D + partit%eDim_nod2D
+        ! (1) per-node element count owner -> halo
+        call exchange_nod(mesh%nod_in_elem2D_num, partit)
+        ! (2) per slot: local id -> global on owned, exchange, store back (global on all)
+        kmax = size(mesh%nod_in_elem2D, 1)
+        allocate(temp_i(nNodL))
+        do slot = 1, kmax
+            temp_i = 0
+            do n = 1, nNodO
+                if (mesh%nod_in_elem2D(slot, n) > 0) &
+                    temp_i(n) = partit%myList_elem2D(mesh%nod_in_elem2D(slot, n))
+            end do
+            call exchange_nod(temp_i, partit)
+            mesh%nod_in_elem2D(slot, :) = temp_i
+        end do
+        deallocate(temp_i)
+        ! (3) re-localize global -> local through the full-halo inverse map (eXDim)
+        do n = 1, nNodL
+            do slot = 1, mesh%nod_in_elem2D_num(n)
+                g = mesh%nod_in_elem2D(slot, n)
+                if (g > 0) mesh%nod_in_elem2D(slot, n) = imap_elem(g)
+            end do
+        end do
+    end subroutine complete_nod_in_elem_halo
 
     subroutine setup_vertical_local(mesh, partit)
         ! Local vertical structure (FESOM2 oce_mesh.F90:1656-1670 + setup). ulevels=1

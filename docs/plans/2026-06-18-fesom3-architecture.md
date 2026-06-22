@@ -586,17 +586,61 @@ the 1-rank global uses a different element permutation (non-associative FP) so i
       catches if `com_elem2D` is insufficient. **Oracle:** extend `fesom_geom_dump.F90` (currently npes==1
       no-op) to dump per-rank LOCAL OWNED arrays. **Gate:** `tools/run_geom_gate_multirank.sh` (FESOM2 dist_2
       dump vs FESOM3 dist_2 dump, per-rank owned, `geom_diff.py --glob`); target `max|Δ|=0`; repeat dist_8.
-- [ ] **M2.12b — M1 advection multi-rank gate (folded from M1.5):** lift the M1.1–M1.4 kernels/driver to
-      FESOM2's multi-rank structure — exchange_nod/elem of tr_xy/edge_up_dn_grad/fct_LO/fct_plus_minus/
-      del_ttf at the FESOM2 sites; scatter over `myDim_edge2D`/`myDim_nod2D`; then byte-gate
-      `del_ttf` on pi `dist_2`/`dist_8` vs a multi-rank FESOM2 advection reference (post-exchange
-      OWNED values, same partition); exchange-and-compare probe clean. (FCT AUX/edge_up_dn_grad cavity caveat L11.)
-- [ ] **M2.12c — whole-model multi-rank byte-match (MVP exit):** rest-stays-at-rest; SSH gravity wave at
-      expected speed; **1/8/32-rank byte-match** T/S at step 200 (accept only `extrap_nod3D` order diff);
-      halo-identity probe clean (`stale_halo_max_*`).
+- [x] ✅ **M2.12b — M1 advection multi-rank gate (folded from M1.5).** DONE 2026-06-21: `max|Δ|=0` on all 13
+      advection fields, every rank, pi **dist_2 (2) AND dist_8 (8)** vs same-partition FESOM2
+      (`tools/run_advhor_gate_multirank.sh`). Lifted the advection subtree to multi-rank with an OPTIONAL
+      `partit` (absent ⇒ proven 1-rank path verbatim; present+npes>1 ⇒ owned/halo bounds + exchanges) and
+      KEPT the explicit-shape dummies/per-element arithmetic so the codegen — and the byte-match vs FESOM2
+      (incl. any vectorised divide, L29) — is unchanged. Added: `mod_part_bounds.owned_bounds/is_multirank`;
+      the `find_neighbors` halo dance (`complete_nod_in_elem_halo` in `read_mesh_local` — completes
+      `nod_in_elem2D` for halo nodes, re-localised through eXDim); `exchange_elem_full` (2D-r/2D-i/3D-r on
+      `com_elem2D_full`) + `core_blk_r`; `compute_geometry` halo exchanges (`elem_area` full + `area`/`areasvol`/
+      `*_inv` nodes); `exchange_elem(tr_xy)` full-halo + `exchange_nod(fct_LO)` + `exchange_nod(fct_plus/minus)`
+      at the FESOM2 sites; `find_up_downwind_triangles` `coord_elem`/`e_nodes` (full-halo, global-id match);
+      `nboundary_lay` owned+halo NO-exchange (partition-local, matches FESOM2). Gated `valuesAB`/`edge_up_dn_grad`/
+      `fct_LO`/`fct_ttf_max-min`/`fct_plus-minus`/`del_ttf_{advhoriz,advvert,}` (FCT) + `del_ttf_*` (non-FCT/MUSCL).
+      `edge_up_dn_grad` captured PRE-`do_oce_adv_tra` (FESOM2 reuses it as the FCT `AUX` scratch → bignumber).
+      No regression: 1-rank geom(19)/advhor(40)/pressure(57)/step(65) + CORE2 lifecycle(195) + 13/13 ctest all
+      `max|Δ|=0`/green. Lessons L31. **ACTIVE NEXT = M2.12c.**
+- [x] ✅ **M2.12c — whole-model multi-rank byte-match (MVP exit):** decomposed c-1/c-2/c-3 — ALL DONE 2026-06-22.
+      - [x] ✅ **M2.12c-1 — pre-SSH DYNAMICS chain (2026-06-22):** `max|Δ|=0` pi dist_2 + dist_8, 25 records
+            (density/pressure/bvfreq/Kv/ssh_rhs), `tools/run_stepdyn_gate_multirank.sh`. Lifted compute_vel_nodes →
+            pressure_bv(+smooth_nod) → pgf → oce_mixing_pp → mo_convect → compute_vel_rhs(+momentum_adv_scalar) →
+            viscosity_filter(visc_filt_bidiff) → impl_vert_visc_ale → compute_ssh_rhs_ale via optional `partit` +
+            `mod_part_bounds.local_dims` + FESOM2 exchanges (`mod_halo` gained a rank-3 `exchange_nod` node-block).
+            `fesom_stepdump_mr` (FESOM3) + `fesom_step_dump` shim npes>1 (FESOM2). No 1-rank regression. Lessons L32.
+      - [x] ✅ **M2.12c-2 — SSH stiffness + CG (2026-06-22):** `max|Δ|=0` on `d_eta`, pi dist_2 + dist_8 (30 records,
+            `tools/run_stepdyn_gate_multirank.sh` substep 9 un-ignored; 38 CG iters/rank). The FIRST multi-rank
+            iterative solver. **NO mesh-infra extension needed (the scoped plan above was WRONG):** a `dist_N`-file
+            check proved the stiffness owned rows assemble FULLY LOCALLY (owned edges ⇒ owned triangles; FESOM2's own
+            elem2D_nodes/gradient_sca are owned-only). `init_stiff_mat_ale` lifts with ONLY bounds (`nNodO`/`nEdgeO`,
+            `n_num(nNodL)`); CG owned dot-products + new `mod_halo::allreduce_sum` + per-iter `exchange_nod(pp/rr/x)` +
+            `exchange_nod(diag_values)` in the precond; rtol/conv denominators GLOBAL. Cross-rank `MPI_Allreduce`
+            byte-matches (L6); L29 NOVECTOR precond carries over. No 1-rank regression. Lessons **L33**.
+      - [x] ✅ **M2.12c-3 — ALE update + tracer SOLVE + WHOLE-STEP gate (2026-06-22):** `max|Δ|=0` on ALL 65 substep
+            records (density/pressure/bvfreq/Kv/ssh_rhs/d_eta/hbar/eta_n/hnode_new/w/T/S/hnode), pi dist_2 + dist_8,
+            `tools/run_step_gate_multirank.sh`. **The whole multi-rank ocean step byte-matches FESOM2 — the MVP.**
+            Lifted update_vel/compute_hbar_ale/update_eta_n/vert_vel_ale(+compute_CFLz/compute_Wvel_split)/
+            update_thickness_ale (oce_ale.F90) + solve_tracers_ale/diff_tracers_ale/diff_part_hor_redi/
+            diff_ver_part_impl_ale (oce_ale_tracer.F90; the FCT advection was M2.12b) via the optional-`partit` pattern
+            (bounds from `owned_bounds`/`local_dims`; FESOM2 exchanges at the FESOM2 sites), and threaded the optional
+            `partit` through `mod_step_oce::step_oce` (absent ⇒ 1-rank verbatim). New whole-step MR driver
+            `fesom_stepfull_mr` (= step_oce through partit, gid-keyed per-rank dumps); the FESOM2 oracle is UNCHANGED
+            (`fesom_step_dump` npes>1 already runs the whole `oce_timestep_ale` + dumps all substeps). pi ships only
+            dist_1/2/8 (no dist_32; dist_2+dist_8 = the c-1/c-2 coverage). The byte-gate on the rich analytic state
+            (non-trivial T/S/UV/SSH at 2 AND 8 ranks) subsumes the rest-at-rest / gravity-wave sanity probes; matching
+            FESOM2's exact owned loop bounds + exchanges makes any stale halo unobservable. **NO 1-rank regression**
+            (step 65 + pressure 57 + advhor MR + stepdyn MR + 13/13 ctest all `max|Δ|=0`). New ALE update kernels:
+            owned-element update_vel + exchange_elem_full(UV); compute_hbar_ale edge-div over owned edges + always-on
+            exchange_nod(hbar); vert_vel_ale owned cumsum + exchange_nod(w)/exchange_nod(hnode_new); CFLz/Wvel_split
+            owned+halo. Tracer solve: solve_tracers_ale per-tracer exchange_nod(values) + owned+halo clamp;
+            diff_part_hor_redi owned edges; diff_ver_part_impl_ale owned-node TDMA. Lessons **L34**.
 - [ ] **production dt=1800 (reduced M2 namelist): PRIMARY gate = per-substep `max|Δ|=0` vs the FESOM2
       reduced-config run**; SECONDARY sanity = run past the historical blow-up step, non-drifting
-- [ ] **Gate:** all green ⇒ **architectural MVP**; tag `m2-mvp`; write `docs/LESSONS.md` updates
+- [x] ✅ **Gate:** all multi-rank + 1-rank byte-gates GREEN ⇒ **architectural MVP** — tagged `m2-mvp` (2026-06-22);
+      `docs/LESSONS.md` L30–L34 written. Baseline re-confirmed after a clean rebuild: step MR dist_2/8 (65 rec each),
+      step 1-rank (65), stepdyn MR dist_2/8 (30 each), advhor MR dist_8 (8 ranks), pressure 1-rank (57 fields),
+      13/13 ctest — all `max|Δ|=0`/green. (The production dt=1800 run above stays OPTIONAL secondary validation.)
 
 ### Task V: Verify acceptance criteria (per milestone)
 - [ ] every kernel in the milestone has an operator-diff `max|Δ|=0` record

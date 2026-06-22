@@ -42,6 +42,8 @@ module oce_ale_mixing_pp
     use mod_dyn,        only: t_dyn
     use mod_constants,  only: rad
     use mod_param_phys, only: mix_coeff_PP, A_ver, K_ver, Kv0_const
+    use mod_partit,     only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
     public :: oce_mixing_pp, Kv0_background_qiang, Kv0_background
@@ -49,10 +51,18 @@ module oce_ale_mixing_pp
 contains
 
     !===========================================================================
-    subroutine oce_mixing_pp(dyn, mesh)
+    subroutine oce_mixing_pp(dyn, mesh, partit)
+        ! M2.12c: optional partit -> the FESOM2 bounds (oce_ale_mixing_pp.F90): the two
+        ! node passes run 1..myDim_nod2D+eDim_nod2D (the elem pass reads the factor at the
+        ! element's 3 corner nodes, which can be halo, so the factor must be valid on the
+        ! halo — uvnode is halo-exchanged by compute_vel_nodes, bvfreq computed on the
+        ! halo by pressure_bv, so no exchange is needed here); the elem pass runs
+        ! 1..myDim_elem2D (Av is consumed at owned elements by impl_vert_visc_ale).
         type(t_mesh), intent(in)            :: mesh
         type(t_dyn),  intent(inout), target :: dyn
+        type(t_partit), intent(in), optional :: partit
         integer       :: node, nz, nzmax, nzmin, elem, elnodes(3)
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: dz_inv, shear, Kv0_b
         real(kind=WP), dimension(:,:,:), pointer :: UVnode
         real(kind=WP), dimension(:,:),   pointer :: Kv, Av, bvfreq
@@ -61,10 +71,11 @@ contains
         Kv     => dyn%work%Kv
         Av     => dyn%work%Av
         bvfreq => dyn%work%bvfreq
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         !_______________________________________________________________________
         ! Richardson mixing factor (stored temporarily in Kv).
-        do node = 1, mesh%nod2D
+        do node = 1, nNodL
             nzmin = mesh%ulevels_nod2D(node)
             nzmax = mesh%nlevels_nod2D(node)
             ! ALE: changing zlevel at every node (Z_3d_n is per-node).
@@ -79,7 +90,7 @@ contains
 
         !_______________________________________________________________________
         ! viscosity (elements): Av = mix_coeff_PP*mean(factor^2) + A_ver.
-        do elem = 1, mesh%elem2D
+        do elem = 1, nElemO
             elnodes = mesh%elem2D_nodes(1:3,elem)
             nzmin = mesh%ulevels(elem)
             nzmax = mesh%nlevels(elem)
@@ -90,7 +101,7 @@ contains
 
         !_______________________________________________________________________
         ! diffusivity (nodes): Kv = mix_coeff_PP*factor^3 + Kv0.
-        do node = 1, mesh%nod2D
+        do node = 1, nNodL
             nzmin = mesh%ulevels_nod2D(node)
             nzmax = mesh%nlevels_nod2D(node)
             !___________________________________________________________________

@@ -31,25 +31,34 @@ module oce_mo_conv
     use mod_mesh,       only: t_mesh
     use mod_dyn,        only: t_dyn
     use mod_param_phys, only: use_instabmix, instabmix_kv, use_windmix, windmix_kv, windmix_nl
+    use mod_partit,     only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
     public :: mo_convect
 
 contains
 
-    subroutine mo_convect(dyn, mesh)
+    subroutine mo_convect(dyn, mesh, partit)
+        ! M2.12c: optional partit -> the FESOM2 bounds (oce_mo_conv.F90): the node pass
+        ! runs 1..myDim_nod2D+eDim_nod2D (the elem pass reads bvfreq at the element's 3
+        ! corner nodes, halo-valid from pressure_bv, so no exchange) and the elem pass
+        ! runs 1..myDim_elem2D (Av consumed at owned elements).
         type(t_mesh), intent(in)            :: mesh
         type(t_dyn),  intent(inout), target :: dyn
+        type(t_partit), intent(in), optional :: partit
         integer       :: node, elem, nz, nzmin, nzmax, elnodes(3)
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP), dimension(:,:), pointer :: Kv, Av, bvfreq
 
         Kv     => dyn%work%Kv
         Av     => dyn%work%Av
         bvfreq => dyn%work%bvfreq
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         !_______________________________________________________________________
         ! enhance vertical DIFFUSIVITY (nodes): convective adjustment + wind mixing.
-        do node = 1, mesh%nod2D
+        do node = 1, nNodL
             nzmax = mesh%nlevels_nod2D(node)
             nzmin = mesh%ulevels_nod2D(node)
             do nz = nzmin+1, nzmax-1
@@ -65,7 +74,7 @@ contains
         !_______________________________________________________________________
         ! enhance vertical VISCOSITY (elements): convective adjustment + wind mixing.
         ! (the use_momix Monin-Obukhov viscosity term is DEFERRED to M2.10 — see header.)
-        do elem = 1, mesh%elem2D
+        do elem = 1, nElemO
             elnodes = mesh%elem2D_nodes(1:3,elem)
             nzmax = mesh%nlevels(elem)
             nzmin = mesh%ulevels(elem)

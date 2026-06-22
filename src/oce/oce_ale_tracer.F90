@@ -29,6 +29,9 @@ module oce_ale_tracer
     use mod_mesh,           only: t_mesh
     use mod_dyn,            only: t_dyn
     use mod_tracer,         only: t_tracer
+    use mod_partit,         only: t_partit
+    use mod_part_bounds,    only: owned_bounds, is_multirank, local_dims
+    use mod_halo,           only: exchange_nod
     use oce_tracer_mod,     only: init_tracers_AB
     use oce_tracer_grad,    only: tracer_gradient_elements
     use oce_adv_tra_driver, only: do_oce_adv_tra
@@ -54,21 +57,26 @@ contains
         end do
     end subroutine adv_tracers_ale
 
-    subroutine advect_tracer(dt, tr_num, dynamics, tracers, mesh)
+    subroutine advect_tracer(dt, tr_num, dynamics, tracers, mesh, partit)
         ! One tracer's advection contribution to del_ttf (FESOM2 adv_tracers_ale body).
+        ! M2.12b: optional partit threaded to init_tracers_AB / do_oce_adv_tra; the
+        ! del_ttf accumulation runs over OWNED nodes (the gated tendency).
         real(kind=WP),  intent(in)            :: dt
         integer,        intent(in)            :: tr_num
         type(t_mesh),   intent(in)            :: mesh
         type(t_dyn),    intent(inout), target :: dynamics
         type(t_tracer), intent(inout)         :: tracers
+        type(t_partit), intent(in), optional  :: partit
         integer :: n
+        integer :: nNodO, nNodL, nEdgeO, nElemO
 
-        call init_tracers_AB(tr_num, tracers, mesh)
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        call init_tracers_AB(tr_num, tracers, mesh, partit)
         call do_oce_adv_tra(dt, dynamics%uv, dynamics%w, dynamics%w_i, dynamics%w_e, &
-                            tr_num, dynamics, tracers, mesh)
+                            tr_num, dynamics, tracers, mesh, partit)
         ! total tracer tendency = horizontal + vertical advection (del_ttf was zeroed
         ! in init_tracers_AB).
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             tracers%work%del_ttf(:, n) = tracers%work%del_ttf(:, n) &
                                        + tracers%work%del_ttf_advhoriz(:, n) &
                                        + tracers%work%del_ttf_advvert(:, n)
@@ -78,7 +86,7 @@ contains
     !===========================================================================
     subroutine solve_tracers_ale(dt, dynamics, tracers, mesh, Ki, &
                                  heat_flux, water_flux, virtual_salt, relax_salt, &
-                                 real_salt_flux, is_nonlinfs)
+                                 real_salt_flux, is_nonlinfs, partit)
         ! FESOM2 oce_ale_tracer.F90:135-331, the pi / reduced-M2 path: the full per-tracer
         ! solve the ocean step (M2.9b) calls. Per tracer, in order:
         !   advect_tracer    -> init_tracers_AB (zeros del_ttf, AB-interpolate valuesAB,
@@ -104,27 +112,38 @@ contains
         real(kind=WP),  intent(in)            :: heat_flux(mesh%nod2D), water_flux(mesh%nod2D)
         real(kind=WP),  intent(in)            :: virtual_salt(mesh%nod2D), relax_salt(mesh%nod2D)
         real(kind=WP),  intent(in)            :: real_salt_flux(mesh%nod2D), is_nonlinfs
+        type(t_partit), intent(in), optional  :: partit
         integer :: tr_num, node, nzmin, nzmax
+        integer :: nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF
         real(kind=WP), allocatable :: tr_xy(:,:,:)
         real(kind=WP), dimension(:,:), pointer :: Svalues
 
-        allocate(tr_xy(2, mesh%nl-1, mesh%elem2D))
+        ! M2.12c-3: tr_xy is sized to the LOCAL element count (mesh%elem2D holds the GLOBAL
+        ! count in the partitioned mesh). tracer_gradient_elements writes OWNED elements;
+        ! diff_part_hor_redi reads tr_xy only at the (owned) triangles of owned edges.
+        call local_dims(mesh, partit, nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF)
+        allocate(tr_xy(2, mesh%nl-1, nElemF))
 
         do tr_num = 1, tracers%num_tracers
             ! advection: del_ttf = advhoriz + advvert (del_ttf zeroed in init_tracers_AB)
-            call advect_tracer(dt, tr_num, dynamics, tracers, mesh)
+            call advect_tracer(dt, tr_num, dynamics, tracers, mesh, partit)
             ! elemental gradient of the pre-diffusion tracer (advection left values = T^n)
-            call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh)
+            call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh, partit)
             ! horizontal diffusion + ALE reconstruct + implicit vertical-diffusion TDMA
             call diff_tracers_ale(tr_num, dt, dynamics, tracers, mesh, tr_xy, Ki, &
                                   heat_flux, water_flux, virtual_salt, relax_salt, &
-                                  real_salt_flux, is_nonlinfs)
-            ! relax_to_clim (clim_relax=0): no-op; exchange_nod(values): 1-rank no-op
+                                  real_salt_flux, is_nonlinfs, partit)
+            ! relax_to_clim (clim_relax=0): no-op. exchange_nod(values) (FESOM2 :268): the
+            ! owned values are complete (diff over owned nodes/edges); this fills the halo
+            ! for the NEXT step's init_tracers_AB / advection (and for the salinity clamp's
+            ! owned+halo loop below).
+            if (is_multirank(partit)) call exchange_nod(tracers%data(tr_num)%values, partit)
         end do
 
-        ! salinity clamp (tracer 2 = salinity, FESOM2 :304-316): S in [3, 45]
+        ! salinity clamp (tracer 2 = salinity, FESOM2 :304-316): S in [3, 45], owned+halo
+        ! (the clamp is per-node idempotent, so the owned values match the 1-rank result).
         Svalues => tracers%data(2)%values
-        do node = 1, mesh%nod2D
+        do node = 1, nNodL
             nzmax = mesh%nlevels_nod2D(node) - 1
             nzmin = mesh%ulevels_nod2D(node)
             where (Svalues(nzmin:nzmax,node) > 45.0_WP) Svalues(nzmin:nzmax,node) = 45.0_WP
@@ -137,7 +156,7 @@ contains
     !===========================================================================
     subroutine diff_tracers_ale(tr_num, dt, dynamics, tracers, mesh, tr_xy, Ki, &
                                 heat_flux, water_flux, virtual_salt, relax_salt, &
-                                real_salt_flux, is_nonlinfs)
+                                real_salt_flux, is_nonlinfs, partit)
         ! Per-tracer diffusion + ALE tracer reconstruct (FESOM2 oce_ale_tracer.F90:335-491,
         ! Redi=.false. / i_vert_diff=.true. / PP path). del_ttf enters with the advection
         ! tendency; this routine adds horizontal diffusion, reconstructs the new tracer
@@ -156,15 +175,18 @@ contains
         real(kind=WP),  intent(in)            :: heat_flux(mesh%nod2D), water_flux(mesh%nod2D)
         real(kind=WP),  intent(in)            :: virtual_salt(mesh%nod2D), relax_salt(mesh%nod2D)
         real(kind=WP),  intent(in)            :: real_salt_flux(mesh%nod2D), is_nonlinfs
+        type(t_partit), intent(in), optional  :: partit
         integer :: n, nzmin, nzmax
+        integer :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP), dimension(:,:), pointer :: trarr
         real(kind=MP), dimension(:,:), pointer :: del_ttf
 
         trarr   => tracers%data(tr_num)%values
         del_ttf => tracers%work%del_ttf
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         ! horizontal diffusion: del_ttf += R_T^n (Redi=.false. -> plain Laplacian)
-        call diff_part_hor_redi(tr_xy, Ki, dt, tracers, mesh)
+        call diff_part_hor_redi(tr_xy, Ki, dt, tracers, mesh, partit)
 
         ! explicit vertical diffusion (diff_ver_part_expl_ale) is skipped: i_vert_diff=.true.
         ! Redi vertical projection (diff_ver_part_redi_expl) is skipped: Redi=.false.
@@ -173,7 +195,11 @@ contains
         ! ALE tracer reconstruct: T* = (dt*R_T^n + h^{n-0.5}*T^{n-0.5})/h^{n+0.5}
         ! (FESOM2 :464-477). For linfs hnode_new==hnode so the (hnode-hnode_new) term
         ! vanishes and this collapses to T* = T + del_ttf/hnode.
-        do n = 1, mesh%nod2D
+        ! M2.12c-3: OWNED node loop (FESOM2 :465 do n=1, myDim_nod2D); del_ttf at owned nodes
+        ! is complete (advection over owned nodes + diff_part_hor_redi over owned edges, both
+        ! invariant-i complete), so T* is correct at owned nodes — the halo is filled by
+        ! solve_tracers_ale's exchange_nod(values).
+        do n = 1, nNodO
             nzmax = mesh%nlevels_nod2D(n) - 1
             nzmin = mesh%ulevels_nod2D(n)
             del_ttf(nzmin:nzmax,n) = del_ttf(nzmin:nzmax,n) + trarr(nzmin:nzmax,n)* &
@@ -186,33 +212,41 @@ contains
         ! implicit vertical diffusion (i_vert_diff=.true.): the TDMA, consumes dyn%work%Kv
         call diff_ver_part_impl_ale(tr_num, dt, dynamics, tracers, mesh, &
                                     heat_flux, water_flux, virtual_salt, relax_salt, &
-                                    real_salt_flux, is_nonlinfs)
+                                    real_salt_flux, is_nonlinfs, partit)
 
         ! biharmonic tracer diffusion (diff_part_bh) is skipped: smooth_bh_tra=.false.
     end subroutine diff_tracers_ale
 
     !===========================================================================
-    subroutine diff_part_hor_redi(tr_xy, Ki, dt, tracers, mesh)
+    subroutine diff_part_hor_redi(tr_xy, Ki, dt, tracers, mesh, partit)
         ! Horizontal tracer diffusion, Redi=.false. branch of FESOM2 oce_ale_tracer.F90:1173.
         ! Edge-based flux form: across each edge the diffusive flux Kh*(Tx,Ty) (Kh = mean of
         ! the two edge-node diffusivities Ki, (Tx,Ty) = elemental tracer gradient tr_xy)
         ! crossing the edge mid-faces (edge_cross_dxdy) is scattered, with opposite sign, into
         ! del_ttf at the two edge nodes. The Redi isoneutral-slope terms (slope_tapered/tr_z,
         ! x isredi) vanish for Redi=off; they are deferred to a future Redi gate.
+        ! M2.12c-3: optional partit -> OWNED edge loop (FESOM2 :1208 do edge=1, myDim_edge2D).
+        ! For owned edges both triangles are owned (invariant ii) so tr_xy/helem read in the
+        ! owned-only element range; Ki/areasvol are read at the edge's two nodes (one may be a
+        ! halo node — Ki is prescribed owned+halo, areasvol is M2.12b-exchanged). The owned-
+        ! node del_ttf scatter is complete (invariant i).
         type(t_tracer), intent(inout), target :: tracers
         type(t_mesh),   intent(in),    target :: mesh
         real(kind=WP),  intent(in)            :: tr_xy(2, mesh%nl-1, mesh%elem2D)
         real(kind=WP),  intent(in)            :: Ki(mesh%nl-1, mesh%nod2D)
         real(kind=WP),  intent(in)            :: dt
+        type(t_partit), intent(in), optional  :: partit
         integer :: edge, nz, el(2), enodes(2)
         integer :: nl1, ul1, nl2, ul2, nl12, ul12
+        integer :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, c, Fx, Fy, Tx, Ty, Kh, dz
         real(kind=WP) :: rhs1(mesh%nl-1), rhs2(mesh%nl-1)
         real(kind=MP), dimension(:,:), pointer :: del_ttf
 
         del_ttf => tracers%work%del_ttf
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
-        do edge = 1, mesh%edge2D
+        do edge = 1, nEdgeO
             rhs1 = 0.0_WP
             rhs2 = 0.0_WP
             deltaX1 = mesh%edge_cross_dxdy(1,edge)
@@ -298,7 +332,7 @@ contains
     !===========================================================================
     subroutine diff_ver_part_impl_ale(tr_num, dt, dynamics, tracers, mesh, &
                                       heat_flux, water_flux, virtual_salt, relax_salt, &
-                                      real_salt_flux, is_nonlinfs)
+                                      real_salt_flux, is_nonlinfs, partit)
         ! Implicit vertical tracer diffusion (FESOM2 oce_ale_tracer.F90:562-1082), the
         ! Redi=.false. / PP path. Per node it builds the tridiagonal system for the implicit
         ! vertical-diffusion increment dTnew = T^{n+0.5} - T*, with the vertical diffusivity
@@ -318,11 +352,13 @@ contains
         real(kind=WP),  intent(in)            :: heat_flux(mesh%nod2D), water_flux(mesh%nod2D)
         real(kind=WP),  intent(in)            :: virtual_salt(mesh%nod2D), relax_salt(mesh%nod2D)
         real(kind=WP),  intent(in)            :: real_salt_flux(mesh%nod2D), is_nonlinfs
+        type(t_partit), intent(in), optional  :: partit
         !
         real(kind=WP) :: a(mesh%nl), b(mesh%nl), c(mesh%nl), tr(mesh%nl)
         real(kind=WP) :: cp(mesh%nl), tp(mesh%nl)
         real(kind=WP) :: zbar_n(mesh%nl), Z_n(mesh%nl-1)
         integer       :: nz, n, nzmax, nzmin, id
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: m, zinv, dz, zinv1, zinv2, v_adv
         logical       :: do_wimpl
         real(kind=WP), dimension(:,:), pointer :: trarr, Wvel_i
@@ -330,13 +366,18 @@ contains
         trarr  => tracers%data(tr_num)%values
         Wvel_i => dynamics%w_i
         id     =  tracers%data(tr_num)%ID
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         ! FCT tracers (or no wsplit) -> implicit vertical advection off
         do_wimpl = .true.
         if ((trim(tracers%data(tr_num)%tra_adv_lim) == 'FCT') .or. (.not. dynamics%use_wsplit)) &
             do_wimpl = .false.
 
-        do n = 1, mesh%nod2D
+        ! M2.12c-3: OWNED node loop (FESOM2 :726 do n=1, myDim_nod2D). The TDMA is per-column
+        ! (no halo coupling); each owned column reads its own Kv/hnode_new/area/areasvol + the
+        ! prescribed surface fluxes at n, and updates trarr at owned nodes. The halo values
+        ! are filled by solve_tracers_ale's exchange_nod(values).
+        do n = 1, nNodO
             a  = 0.0_WP; b = 0.0_WP; c = 0.0_WP; tr = 0.0_WP; tp = 0.0_WP; cp = 0.0_WP
             nzmax = mesh%nlevels_nod2D(n)
             nzmin = mesh%ulevels_nod2D(n)

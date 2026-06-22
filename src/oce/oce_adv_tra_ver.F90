@@ -23,8 +23,10 @@ module oce_adv_tra_ver
     ! neither the 1-layer ttf(0) read nor the QR4C 2-layer double-write (2nd-layer and
     ! bottom-1 both hitting interface nzmin+1) occurs; the statement order below still
     ! reproduces both faithfully for deeper-min meshes.
-    use mod_precision, only: WP
-    use mod_mesh,      only: t_mesh
+    use mod_precision,   only: WP
+    use mod_mesh,        only: t_mesh
+    use mod_partit,      only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
     public :: adv_tra_ver_upw1, adv_tra_ver_qr4c
@@ -32,27 +34,31 @@ module oce_adv_tra_ver
 contains
 
     !===========================================================================
-    subroutine adv_tra_ver_upw1(w, ttf, mesh, flux, o_init_zero)
+    subroutine adv_tra_ver_upw1(w, ttf, mesh, flux, o_init_zero, partit)
         ! 1st-order upwind explicit vertical flux (oce_adv_tra_ver.F90:244-328).
+        ! M2.12b: optional partit -> loop over OWNED nodes (myDim_nod2D).
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(in)    :: w  (mesh%nl,   mesh%nod2D)
         real(kind=WP), intent(inout) :: flux(mesh%nl,  mesh%nod2D)
         logical, optional, intent(in) :: o_init_zero
+        type(t_partit), intent(in), optional :: partit
         logical :: l_init_zero
         integer :: n, nz, nzmax, nzmin
+        integer :: nNodO, nNodL, nEdgeO, nElemO
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         l_init_zero = .true.
         if (present(o_init_zero)) l_init_zero = o_init_zero
         if (l_init_zero) then
-            do n = 1, mesh%nod2D
+            do n = 1, nNodO
                 do nz = 1, mesh%nl
                     flux(nz, n) = 0.0_WP
                 end do
             end do
         end if
 
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             nzmax = mesh%nlevels_nod2D(n)
             nzmin = mesh%ulevels_nod2D(n)
             ! vert. flux at surface layer
@@ -71,30 +77,34 @@ contains
     end subroutine adv_tra_ver_upw1
 
     !===========================================================================
-    subroutine adv_tra_ver_qr4c(w, ttf, mesh, num_ord, flux, o_init_zero)
+    subroutine adv_tra_ver_qr4c(w, ttf, mesh, num_ord, flux, o_init_zero, partit)
         ! QR 4th-order centered vertical flux (oce_adv_tra_ver.F90:332-434). num_ord =
         ! fraction of the 4th-order (centered) contribution; (1-num_ord) is upwind-QR.
+        ! M2.12b: optional partit -> loop over OWNED nodes (myDim_nod2D).
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: num_ord
         real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(in)    :: w  (mesh%nl,   mesh%nod2D)
         real(kind=WP), intent(inout) :: flux(mesh%nl,  mesh%nod2D)
         logical, optional, intent(in) :: o_init_zero
+        type(t_partit), intent(in), optional :: partit
         logical :: l_init_zero
         integer :: n, nz, nzmax, nzmin
         real(kind=WP) :: Tmean, Tmean1, Tmean2, qc, qu, qd
+        integer :: nNodO, nNodL, nEdgeO, nElemO
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         l_init_zero = .true.
         if (present(o_init_zero)) l_init_zero = o_init_zero
         if (l_init_zero) then
-            do n = 1, mesh%nod2D
+            do n = 1, nNodO
                 do nz = 1, mesh%nl
                     flux(nz, n) = 0.0_WP
                 end do
             end do
         end if
 
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             nzmax = mesh%nlevels_nod2D(n)
             nzmin = mesh%ulevels_nod2D(n)
             ! vert. flux at surface layer

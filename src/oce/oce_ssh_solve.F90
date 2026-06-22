@@ -49,9 +49,23 @@ module oce_ssh_solve
     !    deterministic, matching the FESOM2 1-rank reduction order. The new multi-rank
     !    bit-identity risk (the cross-rank dot-product reduction order) is an M2.12 concern.
     !  - rr/zz/pp/App sized nod2D (no eDim halo); CSR via colind_loc/rowptr_loc (local).
+    !
+    ! MULTI-RANK (M2.12c-2, OPTIONAL partit): arrays rr/zz/pp/App + diag_values sized
+    ! owned+halo (nNodL); owned loops 1..nNodO; exchange_nod(diag_values) in the precond
+    ! and exchange_nod(rr/pp/x) in the CG fill the halo COLUMNS the local mat-vec reads;
+    ! the dot-products sum OWNED entries (1..nNodO) then allreduce_sum across ranks
+    ! (= the FESOM2 oracle solver.F90). rtol / the convergence test divide by the GLOBAL
+    ! nod2D (mesh%nod2D, which is global at npes>1). partit absent OR npes==1 => the
+    ! proven 1-rank path VERBATIM (nNodO=nNodL=mesh%nod2D, no exchanges, the local sum
+    ! already IS the global sum). The new MR bit-identity risk is the cross-rank reduction
+    ! order — allreduce_sum byte-matches the oracle because both use the same OpenMPI +
+    ! comm size + op + 8-byte type (deterministic tree, LESSONS L6).
     use mod_precision, only: WP, MP
     use mod_mesh,      only: t_mesh
     use mod_dyn,       only: t_dyn
+    use mod_partit,    only: t_partit
+    use mod_part_bounds, only: owned_bounds, is_multirank
+    use mod_halo,      only: exchange_nod, allreduce_sum
     implicit none
     private
     public :: solve_ssh_ale
@@ -59,42 +73,48 @@ module oce_ssh_solve
 contains
 
     !===========================================================================
-    subroutine solve_ssh_ale(dynamics, mesh, n_iter)
+    subroutine solve_ssh_ale(dynamics, mesh, n_iter, partit)
         ! Build the preconditioner on the first call, then CG-solve for d_eta.
         ! n_iter (optional, NOT part of FESOM2's signature) returns the CG iteration
         ! count for the driver's non-vacuity diagnostic only.
         type(t_dyn),  intent(inout), target  :: dynamics
         type(t_mesh), intent(inout), target  :: mesh
         integer, intent(out), optional       :: n_iter
+        type(t_partit), intent(in), optional :: partit
         logical, save :: lfirst = .true.
 
-        if (lfirst) call ssh_solve_preconditioner(dynamics, mesh)
-        call ssh_solve_cg(dynamics%d_eta, dynamics%ssh_rhs, dynamics, mesh, n_iter)
-        ! exchange_nod(d_eta) — 1-rank no-op
+        if (lfirst) call ssh_solve_preconditioner(dynamics, mesh, partit)
+        call ssh_solve_cg(dynamics%d_eta, dynamics%ssh_rhs, dynamics, mesh, n_iter, partit)
+        if (is_multirank(partit)) call exchange_nod(dynamics%d_eta, partit)  ! FESOM2 :3308
         lfirst = .false.
     end subroutine solve_ssh_ale
 
     !===========================================================================
-    subroutine ssh_solve_preconditioner(dynamics, mesh)
+    subroutine ssh_solve_preconditioner(dynamics, mesh, partit)
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(inout), target :: mesh
+        type(t_partit), intent(in), optional :: partit
         integer                    :: nend, row, node, n, offset
+        integer                    :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP), allocatable :: diag_values(:)
 
-        associate(ssh_stiff => mesh%ssh_stiff)
-        nend = ssh_stiff%rowptr_loc(mesh%nod2D+1) - ssh_stiff%rowptr_loc(1)
-        allocate(ssh_stiff%pr_values(nend))
-        allocate(diag_values(mesh%nod2D))   ! 1-rank: no eDim halo
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
-        ! diagonal of A (the first CSR entry of each row)
-        do row = 1, mesh%nod2D
+        associate(ssh_stiff => mesh%ssh_stiff)
+        nend = ssh_stiff%rowptr_loc(nNodO+1) - ssh_stiff%rowptr_loc(1)
+        allocate(ssh_stiff%pr_values(nend))
+        allocate(diag_values(nNodL))   ! owned+halo: the off-diag precond reads a HALO diag
+
+        ! diagonal of A (the first CSR entry of each owned row)
+        do row = 1, nNodO
             offset = ssh_stiff%rowptr_loc(row) - ssh_stiff%rowptr_loc(1) + 1
             diag_values(row) = ssh_stiff%values(offset)
         end do
-        ! exchange_nod(diag_values) — 1-rank no-op
+        ! fill the HALO diag values (a halo node's diagonal lives on its owner rank)
+        if (is_multirank(partit)) call exchange_nod(diag_values, partit)  ! FESOM2 solver.F90:73
 
         ! fill the inverse-preconditioner values
-        do row = 1, mesh%nod2D
+        do row = 1, nNodO
             offset = ssh_stiff%rowptr_loc(row) - ssh_stiff%rowptr_loc(1)
             nend   = ssh_stiff%rowptr_loc(row+1) - ssh_stiff%rowptr_loc(row)
             ssh_stiff%pr_values(offset+1) = 1.0_WP/ssh_stiff%values(offset+1)
@@ -119,7 +139,7 @@ contains
         end do
         deallocate(diag_values)
 
-        n = mesh%nod2D   ! 1-rank: no eDim halo
+        n = nNodL   ! owned+halo: halo columns hold the exchanged owner values
         allocate(dynamics%solverinfo%rr(n),  dynamics%solverinfo%zz(n),  &
                  dynamics%solverinfo%pp(n),  dynamics%solverinfo%App(n))
         dynamics%solverinfo%rr  = 0.0_WP
@@ -130,18 +150,21 @@ contains
     end subroutine ssh_solve_preconditioner
 
     !===========================================================================
-    subroutine ssh_solve_cg(x, rhs, dynamics, mesh, n_iter)
+    subroutine ssh_solve_cg(x, rhs, dynamics, mesh, n_iter, partit)
         real(kind=WP), intent(inout)         :: x(:)     ! d_eta (in: x0, out: solution)
         real(kind=WP), intent(in)            :: rhs(:)   ! ssh_rhs
         type(t_dyn),  intent(inout), target  :: dynamics
         type(t_mesh), intent(inout), target  :: mesh
         integer, intent(out), optional       :: n_iter
+        type(t_partit), intent(in), optional :: partit
         integer                  :: row, iter
+        integer                  :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP)            :: sprod(2), s_old, s_aux, al, be, rtol
         real(kind=MP), pointer   :: values(:), pr_values(:)
         real(kind=WP), pointer   :: rr(:), zz(:), pp(:), App(:)
         integer,       pointer   :: rptr(:), cind(:)
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         values    => mesh%ssh_stiff%values
         pr_values => mesh%ssh_stiff%pr_values
         cind      => mesh%ssh_stiff%colind_loc
@@ -152,80 +175,80 @@ contains
         App => dynamics%solverinfo%App
 
         !__________________________________________________________________
-        ! working tolerance rtol = soltol*sqrt((b.b)/nod2D)
+        ! working tolerance rtol = soltol*sqrt((b.b)/nod2D)  [nod2D GLOBAL]
         s_old = 0.0_WP
-        do row = 1, mesh%nod2D
+        do row = 1, nNodO
             s_old = s_old + rhs(row)*rhs(row)
         end do
-        ! MPI_Allreduce(s_old) — 1-rank identity
+        if (is_multirank(partit)) call allreduce_sum(s_old, partit)
         rtol = dynamics%solverinfo%soltol*sqrt(s_old/real(mesh%nod2D,WP))
 
         !__________________________________________________________________
-        ! r0 = b - A x0
-        do row = 1, mesh%nod2D
+        ! r0 = b - A x0  (owned rows; x's halo columns are the prescribed x0 halo)
+        do row = 1, nNodO
             rr(row) = rhs(row) - sum(values(rptr(row):rptr(row+1)-1)*x(cind(rptr(row):rptr(row+1)-1)))
         end do
-        ! exchange_nod(rr) — 1-rank no-op
+        if (is_multirank(partit)) call exchange_nod(rr, partit)
 
         !__________________________________________________________________
         ! z0 = M^-1 r0 ; search direction pp = z0
-        do row = 1, mesh%nod2D
+        do row = 1, nNodO
             zz(row) = sum(pr_values(rptr(row):rptr(row+1)-1)*rr(cind(rptr(row):rptr(row+1)-1)))
             pp(row) = zz(row)
         end do
 
         ! rho = r0.z0
         s_old = 0.0_WP
-        do row = 1, mesh%nod2D
+        do row = 1, nNodO
             s_old = s_old + rr(row)*zz(row)
         end do
-        ! MPI_Allreduce(s_old) — 1-rank identity
+        if (is_multirank(partit)) call allreduce_sum(s_old, partit)
 
         !__________________________________________________________________
         ! iterations
         if (present(n_iter)) n_iter = dynamics%solverinfo%maxiter   ! fallback: no convergence
         do iter = 1, dynamics%solverinfo%maxiter
-            ! exchange_nod(pp) — 1-rank no-op
-            do row = 1, mesh%nod2D
+            if (is_multirank(partit)) call exchange_nod(pp, partit)   ! halo cols for A*pp
+            do row = 1, nNodO
                 App(row) = sum(values(rptr(row):rptr(row+1)-1)*pp(cind(rptr(row):rptr(row+1)-1)))
             end do
 
             s_aux = 0.0_WP
-            do row = 1, mesh%nod2D
+            do row = 1, nNodO
                 s_aux = s_aux + pp(row)*App(row)
             end do
-            ! MPI_Allreduce(s_aux) — 1-rank identity
+            if (is_multirank(partit)) call allreduce_sum(s_aux, partit)
             al = s_old/s_aux
 
-            do row = 1, mesh%nod2D
+            do row = 1, nNodO
                 x(row)  = x(row)  + al*pp(row)
                 rr(row) = rr(row) - al*App(row)
             end do
-            ! exchange_nod(rr) — 1-rank no-op
+            if (is_multirank(partit)) call exchange_nod(rr, partit)   ! halo cols for M^-1 r
 
-            do row = 1, mesh%nod2D
+            do row = 1, nNodO
                 zz(row) = sum(pr_values(rptr(row):rptr(row+1)-1)*rr(cind(rptr(row):rptr(row+1)-1)))
             end do
 
             sprod(1:2) = 0.0_WP
-            do row = 1, mesh%nod2D
+            do row = 1, nNodO
                 sprod(1) = sprod(1) + rr(row)*zz(row)
                 sprod(2) = sprod(2) + rr(row)*rr(row)
             end do
-            ! MPI_Allreduce(sprod,2) — 1-rank identity
+            if (is_multirank(partit)) call allreduce_sum(sprod, partit)
 
-            if (sqrt(sprod(2)/mesh%nod2D) < rtol) then
+            if (sqrt(sprod(2)/mesh%nod2D) < rtol) then   ! nod2D GLOBAL
                 if (present(n_iter)) n_iter = iter
                 exit
             end if
 
             be    = sprod(1)/s_old
             s_old = sprod(1)
-            do row = 1, mesh%nod2D
+            do row = 1, nNodO
                 pp(row) = zz(row) + be*pp(row)
             end do
         end do
-        ! exchange_nod(x) — 1-rank no-op
+        if (is_multirank(partit)) call exchange_nod(x, partit)   ! FESOM2 solver.F90:279
     end subroutine ssh_solve_cg
 
 end module oce_ssh_solve

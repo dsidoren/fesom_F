@@ -48,13 +48,16 @@ module oce_dyn_velrhs
     use mod_dyn,       only: t_dyn
     use mod_constants, only: g
     use mod_config,    only: ab_epsilon
+    use mod_partit,    only: t_partit
+    use mod_part_bounds, only: owned_bounds, is_multirank
+    use mod_halo,      only: exchange_nod
     implicit none
     private
     public :: compute_vel_rhs
 
 contains
 
-    subroutine compute_vel_rhs(dynamics, mesh, dt, lfirst)
+    subroutine compute_vel_rhs(dynamics, mesh, dt, lfirst, partit)
         ! dynamics: uv/uv_rhs/uv_rhsAB/eta_n + work%pgf_x/pgf_y (intent inout).
         ! lfirst: first Euler timestep (ff=1.0). FESOM2's guard is
         !   lfirst .and. .not. r_restart ; v1 has no restart yet (M2.11), so r_restart
@@ -63,8 +66,10 @@ contains
         type(t_mesh),  intent(in),    target :: mesh
         real(kind=WP), intent(in) :: dt
         logical,       intent(in) :: lfirst
+        type(t_partit), intent(in), optional :: partit
         !_______________________________________________________________________
         integer       :: elem, elnodes(3), nz, nzmax, nzmin
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: ff, Fx, Fy, pre(3), p_eta(3)
         real(kind=WP) :: ab1, ab2
         real(kind=WP), dimension(:,:,:),   pointer :: UV, UV_rhs
@@ -78,6 +83,7 @@ contains
         eta_n    => dynamics%eta_n
         pgf_x    => dynamics%work%pgf_x
         pgf_y    => dynamics%work%pgf_y
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         ! 2nd-order Adams-Bashforth coefficients (FESOM2 :97-100). eps = ab_epsilon=0.1
         ab1 = -(0.5_WP + ab_epsilon)
@@ -85,7 +91,7 @@ contains
 
         !_______________________________________________________________________
         ! Coriolis + AB2 + PGF (+ SSH gradient) assembly
-        do elem = 1, mesh%elem2D
+        do elem = 1, nElemO
             nzmax = mesh%nlevels(elem)
             nzmin = mesh%ulevels(elem)
 
@@ -121,14 +127,14 @@ contains
         ! routes to momentum_adv_scalar (the _transpv variant is M2.x). momadv_opt==1
         ! is an unsupported FESOM2 scheme (error there); v1 simply skips when /=2.
         if (dynamics%momadv_opt == 2) then
-            call momentum_adv_scalar(dynamics, mesh)
+            call momentum_adv_scalar(dynamics, mesh, partit)
         end if
 
         !_______________________________________________________________________
         ! (4) AB blend + scale by dt/elem_area. First Euler step -> ff=1.0 else ab2.
         ff = ab2
         if (lfirst) ff = 1.0_WP
-        do elem = 1, mesh%elem2D
+        do elem = 1, nElemO
             nzmin = mesh%ulevels(elem)
             nzmax = mesh%nlevels(elem)
             do nz = nzmin, nzmax-1
@@ -139,7 +145,7 @@ contains
     end subroutine compute_vel_rhs
 
     !==========================================================================
-    subroutine momentum_adv_scalar(dynamics, mesh)
+    subroutine momentum_adv_scalar(dynamics, mesh, partit)
         ! Momentum advection on scalar (nodal) control volumes with ALE adaption.
         ! Transcribed VERBATIM from FESOM2 v2.7.3 oce_ale_vel_rhs.F90:335-589. Three
         ! passes:
@@ -170,8 +176,10 @@ contains
         !    fidelity). OpenMP locks/ordered are dropped (FESOM3 v1 is serial).
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
+        type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         integer :: n, nz, el1, el2, nl1, nl2, ul1, ul2, nod(2), el, ed, k, nle, ule
+        integer :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: un1(1:mesh%nl-1), un2(1:mesh%nl-1)
         real(kind=WP) :: wu(1:mesh%nl),    wv(1:mesh%nl)
         real(kind=WP), dimension(:,:,:),   pointer :: UV, UVnode_rhs
@@ -182,10 +190,11 @@ contains
         UV_rhsAB   => dynamics%uv_rhsAB
         UVnode_rhs => dynamics%work%uvnode_rhs
         Wvel_e     => dynamics%w_e
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         !______________________________________________________________________
         ! 1st. vertical momentum advection component: w*du/dz, w*dv/dz
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             nl1 = mesh%nlevels_nod2D(n) - 1
             ul1 = mesh%ulevels_nod2D(n)
             wu(1:nl1+1) = 0._WP
@@ -225,7 +234,7 @@ contains
 
         !______________________________________________________________________
         ! 2nd. horizontal advection component: u*du/dx, v*du/dx & u*dv/dy, v*dv/dy
-        do ed = 1, mesh%edge2D
+        do ed = 1, nEdgeO
             nod = mesh%edges(:,ed)
             el1 = mesh%edge_tri(1,ed)
             el2 = mesh%edge_tri(2,ed)
@@ -250,14 +259,14 @@ contains
                 un2(1:ul2-1)            = 0._WP
 
                 ! first edge node (always owned at 1-rank)
-                if (nod(1) <= mesh%nod2D) then
+                if (nod(1) <= nNodO) then
                     do nz = min(ul1,ul2), max(nl1,nl2)
                         UVnode_rhs(1,nz,nod(1)) = UVnode_rhs(1,nz,nod(1)) + un1(nz)*UV(1,nz,el1) + un2(nz)*UV(1,nz,el2)
                         UVnode_rhs(2,nz,nod(1)) = UVnode_rhs(2,nz,nod(1)) + un1(nz)*UV(2,nz,el1) + un2(nz)*UV(2,nz,el2)
                     end do
                 end if
                 ! second edge node
-                if (nod(2) <= mesh%nod2D) then
+                if (nod(2) <= nNodO) then
                     do nz = min(ul1,ul2), max(nl1,nl2)
                         UVnode_rhs(1,nz,nod(2)) = UVnode_rhs(1,nz,nod(2)) - un1(nz)*UV(1,nz,el1) - un2(nz)*UV(1,nz,el2)
                         UVnode_rhs(2,nz,nod(2)) = UVnode_rhs(2,nz,nod(2)) - un1(nz)*UV(2,nz,el1) - un2(nz)*UV(2,nz,el2)
@@ -266,14 +275,14 @@ contains
 
             else  ! boundary edge: only el1 contributes
                 ! first edge node
-                if (nod(1) <= mesh%nod2D) then
+                if (nod(1) <= nNodO) then
                     do nz = ul1, nl1
                         UVnode_rhs(1,nz,nod(1)) = UVnode_rhs(1,nz,nod(1)) + un1(nz)*UV(1,nz,el1)
                         UVnode_rhs(2,nz,nod(1)) = UVnode_rhs(2,nz,nod(1)) + un1(nz)*UV(2,nz,el1)
                     end do
                 end if
                 ! second edge node
-                if (nod(2) <= mesh%nod2D) then
+                if (nod(2) <= nNodO) then
                     do nz = ul1, nl1
                         UVnode_rhs(1,nz,nod(2)) = UVnode_rhs(1,nz,nod(2)) - un1(nz)*UV(1,nz,el1)
                         UVnode_rhs(2,nz,nod(2)) = UVnode_rhs(2,nz,nod(2)) - un1(nz)*UV(2,nz,el1)
@@ -284,17 +293,19 @@ contains
 
         !______________________________________________________________________
         ! 3rd. divide the total nodal advection by the scalar control-volume area
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             nl1 = mesh%nlevels_nod2D(n) - 1
             ul1 = mesh%ulevels_nod2D(n)
             UVnode_rhs(1,ul1:nl1,n) = UVnode_rhs(1,ul1:nl1,n)*mesh%areasvol_inv(ul1:nl1,n)
             UVnode_rhs(2,ul1:nl1,n) = UVnode_rhs(2,ul1:nl1,n)*mesh%areasvol_inv(ul1:nl1,n)
         end do
 
-        ! exchange_nod(UVnode_rhs) is a 1-rank no-op (lifted at M2.12)
+        ! M2.12c: share the nodal advection to the halo (FESOM2 :559) — the vertice->
+        ! element conversion below reads UVnode_rhs at an owned element's 3 nodes (halo).
+        if (is_multirank(partit)) call exchange_nod(UVnode_rhs, partit)
 
         ! convert nodal advection vertice -> element and ADD into UV_rhsAB
-        do el = 1, mesh%elem2D
+        do el = 1, nElemO
             nl1 = mesh%nlevels(el) - 1
             ul1 = mesh%ulevels(el)
             UV_rhsAB(1,1:2,ul1:nl1,el) = UV_rhsAB(1,1:2,ul1:nl1,el) &

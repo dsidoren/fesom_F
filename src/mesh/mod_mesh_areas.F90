@@ -36,7 +36,7 @@ module mod_mesh_areas
     use mod_constants,   only: r_earth, omega
     use mod_mesh,        only: t_mesh, MAX_NV
     use mod_partit,      only: t_partit
-    use mod_halo,        only: exchange_elem
+    use mod_halo,        only: exchange_elem, exchange_elem_full, exchange_nod
     use mod_mesh_rotate, only: trim_cyclic, get_cyclic_length, r2g
     implicit none
     private
@@ -87,6 +87,19 @@ contains
             call exchange_elem_cos(mesh, partit, nElemF)
         end if
         call compute_node_areas(mesh, nNodO, nNodL)                     ! accumulate area, then scale
+        if (partit%npes > 1) then
+            ! M2.12b: halo elem_area (FULL halo) for MUSCL fill_up_dn_grad's area
+            ! weighting at the halo elements reached through a halo node's element list,
+            ! and halo node areas owner->halo (FESOM2 mesh_areas:2220 + 2322-2323). The
+            ! accumulation stays owned-only (an owned node's element neighbourhood is
+            ! complete) so OWNED area is unchanged; the exchange fills only the halo
+            ! entries (exchanging the SCALED arrays == FESOM2's scale-then-broadcast).
+            call exchange_elem_full(mesh%elem_area, partit)
+            call exchange_nod(mesh%area, partit)
+            call exchange_nod(mesh%areasvol, partit)
+            call exchange_nod(mesh%area_inv, partit)
+            call exchange_nod(mesh%areasvol_inv, partit)
+        end if
         call compute_edge_geometry(mesh, nEdgeO, center_x, center_y)    ! edge_dxdy, edge_cross_dxdy
         call compute_gradient_sca(mesh, nElemO)                         ! uses SCALED elem_area + elem_cos
         deallocate(center_x, center_y)

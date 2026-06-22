@@ -34,8 +34,11 @@ module oce_adv_tra_fct
     !
     ! Runtime divisors areasvol / hnode_new (b2) match FESOM2 because both codes divide
     ! by byte-identical operands (geom-proven areasvol; gated hnode_new); cf. LESSONS L7.
-    use mod_precision, only: WP
-    use mod_mesh,      only: t_mesh
+    use mod_precision,   only: WP
+    use mod_mesh,        only: t_mesh
+    use mod_partit,      only: t_partit
+    use mod_part_bounds, only: owned_bounds, is_multirank
+    use mod_halo,        only: exchange_nod
     implicit none
     private
     public :: oce_tra_adv_fct
@@ -43,7 +46,11 @@ module oce_adv_tra_fct
 contains
 
     subroutine oce_tra_adv_fct(dt, ttf, lo, adf_h, adf_v, fct_ttf_min, fct_ttf_max, &
-                               fct_plus, fct_minus, mesh)
+                               fct_plus, fct_minus, mesh, partit)
+        ! M2.12b: optional partit. a1 runs over OWNED+HALO nodes (myDim+eDim, reads the
+        ! exchanged lo / halo ttf); a2 over OWNED elements; a3/b1/b2/b3 over OWNED
+        ! nodes/edges. exchange_nod(fct_plus,fct_minus) between b2 and b3 (FESOM2 :401)
+        ! so the owned-edge b3 limiting reads correct halo-node limiting factors.
         real(kind=WP), intent(in)    :: dt
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
@@ -54,19 +61,24 @@ contains
         real(kind=WP), intent(inout) :: fct_ttf_max(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(inout) :: fct_plus (mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(inout) :: fct_minus(mesh%nl-1, mesh%nod2D)
+        type(t_partit), intent(in), optional :: partit
 
         integer :: n, nz, elem, enodes(3), el(2), nl1, nl2, nu1, nu2, nl12, nu12, edge
         real(kind=WP) :: flux, ae
         real(kind=WP), allocatable :: tvert_max(:,:), tvert_min(:,:), AUX(:,:,:)
         real(kind=WP) :: flux_eps=1e-16
         real(kind=WP) :: bignumber=1e3
+        integer :: nNodO, nNodL, nEdgeO, nElemO
 
-        allocate(tvert_max(mesh%nl-1, mesh%nod2D), tvert_min(mesh%nl-1, mesh%nod2D))
-        allocate(AUX(2, mesh%nl-1, mesh%elem2D))
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        ! local scratch: tvert over owned+halo nodes; AUX over OWNED elements (an owned
+        ! node's element list is all owned, so a3 only reads AUX at owned elements).
+        allocate(tvert_max(mesh%nl-1, nNodL), tvert_min(mesh%nl-1, nNodL))
+        allocate(AUX(2, mesh%nl-1, nElemO))
 
         !_______________________________________________________________________
         ! a1. max, min between old solution and updated low-order solution per node
-        do n=1, mesh%nod2D
+        do n=1, nNodL
             nu1 = mesh%ulevels_nod2D(n)
             nl1 = mesh%nlevels_nod2D(n)
             do nz=nu1, nl1-1
@@ -79,7 +91,7 @@ contains
         ! a2. Admissible increments on elements (max/min bound per element). Layers
         !     at/below the element bottom (nz>=nlevels(elem)-1) are set to -/+bignumber
         !     so a shallow element does not constrain a deeper node's bounds.
-        do elem=1, mesh%elem2D
+        do elem=1, nElemO
             enodes = mesh%elem2D_nodes(1:3, elem)
             nu1 = mesh%ulevels(elem)
             nl1 = mesh%nlevels(elem)
@@ -97,7 +109,7 @@ contains
 
         !_______________________________________________________________________
         ! a3. Bounds on clusters (node neighbourhood) and admissible increments.
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             nu1 = mesh%ulevels_nod2D(n)
             nl1 = mesh%nlevels_nod2D(n)
             do nz=nu1, nl1-1
@@ -110,7 +122,7 @@ contains
             end do
         end do
 
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             nu1 = mesh%ulevels_nod2D(n)
             nl1 = mesh%nlevels_nod2D(n)
             ! surface layer increment w.r.t. low-order solution
@@ -130,7 +142,7 @@ contains
         !_______________________________________________________________________
         ! b1. Split positive (fct_plus) and negative (fct_minus) antidiffusive
         !     contributions, accumulated per node from vertical and horizontal fluxes.
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             nu1 = mesh%ulevels_nod2D(n)
             nl1 = mesh%nlevels_nod2D(n)
             do nz=nu1, nl1-1
@@ -139,7 +151,7 @@ contains
             end do
         end do
         ! Vertical
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             nu1 = mesh%ulevels_nod2D(n)
             nl1 = mesh%nlevels_nod2D(n)
             do nz=nu1, nl1-1
@@ -148,7 +160,7 @@ contains
             end do
         end do
         ! Horizontal
-        do edge=1, mesh%edge2D
+        do edge=1, nEdgeO
             enodes(1:2)=mesh%edges(:,edge)
             el=mesh%edge_tri(:,edge)
             nl1=mesh%nlevels(el(1))-1
@@ -172,7 +184,7 @@ contains
 
         !_______________________________________________________________________
         ! b2. Limiting factors
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             nu1=mesh%ulevels_nod2D(n)
             nl1=mesh%nlevels_nod2D(n)
             do nz=nu1, nl1-1
@@ -182,12 +194,17 @@ contains
                 fct_minus(nz,n)=min(1.0_WP,fct_ttf_min(nz,n)/flux)
             end do
         end do
-        ! (exchange_nod(fct_plus, fct_minus) — no-op at 1 rank)
+        ! M2.12b: the owned-edge b3 limiting reads fct_plus/fct_minus at halo nodes
+        ! (an owned edge can touch a halo node) -> exchange owner->halo (FESOM2 :401).
+        if (is_multirank(partit)) then
+            call exchange_nod(fct_plus,  partit)
+            call exchange_nod(fct_minus, partit)
+        end if
 
         !_______________________________________________________________________
         ! b3. Limiting
         ! Vertical
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             nu1=mesh%ulevels_nod2D(n)
             nl1=mesh%nlevels_nod2D(n)
             ! surface interface
@@ -216,7 +233,7 @@ contains
             ! the bottom flux is always zero
         end do
         ! Horizontal
-        do edge=1, mesh%edge2D
+        do edge=1, nEdgeO
             enodes(1:2)=mesh%edges(:,edge)
             el=mesh%edge_tri(:,edge)
             nu1=mesh%ulevels(el(1))

@@ -1284,3 +1284,189 @@ fields (pi dist_2 + dist_8), via `tools/run_geom_gate_multirank.sh`. Reusable le
 - **`enforce_cw_orientation` is per-element deterministic → consistent across ranks** (a function of the element's
   node coords only), so the swap decision is identical on every rank with no communication. Closes the deferred
   multi-rank CW-swap caveat (pi had 0 swaps at 1-rank; the swap path was first exercised on CORE2 at M2.11a).
+
+## L31 — Multi-rank tracer advection (M2.12b): lift bounds + exchanges, NOT the arithmetic; gate every consumed intermediate
+
+The whole tracer-advection subtree byte-matches FESOM2 per-rank on pi dist_2 + dist_8 (13 fields,
+`tools/run_advhor_gate_multirank.sh`). The reusable lessons:
+
+- **Lift a byte-proven kernel to multi-rank by changing ONLY the loop bounds + adding the halo exchanges — never
+  the array dummies or the per-element arithmetic.** Keeping the explicit-shape dummies (`ttf(nl-1, mesh%nod2D)`
+  etc.) and the exact statements means the COMPILER EMITS THE SAME CODE, so the byte-match vs FESOM2 — including
+  any auto-vectorised divide (the L29 `divpd`/`divsd` trap) — is preserved by construction. The actual arrays are
+  allocated to LOCAL sizes; the dummy's "global" trailing extent is just metadata never exceeded (loops stay
+  `≤ owned`, the leading dims that drive the stride are identical), so it's runtime-safe in Release.
+- **OPTIONAL `partit` contains the blast radius.** Make `partit` an optional arg on every advection routine:
+  absent ⇒ the 1-rank path runs VERBATIM (global bounds, no exchanges) so the proven 1-rank gates can't regress
+  and the existing 1-rank callers (`solve_tracers_ale` etc.) need NO change; present+npes>1 ⇒ owned/halo bounds +
+  exchanges. A tiny `mod_part_bounds.owned_bounds(mesh,…,partit)` / `is_multirank(partit)` (npes==1 ⇒ global)
+  centralises it. Beats threading mandatory `partit` through the whole step (which ripples into the dynamics).
+  NB: Fortran `.and.` does NOT short-circuit — guard with `is_multirank()` (a `present()` check inside), never
+  `present(partit) .and. partit%npes>1`.
+- **The `find_neighbors` halo dance is the prerequisite the geometry gate couldn't exercise.** MUSCL
+  `fill_up_dn_grad` / `find_up_downwind_triangles` loop OWNED edges but read a halo node's FULL element list
+  (`nod_in_elem2D`), which reaches the **eXDim** second element-halo layer. So after building owned `nod_in_elem2D`
+  you must: `exchange_nod(num)` → per slot pack local→GLOBAL ids, `exchange_nod`, store back → re-localise every
+  entry GLOBAL→local through the full-halo inverse map (`imap_elem`, 1..myDim+eDim+eXDim). The eXDim halo
+  GUARANTEES a halo node's element list is fully local, so the re-localise never hits a 0.
+- **Halo coverage is chosen by ARRAY SIZE in FESOM2; replicate with an explicit `exchange_elem_full`.** FESOM2's
+  `exchange_elem` picks `com_elem2D` (eDim) vs `com_elem2D_full` (eDim+eXDim) from `ubound(arr)≤myDim+eDim`.
+  Things read at eXDim — `elem_area`, `tr_xy`, and the `coord_elem`/`e_nodes` of the upwind/downwind search — need
+  the FULL halo (`com_elem2D_full`). Exchanging the SCALED `elem_area` post-accumulation == FESOM2's
+  scale-then-broadcast (a per-element multiply commutes with the owner→halo copy).
+- **A reused scratch array is NOT a gateable field at the wrong time.** FESOM2's `oce_tra_adv_fct` reuses
+  `edge_up_dn_grad` as its `AUX` scratch (filled with `bignumber=1e3` below the bottom); FESOM3 uses a separate
+  allocatable. So `edge_up_dn_grad` only matches BEFORE `do_oce_adv_tra` — capture it right after
+  `init_tracers_AB`/`fill_up_dn_grad`, not after the FCT step. (The mismatch is a dump-timing artifact, not a bug:
+  every real field — `del_ttf`, `fct_LO`, `fct_plus/minus` — was already `max|Δ|=0`.) General rule: when gating an
+  intermediate, dump it at the point its value is live, before any in-place scratch reuse downstream.
+- **`nboundary_lay` is computed partition-locally with NO exchange — and that's correct for the gate.** FESOM2's
+  `muscl_adv_init` builds it from OWNED edges only (a `min` over each node's owned-edge set) and never exchanges.
+  A halo node's value is therefore the partition-local min — possibly not the global min — but FESOM3 computes it
+  the SAME way on the SAME partition, so they match byte-for-byte. Don't "fix" it with an exchange; match FESOM2.
+- **Prescribe gate inputs halo-consistently.** Node fields are set at owned+halo from the (geometry-gated) rotated
+  coords directly; the element velocity has no local `elem2D_nodes` at halo elements, so prescribe it at OWNED
+  elements then `exchange_elem_full` — identical on both codes (same coords, same partition) without needing a
+  halo exchange of the inputs themselves.
+
+## L32 — Multi-rank pre-SSH dynamics (M2.12c-1): the whole dynamics RHS lifts mechanically; the byte-match is bounds + exchanges, the work is knowing which halos a kernel actually reads
+
+The whole pre-SSH dynamics chain (`compute_vel_nodes → pressure_bv(+smooth_nod) → pressure_force_4_linfs →
+oce_mixing_pp → mo_convect → compute_vel_rhs(+momentum_adv_scalar) → viscosity_filter(visc_filt_bidiff) →
+impl_vert_visc_ale → compute_ssh_rhs_ale`) byte-matches FESOM2 per-rank on pi dist_2 + dist_8 (25 records
+density/pressure/bvfreq/Kv/ssh_rhs, `tools/run_stepdyn_gate_multirank.sh`). The reusable lessons:
+
+- **The M2.12b recipe scales to the whole dynamics with ZERO new ideas:** optional `partit` (absent ⇒ 1-rank path
+  VERBATIM, so the proven gates can't regress and `step_oce`'s existing 1-rank callers need no change) + a bounds
+  helper (`mod_part_bounds.local_dims` returns `nNodO/nNodL/nEdgeO/nEdgeL/nElemO/nElemL/nElemF`; global counts when
+  partit is absent) + the FESOM2 exchanges at the FESOM2 sites, arithmetic/dummies UNCHANGED. Nine kernels, ~1 hour,
+  byte-exact first run on dist_2 AND dist_8. Don't reason about physical "completeness" of halo values — replicate
+  FESOM2's exact loop bounds + exchanges and the bits follow (the L31 principle, confirmed at scale).
+- **The load-bearing skill is knowing which halo each array read needs — read FESOM2's bound, don't guess.** Node
+  kernels split: the EOS/mixing/convection node loops run owned+halo (`myDim+eDim`) because a later same-kernel
+  ELEMENT loop reads the just-computed node field at the element's 3 corners (halo), and computing the halo in-place
+  beats an exchange (uvnode/bvfreq are already halo-valid from upstream). The accumulate-into-node kernels
+  (momentum_adv_scalar, compute_ssh_rhs_ale, smooth_nod) loop OWNED edges/nodes, scatter into owned+halo, then
+  `exchange_nod` the result (every edge incident to an owned node is owned ⇒ the owned-node value is complete; the
+  exchange only fixes the halo). visc_filt_bidiff is the one owned+HALO-edge kernel (`nEdgeL`), with `exchange_elem`
+  between its two Laplacian sweeps and the interior-edge test on the GLOBAL id `myList_edge2D(ed)>edge2D_in` (the
+  1-rank `ed>edge2D_in` is WRONG at MR — local index vs global threshold).
+- **c-1 needs NO mesh-infra change because no pre-SSH kernel reads `elem2D_nodes`/`gradient_sca` at a halo element.**
+  They read those only at OWNED elements (an owned element's nodes are local; `compute_vel_rhs`/`pgf`/mixing/convection
+  all loop owned elements). The halo reads are UV/UV_rhs/helem/elem_area/edge_cross_dxdy — UV is `exchange_elem_full`'d,
+  helem/elem_area are full-halo (M2.12b), edge_cross_dxdy is owned-edge-only. So the local mesh's owned-only
+  `elem2D_nodes` (M2.12a) suffices. The SSH STIFFNESS (c-2) is the first kernel that DOES read `elem2D_nodes`/
+  `gradient_sca` at eDim-halo triangles of owned edges → it needs the mesh-infra extension. Identify this boundary
+  before lifting: it tells you exactly when the cheap bounds-only lift ends and the infra work begins.
+- **`exchange_nod` needed a rank-3 node-block variant.** `UVnode`/`UVnode_rhs` are `(2,nl-1,nod)` — the existing
+  `exchange_nod` handled only rank-1/rank-2 node fields. Added `exchange_nod_blk_r` (the existing `core_blk_r` on
+  `com_nod2D`): the leading two dims are a contiguous per-node block, exactly like `exchange_elem_full`'s 3D variant.
+- **Reuse the gid-keyed dump for the MR gate — it is already per-rank.** `mod_dump` writes `<prefix>.<mype5>` and the
+  rank owning a probe gid writes it (`resolve_probes` over `myDim`). So a per-rank gid-keyed gate needs NO new dump
+  code: each global probe is owned by the same rank on both codes (same `dist_N`/myList), and `dump_diff.py` matches
+  by gid. The oracle ran the REAL `oce_timestep_ale` at npes>1 (extend the `fesom_step_dump` shim: drop the `npes/=1`
+  return; prescribe nodes owned+halo, element velocity OWNED + `exchange_elem` — prescribing UV at an eXDim element
+  SEGFAULTS, its `elem2D_nodes(1)` can be a node beyond the eDim halo so `coord_nod2D` OOB); FESOM3 dumps only the
+  pre-ssh_rhs substeps, so `--ignore-substep` the oracle's post-ssh substeps (9/11/12/13/15/16 + SW_AB 2).
+
+## L33 — Multi-rank SSH stiffness + free-surface CG (M2.12c-2): the scoped "mesh-infra extension" was NOT needed; a cross-rank iterative solver byte-matches
+
+The SSH stiffness assembly (`init_stiff_mat_ale`) + the preconditioned CG (`solve_ssh_ale`) byte-match FESOM2 per-rank
+on pi dist_2 + dist_8 — `max|Δ|=0` on `d_eta` (30 records incl. the c-1 chain; `tools/run_stepdyn_gate_multirank.sh`,
+substep 9 un-ignored). The FIRST multi-rank iterative solver, with cross-rank `MPI_Allreduce` dot-products. Lessons:
+
+- **VERIFY a scoped invariant empirically before building the machinery it implies.** Both the HANDOFF and L32 scoped
+  c-2 as needing "the first mesh-infra extension": extend `elem2D_nodes` to the halo + `exchange_elem(gradient_sca)` +
+  `enforce_cw` on owned+eDim, because `init_stiff_mat_ale` "reads `elem2D_nodes`/`gradient_sca`/`zbar_e_bot` at the
+  eDim-halo triangles of owned edges". **That hypothesis was WRONG.** A 20-line Python check over the `dist_N` files
+  (for each OWNED edge, is `edge_tri(:,ed) ≤ myDim_elem2D`?) found **0** halo triangles on every rank — the owned rows
+  assemble **FULLY LOCALLY**, no exchange, no infra extension. The tell I should have trusted first: **FESOM2's OWN
+  `elem2D_nodes` AND `gradient_sca` are allocated owned-only** (`oce_mesh.F90:497` `(3,myDim_elem2D)`, `:2466`
+  `(6,myDim_elem2D)`), yet its `init_stiff` reads them at `edge_tri(:,ed)` for owned `ed` — which is only safe (no OOB)
+  if owned edges have owned triangles. The oracle's allocation IS the proof of the invariant. The three partition
+  invariants (verified pi dist_2/8, universal in FESOM2 since the owned-only alloc is unconditional): (i) every edge
+  incident to an owned node is owned ⇒ looping owned edges visits every contribution to an owned row; (ii) both
+  triangles of an owned edge are owned ⇒ the element-array reads stay in the owned-only arrays; (iii) an owned
+  element's nodes are within owned+halo (`≤ nNodL`, `maxlocnode==nNodL` exactly) ⇒ `n_num(elnodes)` in bounds and the
+  CSR may have HALO columns. Don't infer "needs a halo" from "reads an element array at `edge_tri`"; check whether
+  `edge_tri` of an OWNED edge ever leaves the owned set. (c-1's `compute_ssh_rhs_ale` looks identical and ALSO only
+  reads owned elements for owned edges — the c-1 driver's `nElemF`-sized UV + `exchange_elem_full` was defensive
+  over-provisioning driven by the owned+HALO-edge visc kernel, NOT by ssh_rhs.)
+- **A cross-rank iterative solver byte-matches — the L29 corollary, confirmed at MR.** Same `A`/`b`/`x0`/`M⁻¹` +
+  byte-identical per-iteration reductions ⇒ byte-identical recurrence. The only new MR risk is the reduction ORDER of
+  the dot-products, and `MPI_Allreduce(MPI_SUM)` is byte-identical between the two codes: same OpenMPI (4.1.2-intel),
+  same comm size, same op, same 8-byte type ⇒ the library picks the same reduction tree ⇒ same operation order (the
+  same determinism FESOM2's own reproducibility rests on, L6). **38 CG iters on 8 ranks, `max|Δ|=0` on `d_eta`** — the
+  L29 NOVECTOR precond divide carries over unchanged. So "it's a long cross-rank recurrence" is NOT a reproducibility
+  excuse any more than "it's a long recurrence" was (L28→L29).
+- **The lift is pure bounds+exchange (the L31/L32 recipe again).** `nod2D→nNodO` for owned loops; arrays
+  `rr/zz/pp/App` + `diag_values` sized `nNodL`; `exchange_nod(diag_values)` in the precond (a halo node's diagonal
+  lives on its owner — the off-diag `K_ri` reads it), `exchange_nod(pp)` before `A·p` and `exchange_nod(rr)` before
+  `M⁻¹r` (halo COLUMNS of the mat-vec), `allreduce_sum` after each owned-partial-sum dot-product. The convergence/`rtol`
+  denominators stay **GLOBAL** (`mesh%nod2D`, which the local-mesh remap sets to the global count). Keep the explicit
+  `DO row; s=s+…` dot-product form (NOT `sum()`): the oracle is `ENABLE_OPENMP=OFF`/`__openmp_reproducible` undefined,
+  so its `#if !defined(__openmp_reproducible)` reduction compiles to that serial loop (L16). Optional `partit` absent
+  ⇒ the 1-rank path runs VERBATIM (no exchange, no allreduce: the local sum already IS the global sum).
+- **All ranks reporting the SAME CG iter count is the non-vacuity + consistency check.** The exit test
+  `sqrt(sprod(2)/nod2D) < rtol` uses the allreduce'd `sprod(2)` and the global `nod2D`, so every rank computes the same
+  test and exits at the same iteration (38). A solver where ranks disagreed on the iter count would mean a non-global
+  convergence test or a drifting reduction — a red flag even before checking `max|Δ|`.
+
+## L34 — Multi-rank WHOLE STEP (M2.12c-3): the post-SSH tail lifts with the same recipe; threading an optional partit through the assembly closes the multi-rank MVP
+
+The post-SSH ALE update (`update_vel`/`compute_hbar_ale`/`update_eta_n`/`vert_vel_ale`(+`compute_CFLz`/
+`compute_Wvel_split`)/`update_thickness_ale`) + the tracer SOLVE (`solve_tracers_ale`/`diff_tracers_ale`/
+`diff_part_hor_redi`/`diff_ver_part_impl_ale`) lifted to multi-rank with the M2.12b/c optional-`partit` recipe, and
+threading the optional `partit` through `mod_step_oce::step_oce` made the WHOLE assembled ocean step byte-match FESOM2
+per-rank on pi dist_2 + dist_8 — `max|Δ|=0` on all 65 substep records (`tools/run_step_gate_multirank.sh`). **The whole
+multi-rank model is byte-identical to FESOM2 — the architectural MVP.** The reusable lessons:
+
+- **Thread an optional through the assembly, not an `if(present)` ladder.** `step_oce` calls ~16 kernels; the lift is
+  one `type(t_partit), intent(in), optional :: partit` on `step_oce` + `, partit` appended to every kernel call.
+  Fortran passes a non-present optional actual as "absent" to the callee, so `call kernel(..., partit)` does the right
+  thing whether `partit` is present or not — no branching, and the 1-rank callers (`fesom_stepdump`/`fesom_lifecycle`)
+  that omit `partit` are untouched (their `step_oce` runs every kernel's 1-rank path VERBATIM). One keyword caveat:
+  when the optional sits AFTER another optional in the callee (`solve_ssh_ale(dyn,mesh,n_iter,partit)`), call it by
+  keyword — `call solve_ssh_ale(dyn, mesh, partit=partit)`.
+- **The accumulate-then-exchange pattern dominates the post-SSH tail, and the one easy-to-miss exchange is the one
+  OUTSIDE a linfs guard.** `compute_hbar_ale` skips the water_flux term AND its `exchange_nod(ssh_rhs_old)` for linfs —
+  but the `exchange_nod(hbar)` right after sits OUTSIDE that guard and fires ALWAYS, because the next loop (`dhe` over
+  owned elements) reads `hbar` at the element's 3 nodes, which span the halo. Read the FESOM2 control flow to the
+  closing `endif`: an exchange that looks like it belongs to the gated branch may be unconditional. `update_eta_n`
+  loops owned+halo (no exchange — both operands are already halo-valid); `vert_vel_ale` is owned-edge-scatter +
+  owned-cumsum then `exchange_nod(w)`/`exchange_nod(hnode_new)`; `compute_CFLz`/`compute_Wvel_split` are owned+halo
+  (so the NEXT step's momentum advection reads valid halo `w_e`/`w_i`); `diff_ver_part_impl_ale` is a per-column TDMA
+  with no halo coupling (owned-node loop, no exchange); `solve_tracers_ale` does `exchange_nod(values)` after each
+  tracer's solve + clamps salinity over owned+halo.
+- **`exchange_elem` has no rank-3 variant — rank-3 `UV` uses `exchange_elem_full`, a SUPERSET of FESOM2's eDim
+  `exchange_elem`, and that is safe because the owned dumps never depend on the extra halo.** FESOM2's `update_vel`
+  ends with `exchange_elem(UV)` (eDim); FESOM3's `exchange_elem` interface is rank-1/rank-2 only, so the rank-3
+  `(2,nl-1,elem)` UV must go through `exchange_elem_full` (eDim+eXDim). Before accepting the superset, confirm the
+  gated fields depend only on OWNED values: every owned-edge kernel reads `UV` at the edge's triangles, which are
+  owned (invariant ii), so the eDim/eXDim halo of `UV` is never read into an owned dump — the extra eXDim refresh is
+  invisible to the gate (and strictly *more* correct for the next step's halo reads). Same logic retires
+  `update_thickness_ale`'s `exchange_elem(helem)` for linfs: helem is unchanged AND already full-halo-valid, so the
+  exchange is value-neutral — skip it (L33 "no machinery you don't need").
+- **In the partitioned mesh, `mesh%nod2D`/`elem2D`/`edge2D` hold the GLOBAL counts — any work array a caller sizes
+  from them must be re-sized to the LOCAL count.** `solve_tracers_ale` allocated `tr_xy(2,nl-1,mesh%elem2D)`; at
+  multi-rank that is the global element count (wrong + huge). Size it `nElemF` (local, via `local_dims`). The kernels'
+  explicit-shape dummies keep the global declared bound (preserving codegen / the L29 divide), but the ACTUAL
+  allocation in the driver/caller must be local — the dummy maps onto the local storage and only owned/local indices
+  are ever accessed.
+- **The whole-step gate cost almost nothing in new infra because the oracle was already a whole-step driver.** The
+  c-1 `fesom_step_dump` npes>1 extension drives the REAL `oce_timestep_ale` and its built-in dump_shim emits ALL
+  substeps — so c-3 needed ZERO oracle change. Only the FESOM3 side needed work: the post-SSH lift + a whole-step MR
+  driver (`fesom_stepfull_mr` = `step_oce` through `partit`, the multi-rank analog of the 1-rank `fesom_stepdump`).
+  The gate is the 1-rank `run_step_gate.sh` ignore set (only SW_AB id=2) applied per-rank.
+- **A byte-gate on a rich analytic state subsumes the "physical sanity" probes (rest-at-rest, gravity wave,
+  `stale_halo_max_*`).** `max|Δ|=0` vs FESOM2 across all 65 substeps on non-trivial T/S/UV/SSH at 2 AND 8 ranks is a
+  strictly stronger statement than any single physical scenario, and because we replicate FESOM2's exact owned loop
+  bounds + exchanges, a stale halo cannot affect an owned dump — it would have to change an owned value to be
+  observable, and it doesn't. The gate IS the stale-halo probe.
+- **The whole multi-rank port was bounds + exchanges end-to-end — never arithmetic (L31→L34, confirmed at MODEL
+  scale).** From geometry (c-a) through advection (c-b), the dynamics RHS (c-1), the iterative SSH solver (c-2), to the
+  ALE update + tracer solve + the assembled step (c-3): not one arithmetic line changed, the codegen (and the L29
+  vectorised divide) is preserved verbatim, and every gate was `max|Δ|=0` on the first or second run. The discipline
+  that produced this: transcribe FESOM2's loop bounds + halo exchanges exactly, gate per-rank vs the same partition
+  (L8), keep the optional-`partit`-absent path byte-for-byte the proven 1-rank code so nothing can regress, and verify
+  a scoped partition invariant empirically before building machinery for it (L33).

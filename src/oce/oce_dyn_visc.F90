@@ -53,13 +53,16 @@ module oce_dyn_visc
     use mod_precision, only: WP
     use mod_mesh,      only: t_mesh
     use mod_dyn,       only: t_dyn
+    use mod_partit,    only: t_partit
+    use mod_part_bounds, only: local_dims, is_multirank
+    use mod_halo,      only: exchange_elem
     implicit none
     private
     public :: viscosity_filter
 
 contains
 
-    subroutine viscosity_filter(option, dynamics, mesh, dt)
+    subroutine viscosity_filter(option, dynamics, mesh, dt, partit)
         ! Driving routine — dispatch on the horizontal-viscosity scheme. v1 supports
         ! only opt_visc=7 (the reduced-M2 / pi-gated biharmonic). dt is passed
         ! explicitly (FESOM2 reads it from g_config; FESOM3 has no global dt — cf.
@@ -68,9 +71,10 @@ contains
         type(t_dyn),   intent(inout), target :: dynamics
         type(t_mesh),  intent(in),    target :: mesh
         real(kind=WP), intent(in)            :: dt
+        type(t_partit), intent(in), optional :: partit
         select case (option)
         case (7)
-            call visc_filt_bidiff(dynamics, mesh, dt)
+            call visc_filt_bidiff(dynamics, mesh, dt, partit)
         case default
             write(*,*) 'viscosity_filter: opt_visc=', option, &
                        ' not implemented in v1 (only opt_visc=7)'
@@ -79,15 +83,25 @@ contains
     end subroutine viscosity_filter
 
     !==========================================================================
-    subroutine visc_filt_bidiff(dynamics, mesh, dt)
+    subroutine visc_filt_bidiff(dynamics, mesh, dt, partit)
         ! Strictly energy-dissipative, momentum-conserving biharmonic viscosity.
         ! Transcribed from FESOM2 v2.7.3 oce_dyn.F90:591-744 (the non-subcycl branch).
+        ! M2.12c: optional partit -> U_c/V_c zeroed over owned+eDim elements (FESOM2
+        ! :622 do elem=1,myDim_elem2D+eDim_elem2D); both edge passes run over owned+halo
+        ! edges (FESOM2 :631/:679 do ed=1,myDim_edge2D+eDim_edge2D) with the interior
+        ! test on the GLOBAL edge id (myList_edge2D(ed)>edge2D_in); exchange_elem(U_c/V_c)
+        ! between the passes so pass 2 reads the halo-element Laplacian. UV is halo-valid
+        ! (update_vel exchanges it / prescribed+exchanged); the pass-2 UV_rhs scatter
+        ! reaches halo elements exactly as FESOM2, so the post-visc halo UV_rhs matches.
         type(t_dyn),   intent(inout), target :: dynamics
         type(t_mesh),  intent(in),    target :: mesh
         real(kind=WP), intent(in)            :: dt
+        type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         real(kind=WP) :: u1, v1, len, vi, viLapl
         integer       :: ed, el(2), nz, nzmin, nzmax, elem
+        integer       :: nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF
+        logical       :: lmr
         real(kind=WP) :: update_u(mesh%nl-1), update_v(mesh%nl-1)
         real(kind=WP), dimension(:,:,:), pointer :: UV, UV_rhs
         real(kind=WP), dimension(:,:),   pointer :: U_c, V_c
@@ -96,18 +110,24 @@ contains
         UV_rhs => dynamics%uv_rhs
         U_c    => dynamics%work%u_c
         V_c    => dynamics%work%v_c
+        call local_dims(mesh, partit, nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF)
+        lmr = is_multirank(partit)
 
         !______________________________________________________________________
-        ! zero the first-stage Laplacian accumulator over all elements
-        do elem = 1, mesh%elem2D
+        ! zero the first-stage Laplacian accumulator over owned+eDim elements
+        do elem = 1, nElemL
             U_c(:, elem) = 0.0_WP
             V_c(:, elem) = 0.0_WP
         end do
 
         !______________________________________________________________________
         ! Pass 1: first Laplacian -> U_c/V_c (interior edges only; free slip on bnd).
-        do ed = 1, mesh%edge2D
-            if (ed > mesh%edge2D_in) cycle        ! boundary edge -> free slip
+        do ed = 1, nEdgeL
+            if (lmr) then
+                if (partit%myList_edge2D(ed) > mesh%edge2D_in) cycle   ! boundary edge
+            else
+                if (ed > mesh%edge2D_in) cycle        ! boundary edge -> free slip
+            end if
             el    = mesh%edge_tri(:, ed)
             len   = sqrt(sum(mesh%elem_area(el)))
             nzmin = maxval(mesh%ulevels(el))
@@ -130,13 +150,20 @@ contains
             V_c(nzmin:nzmax-1, el(2)) = V_c(nzmin:nzmax-1, el(2)) + update_v(nzmin:nzmax-1)
         end do
 
-        ! exchange_elem(U_c), exchange_elem(V_c) are 1-rank no-ops (lifted at M2.12)
+        if (lmr) then
+            call exchange_elem(U_c, partit)       ! FESOM2 :672
+            call exchange_elem(V_c, partit)       ! FESOM2 :673
+        end if
 
         !______________________________________________________________________
         ! Pass 2: second Laplacian (across-edge jump of U_c) + optional Laplacian
         ! term -> scatter into UV_rhs / elem_area. use_ssh_se_subcycl=.false. branch.
-        do ed = 1, mesh%edge2D
-            if (ed > mesh%edge2D_in) cycle        ! boundary edge -> free slip
+        do ed = 1, nEdgeL
+            if (lmr) then
+                if (partit%myList_edge2D(ed) > mesh%edge2D_in) cycle   ! boundary edge
+            else
+                if (ed > mesh%edge2D_in) cycle        ! boundary edge -> free slip
+            end if
             el    = mesh%edge_tri(:, ed)
             len   = sqrt(sum(mesh%elem_area(el)))
             nzmin = maxval(mesh%ulevels(el))

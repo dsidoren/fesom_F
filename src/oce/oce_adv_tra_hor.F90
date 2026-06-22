@@ -17,9 +17,11 @@ module oce_adv_tra_hor
     ! velocity by helem (layer thickness at element); a = mean r_earth*elem_cos over
     ! the edge's two elements (used by the MUSCL reconstruction, dead in upw1 — kept
     ! to mirror FESOM2).
-    use mod_precision, only: WP
-    use mod_constants, only: r_earth
-    use mod_mesh,      only: t_mesh
+    use mod_precision,   only: WP
+    use mod_constants,   only: r_earth
+    use mod_mesh,        only: t_mesh
+    use mod_partit,      only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
     public :: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
@@ -27,28 +29,32 @@ module oce_adv_tra_hor
 contains
 
     !===========================================================================
-    subroutine adv_tra_hor_upw1(vel, ttf, mesh, flux, o_init_zero)
+    subroutine adv_tra_hor_upw1(vel, ttf, mesh, flux, o_init_zero, partit)
         ! Low-order upwind horizontal flux (oce_adv_tra_hor.F90:64-257).
+        ! M2.12b: optional partit -> loop over OWNED edges (myDim_edge2D).
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(in)    :: vel(2, mesh%nl-1, mesh%elem2D)
         real(kind=WP), intent(inout) :: flux(mesh%nl-1, mesh%edge2D)
         logical, optional, intent(in) :: o_init_zero
+        type(t_partit), intent(in), optional :: partit
         logical       :: l_init_zero
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, a, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         l_init_zero = .true.
         if (present(o_init_zero)) l_init_zero = o_init_zero
         if (l_init_zero) then
-            do edge = 1, mesh%edge2D
+            do edge = 1, nEdgeO
                 do nz = 1, mesh%nl-1
                     flux(nz, edge) = 0.0_WP
                 end do
             end do
         end if
 
-        do edge = 1, mesh%edge2D
+        do edge = 1, nEdgeO
             enodes = mesh%edges(:, edge)
             el     = mesh%edge_tri(:, edge)
             nl1    = mesh%nlevels(el(1)) - 1
@@ -106,11 +112,12 @@ contains
     end subroutine adv_tra_hor_upw1
 
     !===========================================================================
-    subroutine adv_tra_hor_muscl(vel, ttf, mesh, num_ord, flux, edge_up_dn_grad, nboundary_lay, o_init_zero)
+    subroutine adv_tra_hor_muscl(vel, ttf, mesh, num_ord, flux, edge_up_dn_grad, nboundary_lay, o_init_zero, partit)
         ! MUSCL horizontal flux (oce_adv_tra_hor.F90:261-542). num_ord = fraction of
         ! 4th-order (centered) contribution; (1-num_ord) is 3rd-order upwind. The
         ! per-node clamp c_lo = max(sign(1,nboundary_lay-nz),0) switches off the
         ! linear-reconstruction increment below a node's boundary layer.
+        ! M2.12b: optional partit -> loop over OWNED edges (myDim_edge2D).
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: num_ord
         real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
@@ -119,19 +126,22 @@ contains
         integer,       intent(in)    :: nboundary_lay(mesh%nod2D)
         real(kind=WP), intent(in)    :: edge_up_dn_grad(4, mesh%nl-1, mesh%edge2D)
         logical, optional, intent(in) :: o_init_zero
+        type(t_partit), intent(in), optional :: partit
         logical       :: l_init_zero
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, a, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         l_init_zero = .true.
         if (present(o_init_zero)) l_init_zero = o_init_zero
         if (l_init_zero) then
-            do edge = 1, mesh%edge2D
+            do edge = 1, nEdgeO
                 flux(:, edge) = 0.0_WP
             end do
         end if
 
-        do edge = 1, mesh%edge2D
+        do edge = 1, nEdgeO
             enodes = mesh%edges(:, edge)
             el     = mesh%edge_tri(:, edge)
             nl1    = mesh%nlevels(el(1)) - 1
@@ -202,10 +212,11 @@ contains
     end subroutine adv_tra_hor_muscl
 
     !===========================================================================
-    subroutine adv_tra_hor_mfct(vel, ttf, mesh, num_ord, flux, edge_up_dn_grad, o_init_zero)
+    subroutine adv_tra_hor_mfct(vel, ttf, mesh, num_ord, flux, edge_up_dn_grad, o_init_zero, partit)
         ! MUSCL for the FCT path (oce_adv_tra_hor.F90:546-834). Same as
         ! adv_tra_hor_muscl but WITHOUT the c_lo bottom-boundary clamp (the
         ! reconstruction near bottom topography is not upwind; runs with FCT only).
+        ! M2.12b: optional partit -> loop over OWNED edges (myDim_edge2D).
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: num_ord
         real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
@@ -213,19 +224,22 @@ contains
         real(kind=WP), intent(inout) :: flux(mesh%nl-1, mesh%edge2D)
         real(kind=WP), intent(in)    :: edge_up_dn_grad(4, mesh%nl-1, mesh%edge2D)
         logical, optional, intent(in) :: o_init_zero
+        type(t_partit), intent(in), optional :: partit
         logical       :: l_init_zero
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, a, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         l_init_zero = .true.
         if (present(o_init_zero)) l_init_zero = o_init_zero
         if (l_init_zero) then
-            do edge = 1, mesh%edge2D
+            do edge = 1, nEdgeO
                 flux(:, edge) = 0.0_WP
             end do
         end if
 
-        do edge = 1, mesh%edge2D
+        do edge = 1, nEdgeO
             enodes = mesh%edges(:, edge)
             el     = mesh%edge_tri(:, edge)
             nl1    = mesh%nlevels(el(1)) - 1

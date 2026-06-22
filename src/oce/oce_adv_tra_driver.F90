@@ -33,6 +33,9 @@ module oce_adv_tra_driver
     use mod_mesh,         only: t_mesh
     use mod_dyn,          only: t_dyn
     use mod_tracer,       only: t_tracer
+    use mod_partit,       only: t_partit
+    use mod_part_bounds,  only: owned_bounds, is_multirank
+    use mod_halo,         only: exchange_nod
     use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
     use oce_adv_tra_ver,  only: adv_tra_ver_upw1, adv_tra_ver_qr4c
     use oce_adv_tra_fct,  only: oce_tra_adv_fct
@@ -43,9 +46,11 @@ module oce_adv_tra_driver
 
 contains
 
-    subroutine do_oce_adv_tra(dt, vel, w, wi, we, tr_num, dynamics, tracers, mesh)
+    subroutine do_oce_adv_tra(dt, vel, w, wi, we, tr_num, dynamics, tracers, mesh, partit)
         ! do_oce_adv_tra (oce_adv_tra_driver.F90:46-419). vel = horizontal velocity at
         ! elements; w / we / wi = full / explicit / implicit vertical velocity at nodes.
+        ! M2.12b: optional partit -> owned/halo loop bounds + exchange_nod(fct_LO) after
+        ! the low-order solution (FESOM2 :294), passed on to every kernel.
         real(kind=WP),  intent(in)            :: dt
         type(t_mesh),   intent(in)            :: mesh
         type(t_dyn),    intent(in)            :: dynamics
@@ -55,6 +60,7 @@ contains
         real(kind=WP),  intent(in), target    :: w (mesh%nl, mesh%nod2D)
         real(kind=WP),  intent(in)            :: wi(mesh%nl, mesh%nod2D)
         real(kind=WP),  intent(in), target    :: we(mesh%nl, mesh%nod2D)
+        type(t_partit), intent(in), optional  :: partit
 
         ! pointers into the per-tracer data / shared work (mirrors FESOM2 lines 92-106)
         real(kind=WP), pointer :: ttf(:,:), ttfAB(:,:), fct_LO(:,:)
@@ -67,6 +73,9 @@ contains
         real(kind=WP) :: opth, optv
         logical       :: do_zero_flux
         integer       :: e, n, nz, enodes(2), el(2), nl1, nl2, nu1, nu2, nl12, nu12
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         ttf             => tracers%data(tr_num)%values
         ttfAB           => tracers%data(tr_num)%valuesAB
@@ -88,15 +97,15 @@ contains
         ! FCT: low-order horizontal+vertical solution + low-order antidiffusive part
         if (trim(tracers%data(tr_num)%tra_adv_lim) == 'FCT') then
             ! low-order upwind horizontal flux (zero the flux first)
-            call adv_tra_hor_upw1(vel, ttf, mesh, adv_flux_hor, o_init_zero=.true.)
+            call adv_tra_hor_upw1(vel, ttf, mesh, adv_flux_hor, o_init_zero=.true., partit=partit)
 
             ! fct_LO = scatter of the LO horizontal flux over edges
-            do n = 1, mesh%nod2D
+            do n = 1, nNodL
                 do nz = 1, mesh%nl-1
                     fct_LO(nz,n) = 0.0_WP
                 end do
             end do
-            do e = 1, mesh%edge2D
+            do e = 1, nEdgeO
                 enodes = mesh%edges(:, e)
                 el     = mesh%edge_tri(:, e)
                 nl1 = mesh%nlevels(el(1))-1
@@ -116,8 +125,8 @@ contains
             end do
 
             ! low-order upwind vertical flux (explicit part: we), then finish the LO solution
-            call adv_tra_ver_upw1(we, ttf, mesh, adv_flux_ver, o_init_zero=.true.)
-            do n = 1, mesh%nod2D
+            call adv_tra_ver_upw1(we, ttf, mesh, adv_flux_ver, o_init_zero=.true., partit=partit)
+            do n = 1, nNodO
                 nu1 = mesh%ulevels_nod2D(n)
                 nl1 = mesh%nlevels_nod2D(n)
                 do nz = nu1, nl1-1
@@ -131,7 +140,9 @@ contains
                 ! implicit (w-split) vertical correction needs adv_tra_vert_impl — M2.
                 error stop 'do_oce_adv_tra: use_wsplit=.true. not yet supported (needs adv_tra_vert_impl, M2)'
             end if
-            ! exchange_nod(fct_LO) — no-op at 1 rank (M1.5 for multi-rank)
+            ! M2.12b: share the low-order solution to the halo (FESOM2 :294) — the FCT
+            ! limiter's a1 reads fct_LO at owned+halo nodes.
+            if (is_multirank(partit)) call exchange_nod(fct_LO, partit)
         end if
 
         do_zero_flux = .true.
@@ -141,11 +152,11 @@ contains
         ! horizontal advection (FCT: high-order antidiffusive; else: full high-order)
         select case (trim(tracers%data(tr_num)%tra_adv_hor))
         case ('MUSCL')
-            call adv_tra_hor_muscl(vel, ttfAB, mesh, opth, adv_flux_hor, edge_up_dn_grad, nboundary_lay, o_init_zero=do_zero_flux)
+            call adv_tra_hor_muscl(vel, ttfAB, mesh, opth, adv_flux_hor, edge_up_dn_grad, nboundary_lay, o_init_zero=do_zero_flux, partit=partit)
         case ('MFCT')
-            call adv_tra_hor_mfct (vel, ttfAB, mesh, opth, adv_flux_hor, edge_up_dn_grad,                o_init_zero=do_zero_flux)
+            call adv_tra_hor_mfct (vel, ttfAB, mesh, opth, adv_flux_hor, edge_up_dn_grad,                o_init_zero=do_zero_flux, partit=partit)
         case ('UPW1')
-            call adv_tra_hor_upw1 (vel, ttfAB, mesh,       adv_flux_hor,                                 o_init_zero=do_zero_flux)
+            call adv_tra_hor_upw1 (vel, ttfAB, mesh,       adv_flux_hor,                                 o_init_zero=do_zero_flux, partit=partit)
         case default
             error stop 'do_oce_adv_tra: unknown tra_adv_hor (expected UPW1/MUSCL/MFCT)'
         end select
@@ -160,9 +171,9 @@ contains
         ! vertical advection (FCT: high-order antidiffusive; else: full high-order)
         select case (trim(tracers%data(tr_num)%tra_adv_ver))
         case ('QR4C')
-            call adv_tra_ver_qr4c(pwvel, ttfAB, mesh, optv, adv_flux_ver, o_init_zero=do_zero_flux)
+            call adv_tra_ver_qr4c(pwvel, ttfAB, mesh, optv, adv_flux_ver, o_init_zero=do_zero_flux, partit=partit)
         case ('UPW1')
-            call adv_tra_ver_upw1(pwvel, ttfAB, mesh,       adv_flux_ver, o_init_zero=do_zero_flux)
+            call adv_tra_ver_upw1(pwvel, ttfAB, mesh,       adv_flux_ver, o_init_zero=do_zero_flux, partit=partit)
         case ('CDIFF', 'PPM')
             error stop 'do_oce_adv_tra: tra_adv_ver CDIFF/PPM not yet ported (M2)'
         case default
@@ -173,11 +184,11 @@ contains
         ! limit (FCT) and scatter to the per-node tendencies del_ttf_advhoriz/advvert
         if (trim(tracers%data(tr_num)%tra_adv_lim) == 'FCT') then
             call oce_tra_adv_fct(dt, ttf, fct_LO, adv_flux_hor, adv_flux_ver, &
-                                 fct_ttf_min, fct_ttf_max, fct_plus, fct_minus, mesh)
+                                 fct_ttf_min, fct_ttf_max, fct_plus, fct_minus, mesh, partit=partit)
             call oce_tra_adv_flux2dtracer(dt, dttf_h, dttf_v, adv_flux_hor, adv_flux_ver, mesh, &
-                                          use_lo=.true., ttf=ttf, lo=fct_LO)
+                                          use_lo=.true., ttf=ttf, lo=fct_LO, partit=partit)
         else
-            call oce_tra_adv_flux2dtracer(dt, dttf_h, dttf_v, adv_flux_hor, adv_flux_ver, mesh)
+            call oce_tra_adv_flux2dtracer(dt, dttf_h, dttf_v, adv_flux_hor, adv_flux_ver, mesh, partit=partit)
         end if
     end subroutine do_oce_adv_tra
 

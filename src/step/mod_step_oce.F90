@@ -30,12 +30,20 @@ module mod_step_oce
     ! M2.10) and the wind stress stress_surf (forcing, M2.10). When those features land the
     ! caller sources them (mesh / forcing) and step_oce is unchanged. Av/Kv are NO LONGER
     ! arguments — they are produced LIVE by oce_mixing_pp into dyn%work and consumed in place
-    ! (the M2.9b wiring that M2.5/M2.8 deferred). 1-rank: every exchange_* inside the kernels
-    ! is a no-op (lifted at M2.12).
+    ! (the M2.9b wiring that M2.5/M2.8 deferred).
+    !
+    ! M2.12c: an OPTIONAL partit is threaded to every kernel. Absent (or npes==1) -> each
+    ! kernel runs its proven 1-rank path VERBATIM (the 1-rank callers fesom_stepdump /
+    ! fesom_lifecycle omit partit and are unchanged). Present + npes>1 -> the kernels use
+    ! owned/halo loop bounds + the FESOM2 halo exchanges (M2.12c-1 pre-SSH dynamics, c-2 the
+    ! SSH stiffness + free-surface CG, c-3 the post-SSH ALE update + tracer SOLVE). The
+    ! per-substep dumps are gid-keyed (mod_dump), so the multi-rank whole-step driver
+    ! (fesom_stepfull_mr) dumps the same per-rank owned probes the 1-rank gate compares.
     use mod_precision,      only: WP
     use mod_mesh,           only: t_mesh
     use mod_dyn,            only: t_dyn
     use mod_tracer,         only: t_tracer
+    use mod_partit,         only: t_partit
     use mod_dump,           only: dump_node, dump_node_2d, &
                                   DUMP_SUBSTEP_PRESSURE_BV, DUMP_SUBSTEP_MIXING, &
                                   DUMP_SUBSTEP_SSH_RHS, DUMP_SUBSTEP_SSH_SOLVE, &
@@ -62,7 +70,7 @@ contains
 
     subroutine step_oce(n, dt, lfirst, dynamics, tracers, mesh, &
                         Ki, heat_flux, water_flux, virtual_salt, relax_salt, &
-                        real_salt_flux, is_nonlinfs, stress_surf)
+                        real_salt_flux, is_nonlinfs, stress_surf, partit)
         integer,        intent(in)            :: n        ! step number (dump key)
         real(kind=WP),  intent(in)            :: dt
         logical,        intent(in)            :: lfirst   ! first Euler step (ff=1.0)
@@ -75,10 +83,12 @@ contains
         real(kind=WP),  intent(in) :: virtual_salt(mesh%nod2D), relax_salt(mesh%nod2D)
         real(kind=WP),  intent(in) :: real_salt_flux(mesh%nod2D), is_nonlinfs
         real(kind=WP),  intent(in) :: stress_surf(2, mesh%elem2D)
+        ! M2.12c: optional multi-rank partition (absent => 1-rank verbatim).
+        type(t_partit), intent(in), optional :: partit
 
         !_______________________________________________________________________
         ! nodal velocity (the REAL uvnode source, was prescribed at M2.8)
-        call compute_vel_nodes(dynamics, mesh)
+        call compute_vel_nodes(dynamics, mesh, partit)
 
         !_______________________________________________________________________
         ! EOS density, hydrostatic pressure, N^2 (+ horizontal smoothing: the caller
@@ -87,7 +97,7 @@ contains
         call pressure_bv(tracers%data(1)%values, tracers%data(2)%values, &
                          dynamics%work%density_ref, mesh, &
                          dynamics%work%density_m_rho0, dynamics%work%hpressure, &
-                         dynamics%work%bvfreq)
+                         dynamics%work%bvfreq, partit)
         call dump_node(DUMP_SUBSTEP_PRESSURE_BV, n, 'density',  dynamics%work%density_m_rho0, mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_PRESSURE_BV, n, 'pressure', dynamics%work%hpressure,      mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_PRESSURE_BV, n, 'bvfreq',   dynamics%work%bvfreq,         mesh%nlevels_nod2D)
@@ -95,7 +105,7 @@ contains
         !_______________________________________________________________________
         ! hydrostatic pressure gradient force
         call pressure_force_4_linfs_fullcell(dynamics%work%hpressure, mesh, &
-                                             dynamics%work%pgf_x, dynamics%work%pgf_y)
+                                             dynamics%work%pgf_x, dynamics%work%pgf_y, partit)
 
         !_______________________________________________________________________
         ! [sw_alpha_beta / compute_sigma_xy / compute_neutral_slope omitted — dead in M2]
@@ -104,40 +114,40 @@ contains
         ! vertical mixing: PP Richardson-number Kv/Av + convective adjustment.
         ! oce_mixing_pp fills only interior levels; surface/bottom keep their setup 0
         ! (cosmetic — the tracer TDMA / impl_vert_visc consume interior Kv/Av only).
-        call oce_mixing_pp(dynamics, mesh)
-        call mo_convect(dynamics, mesh)
+        call oce_mixing_pp(dynamics, mesh, partit)
+        call mo_convect(dynamics, mesh, partit)
         call dump_node(DUMP_SUBSTEP_MIXING, n, 'Kv', dynamics%work%Kv, mesh%nlevels_nod2D)
 
         !_______________________________________________________________________
         ! momentum rhs: Coriolis AB2 + PGF + SSH-grad + momentum advection
-        call compute_vel_rhs(dynamics, mesh, dt, lfirst)
+        call compute_vel_rhs(dynamics, mesh, dt, lfirst, partit)
 
         !_______________________________________________________________________
         ! horizontal (biharmonic) viscosity
-        call viscosity_filter(dynamics%opt_visc, dynamics, mesh, dt)
+        call viscosity_filter(dynamics%opt_visc, dynamics, mesh, dt, partit)
 
         !_______________________________________________________________________
         ! implicit vertical viscosity TDMA (Av is now LIVE from PP mixing)
-        call impl_vert_visc_ale(dynamics, mesh, dt, dynamics%work%Av, stress_surf)
+        call impl_vert_visc_ale(dynamics, mesh, dt, dynamics%work%Av, stress_surf, partit)
 
         !_______________________________________________________________________
         ! free-surface solve
-        call compute_ssh_rhs_ale(dynamics, mesh)
+        call compute_ssh_rhs_ale(dynamics, mesh, partit)
         call dump_node_2d(DUMP_SUBSTEP_SSH_RHS, n, 'ssh_rhs', dynamics%ssh_rhs)
-        call solve_ssh_ale(dynamics, mesh)
+        call solve_ssh_ale(dynamics, mesh, partit=partit)
         call dump_node_2d(DUMP_SUBSTEP_SSH_SOLVE, n, 'd_eta', dynamics%d_eta)
 
         !_______________________________________________________________________
         ! velocity update + elevation
-        call update_vel(dynamics, mesh, dt)
-        call compute_hbar_ale(dynamics, mesh, dt)
+        call update_vel(dynamics, mesh, dt, partit)
+        call compute_hbar_ale(dynamics, mesh, dt, partit)
         call dump_node_2d(DUMP_SUBSTEP_HBAR, n, 'hbar', mesh%hbar)
-        call update_eta_n(dynamics, mesh)
+        call update_eta_n(dynamics, mesh, partit)
         call dump_node_2d(DUMP_SUBSTEP_ETA_N, n, 'eta_n', dynamics%eta_n)
 
         !_______________________________________________________________________
         ! vertical velocity / ALE thickness (linfs: hnode_new = hnode)
-        call vert_vel_ale(dynamics, mesh, dt)
+        call vert_vel_ale(dynamics, mesh, dt, partit)
         call dump_node(DUMP_SUBSTEP_ALE, n, 'hnode_new', mesh%hnode_new, mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_ALE, n, 'w',         dynamics%w,     mesh%nlevels_nod2D)
 
@@ -145,13 +155,13 @@ contains
         ! tracer solve (advection + diffusion; tracer TDMA consumes LIVE Kv)
         call solve_tracers_ale(dt, dynamics, tracers, mesh, Ki, &
                                heat_flux, water_flux, virtual_salt, relax_salt, &
-                               real_salt_flux, is_nonlinfs)
+                               real_salt_flux, is_nonlinfs, partit)
         call dump_node(DUMP_SUBSTEP_TRACERS, n, 'T', tracers%data(1)%values, mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_TRACERS, n, 'S', tracers%data(2)%values, mesh%nlevels_nod2D)
 
         !_______________________________________________________________________
         ! commit the new layer thicknesses (linfs: no-op)
-        call update_thickness_ale(mesh)
+        call update_thickness_ale(mesh, partit)
         call dump_node(DUMP_SUBSTEP_THICKNESS, n, 'hnode', mesh%hnode, mesh%nlevels_nod2D)
     end subroutine step_oce
 

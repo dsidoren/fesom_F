@@ -33,6 +33,8 @@ module oce_pgf
     use mod_precision, only: WP
     use mod_mesh,      only: t_mesh
     use mod_constants, only: density_0
+    use mod_partit,    only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
     public :: pressure_force_4_linfs_fullcell
@@ -40,18 +42,24 @@ module oce_pgf
 contains
 
     !===========================================================================
-    subroutine pressure_force_4_linfs_fullcell(hpressure, mesh, pgf_x, pgf_y)
+    subroutine pressure_force_4_linfs_fullcell(hpressure, mesh, pgf_x, pgf_y, partit)
         ! hpressure: (nl, nod2D) in (M2.1 output; only levels 1..nlevels-1 read).
         ! pgf_x/pgf_y: (nl-1, elem2D) inout; the caller pre-zeros them (see header).
+        ! M2.12c: optional partit -> owned element loop (FESOM2 :593 do elem=1,
+        ! myDim_elem2D). pgf is element-local (no halo dependency, FESOM2 does not
+        ! exchange it); compute_vel_rhs reads it at owned elements only.
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: hpressure(mesh%nl, mesh%nod2D)
         real(kind=WP), intent(inout) :: pgf_x(mesh%nl-1, mesh%elem2D)
         real(kind=WP), intent(inout) :: pgf_y(mesh%nl-1, mesh%elem2D)
+        type(t_partit), intent(in), optional :: partit
         integer :: elem, elnodes(3), nle, ule, nlz
+        integer :: nNodO, nNodL, nEdgeO, nElemO
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         !_______________________________________________________________________
         ! loop over triangular elements
-        do elem=1, mesh%elem2D
+        do elem=1, nElemO
             !___________________________________________________________________
             ! number of levels at elem
             nle = mesh%nlevels(elem)-1

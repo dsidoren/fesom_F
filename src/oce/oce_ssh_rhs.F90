@@ -62,6 +62,9 @@ module oce_ssh_rhs
     use mod_param_phys, only: alpha, theta
     use mod_mesh,       only: t_mesh
     use mod_dyn,        only: t_dyn
+    use mod_partit,     only: t_partit
+    use mod_part_bounds, only: owned_bounds, is_multirank
+    use mod_halo,       only: exchange_nod
     implicit none
     private
     public :: init_stiff_mat_ale, compute_ssh_rhs_ale
@@ -69,74 +72,95 @@ module oce_ssh_rhs
 contains
 
     !===========================================================================
-    subroutine init_stiff_mat_ale(mesh, dt)
+    subroutine init_stiff_mat_ale(mesh, dt, partit)
         ! Build mesh%ssh_stiff (CSR sparsity + the linfs stiffness/mass values). Call
         ! ONCE; dt is the pi namelist timestep (see module/driver notes). Idempotent
         ! it is NOT (allocates ssh_stiff) — call exactly once per mesh.
+        !
+        ! M2.12c-2 (multi-rank, OPTIONAL partit): the owned rows assemble FULLY LOCALLY
+        ! — NO halo exchange, NO mesh-infra extension. Verified partition invariants
+        ! (pi dist_2/8): (i) every edge incident to an owned node is owned, so looping
+        ! the owned edges (1..nEdgeO) visits every contribution to an owned row; (ii)
+        ! both triangles of an owned edge are OWNED (edge_tri(:,ed) <= nElemO), so the
+        ! elem2D_nodes/gradient_sca/zbar_e_bot reads stay within the owned-only arrays
+        ! (M2.12a) — the FESOM2 oracle relies on the SAME invariant (its elem2D_nodes/
+        ! gradient_sca are owned-only too, oce_mesh.F90:497,2466); (iii) an owned
+        ! element's nodes are within owned+halo (<= nNodL), so n_num(elnodes) is in
+        ! bounds and the CSR can have HALO columns (colind_loc up to nNodL). partit
+        ! absent OR npes==1 => nNodO=nNodL=mesh%nod2D etc. (the proven 1-rank path
+        ! VERBATIM). FESOM2's global-contiguous rowptr/colind remap (for an external
+        ! solver) is dropped — the CG uses rowptr_loc/colind_loc only.
         type(t_mesh),  intent(inout), target :: mesh
         real(kind=WP), intent(in)            :: dt
+        type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         integer              :: n, n1, n2, i, row, ed
         integer              :: elnodes(3), el(2), npos(3)
         integer              :: offset, nini, nend
+        integer              :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP)        :: factor, fy(3), zsrf
         integer, allocatable :: n_num(:), n_pos(:,:)
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+
         associate(ssh_stiff => mesh%ssh_stiff)
         !__________________________________________________________________
-        ! a) neighbourhood: n_num(n) = #neighbours of node n (incl. self),
-        !    n_pos(:,n) = their local indices, n_pos(1,n)=n (self -> diagonal first)
-        allocate(n_num(mesh%nod2D), n_pos(12, mesh%nod2D))
+        ! a) neighbourhood: n_num(n) = #neighbours of OWNED node n (incl. self),
+        !    n_pos(:,n) = their local indices (a neighbour may be a HALO node),
+        !    n_pos(1,n)=n (self -> diagonal first). n_num is sized owned+halo because
+        !    it is reused below as the reverse-map indexed by a (possibly halo) colind.
+        allocate(n_num(nNodL), n_pos(12, nNodO))
         n_pos = 0
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             n_num(n)   = 1
             n_pos(1,n) = n
         end do
-        do n = 1, mesh%edge2D
+        do n = 1, nEdgeO
             n1 = mesh%edges(1,n)
             n2 = mesh%edges(2,n)
-            if (n1 <= mesh%nod2D) then
+            if (n1 <= nNodO) then
                 n_pos(n_num(n1)+1, n1) = n2
                 n_num(n1) = n_num(n1)+1
             end if
-            if (n2 <= mesh%nod2D) then
+            if (n2 <= nNodO) then
                 n_pos(n_num(n2)+1, n2) = n1
                 n_num(n2) = n_num(n2)+1
             end if
         end do
 
         !__________________________________________________________________
-        ! b) CSR row pointers + nonzero count
-        ssh_stiff%dim = mesh%nod2D
-        allocate(ssh_stiff%rowptr(mesh%nod2D+1), ssh_stiff%rowptr_loc(mesh%nod2D+1))
+        ! b) CSR row pointers (OWNED rows) + nonzero count
+        ssh_stiff%dim = mesh%nod2D   ! GLOBAL node count (FESOM2 ssh_stiff%dim=nod2D)
+        allocate(ssh_stiff%rowptr(nNodO+1), ssh_stiff%rowptr_loc(nNodO+1))
         ssh_stiff%rowptr_loc(1) = 1
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             ssh_stiff%rowptr_loc(n+1) = ssh_stiff%rowptr_loc(n) + n_num(n)
         end do
-        ssh_stiff%nza = ssh_stiff%rowptr_loc(mesh%nod2D+1) - 1
+        ssh_stiff%nza = ssh_stiff%rowptr_loc(nNodO+1) - 1
 
         !__________________________________________________________________
-        ! c) CSR column indices (local) + zero the values
+        ! c) CSR column indices (local; may be HALO) + zero the values
         allocate(ssh_stiff%colind(ssh_stiff%nza), ssh_stiff%colind_loc(ssh_stiff%nza))
         allocate(ssh_stiff%values(ssh_stiff%nza))
         ssh_stiff%values = 0.0_WP
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             nini = ssh_stiff%rowptr_loc(n)
             nend = ssh_stiff%rowptr_loc(n+1) - 1
             ssh_stiff%colind_loc(nini:nend) = n_pos(1:n_num(n), n)
         end do
-        ! 1-rank: global == local natural numbering
+        ! the CG uses only rowptr_loc/colind_loc; keep rowptr/colind as their copies
+        ! (FESOM2's global-contiguous remap is for an external solver, dropped here).
         ssh_stiff%rowptr = ssh_stiff%rowptr_loc
         ssh_stiff%colind = ssh_stiff%colind_loc
 
         !__________________________________________________________________
-        ! d) stiffness part: factor * H * div, scattered over edges. n_num is reused
-        !    as the reverse-map (local node index -> its CSR position within the row).
+        ! d) stiffness part: factor * H * div, scattered over OWNED edges. n_num is
+        !    reused as the reverse-map (local node index -> its CSR position in the row).
         n_num  = 0
         factor = g*dt*alpha*theta
-        do ed = 1, mesh%edge2D
+        do ed = 1, nEdgeO
             el = mesh%edge_tri(:, ed)
-            do i = 1, 2   ! the two triangles sharing edge ed
+            do i = 1, 2   ! the two triangles sharing edge ed (both OWNED, invariant ii)
                 if (el(i) < 1) cycle   ! boundary edge has only one triangle
                 elnodes = mesh%elem2D_nodes(1:3, el(i))
                 zsrf    = mesh%zbar(mesh%ulevels(el(i)))   ! zbar_e_srf (=0, no cavity)
@@ -146,7 +170,7 @@ contains
                 if (i==2) fy = -fy
 
                 row = mesh%edges(1, ed)
-                if (row <= mesh%nod2D) then
+                if (row <= nNodO) then
                     do n = ssh_stiff%rowptr_loc(row), ssh_stiff%rowptr_loc(row+1)-1
                         n_num(ssh_stiff%colind_loc(n)) = n
                     end do
@@ -155,7 +179,7 @@ contains
                 end if
 
                 row = mesh%edges(2, ed)
-                if (row <= mesh%nod2D) then
+                if (row <= nNodO) then
                     do n = ssh_stiff%rowptr_loc(row), ssh_stiff%rowptr_loc(row+1)-1
                         n_num(ssh_stiff%colind_loc(n)) = n
                     end do
@@ -168,7 +192,7 @@ contains
         !__________________________________________________________________
         ! e) mass part: + areasvol(surf)/dt on the row diagonal (the first CSR entry).
         !    Skip cavity nodes (ulevels_nod2D>1: rigid-lid, no eta time-derivative).
-        do row = 1, mesh%nod2D
+        do row = 1, nNodO
             if (mesh%ulevels_nod2D(row) > 1) cycle
             offset = ssh_stiff%rowptr_loc(row)
             ssh_stiff%values(offset) = ssh_stiff%values(offset) &
@@ -180,14 +204,21 @@ contains
     end subroutine init_stiff_mat_ale
 
     !===========================================================================
-    subroutine compute_ssh_rhs_ale(dynamics, mesh)
+    subroutine compute_ssh_rhs_ale(dynamics, mesh, partit)
         ! Assemble dynamics%ssh_rhs = depth-integrated horizontal divergence of
         ! alpha*(UV+UV_rhs), scattered as an edge flux into the two edge nodes
         ! (+ the linfs (1-alpha)*ssh_rhs_old term, = 0 on pi since alpha=1).
+        ! M2.12c: optional partit -> ssh_rhs zeroed at owned+halo (FESOM2 :2045
+        ! do n=1,myDim_nod2D+eDim_nod2D), the flux scatter over OWNED edges (FESOM2 :2053
+        ! do ed=1,myDim_edge2D — every edge incident to an owned node is owned, so the
+        ! owned-node ssh_rhs is fully accumulated), the linfs term over owned nodes, then
+        ! exchange_nod(ssh_rhs) (FESOM2 :2145) to fill the halo for the CG.
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
+        type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         integer       :: ed, el(2), enodes(2), nz, n, nzmin, nzmax
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: c1, c2, deltaX1, deltaX2, deltaY1, deltaY2
         real(kind=WP), dimension(:,:,:), pointer :: UV, UV_rhs
         real(kind=WP), dimension(:),     pointer :: ssh_rhs, ssh_rhs_old
@@ -196,12 +227,13 @@ contains
         UV_rhs      => dynamics%uv_rhs
         ssh_rhs     => dynamics%ssh_rhs
         ssh_rhs_old => dynamics%ssh_rhs_old
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
-        do n = 1, mesh%nod2D
+        do n = 1, nNodL
             ssh_rhs(n) = 0.0_WP
         end do
 
-        do ed = 1, mesh%edge2D
+        do ed = 1, nEdgeO
             enodes = mesh%edges(:, ed)
             el     = mesh%edge_tri(:, ed)
 
@@ -239,10 +271,10 @@ contains
 
         ! linfs water-flux term: ssh_rhs += (1-alpha)*ssh_rhs_old (= 0 since alpha=1).
         ! The non-linfs water_flux branch (zstar) is deferred with its own ALE gate.
-        do n = 1, mesh%nod2D
+        do n = 1, nNodO
             ssh_rhs(n) = ssh_rhs(n) + (1.0_WP-alpha)*ssh_rhs_old(n)
         end do
-        ! exchange_nod(ssh_rhs) — 1-rank no-op (lifted at M2.12)
+        if (is_multirank(partit)) call exchange_nod(ssh_rhs, partit)   ! FESOM2 :2145
     end subroutine compute_ssh_rhs_ale
 
 end module oce_ssh_rhs

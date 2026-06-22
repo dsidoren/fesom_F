@@ -41,6 +41,9 @@ module oce_pressure_bv
     use mod_constants,   only: density_0, g
     use mod_config,      only: which_ALE
     use mod_param_phys,  only: state_equation, N2smth_h, N2smth_v, N2smth_hidx
+    use mod_partit,      only: t_partit
+    use mod_part_bounds, only: owned_bounds, is_multirank
+    use mod_halo,        only: exchange_nod
     implicit none
     private
     public :: pressure_bv, densityJM_components, insitu2pot
@@ -48,10 +51,14 @@ module oce_pressure_bv
 contains
 
     !===========================================================================
-    subroutine pressure_bv(temp, salt, density_ref, mesh, density_m_rho0, hpressure, bvfreq)
+    subroutine pressure_bv(temp, salt, density_ref, mesh, density_m_rho0, hpressure, bvfreq, partit)
         ! temp/salt/density_ref: (nl-1, nod2D) inputs. density_m_rho0: (nl-1, nod2D)
         ! out. hpressure/bvfreq: (nl, nod2D) out (only 1..nzmax used). The caller
         ! pre-zeros the three outputs (see header).
+        ! M2.12c: optional partit -> owned+halo node loop (FESOM2 :237-244 do node=1,
+        ! myDim_nod2D+eDim_nod2D — the EOS is per-node so computing the halo here saves
+        ! an exchange; the downstream pgf/smoothing then read it locally) + smooth_nod's
+        ! per-sweep exchange_nod(bvfreq).
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: temp(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(in)    :: salt(mesh%nl-1, mesh%nod2D)
@@ -59,17 +66,21 @@ contains
         real(kind=WP), intent(inout) :: density_m_rho0(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(inout) :: hpressure(mesh%nl, mesh%nod2D)
         real(kind=WP), intent(inout) :: bvfreq(mesh%nl, mesh%nod2D)
+        type(t_partit), intent(in), optional :: partit
 
         integer       :: node, nz, nzmax, nzmin
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: zmean, dz_inv, a, rho_up, rho_dn, t, s, smin
         real(kind=WP) :: bulk_up, bulk_dn
         real(kind=WP) :: rhopot(mesh%nl), bulk_0(mesh%nl), bulk_pz(mesh%nl)
         real(kind=WP) :: bulk_pz2(mesh%nl), rho(mesh%nl), bv1(mesh%nl)
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+
         !_______________________________________________________________________
         ! Screen salinity (diagnostic; s<0 would break sqrt(s) in the EOS).
         smin = 0.0_WP
-        do node=1, mesh%nod2D
+        do node=1, nNodL
             do nz = mesh%ulevels_nod2D(node), mesh%nlevels_nod2D(node)-1
                 smin = min(smin, salt(nz,node))
             end do
@@ -77,7 +88,7 @@ contains
         if (smin < 0.0_WP) write(*,*) ' --> oce_pressure_bv: s<0 happens!', smin
 
         !_______________________________________________________________________
-        do node=1, mesh%nod2D
+        do node=1, nNodL
             nzmin = mesh%ulevels_nod2D(node)
             nzmax = mesh%nlevels_nod2D(node)
 
@@ -170,7 +181,7 @@ contains
 
         !_______________________________________________________________________
         ! apply horizontal smoothing of the N^2 buoyancy frequency
-        if (N2smth_h) call smooth_nod(bvfreq, N2smth_hidx, mesh)
+        if (N2smth_h) call smooth_nod(bvfreq, N2smth_hidx, mesh, partit)
 
     end subroutine pressure_bv
 
@@ -229,24 +240,29 @@ contains
     end subroutine densityJM_components
 
     !===========================================================================
-    subroutine smooth_nod(arr, N_smooth, mesh)
+    subroutine smooth_nod(arr, N_smooth, mesh, partit)
         ! Mass-matrix horizontal smoother, transcribed from FESOM2 g_support
         ! smooth_nod3D (gen_support.F90:99-198): applies the lumped P1 mass matrix
-        ! N_smooth times. 1-rank: the per-cycle exchange_nod(arr) is dropped (no-op;
-        ! lifted at M2.12). Per-level patch areas vary with the bathymetry (a deep
-        ! node's shallower neighbour elements drop out level by level). elem_area is
-        ! geom-proven; the nod_in_elem2D / elem2D_nodes order is area-gate-proven (L9).
+        ! N_smooth times. M2.12c: optional partit -> owned-node loops + the per-sweep
+        ! exchange_nod(arr) (the patch accumulation reads arr at an owned node's owned-
+        ! element nodes, which can be halo nodes, so arr must be halo-valid each sweep).
+        ! Per-level patch areas vary with the bathymetry (a deep node's shallower
+        ! neighbour elements drop out level by level). elem_area is geom-proven; the
+        ! nod_in_elem2D / elem2D_nodes order is area-gate-proven (L9).
         real(kind=WP), intent(inout)       :: arr(:,:)
         integer,       intent(in)          :: N_smooth
         type(t_mesh),  intent(in), target  :: mesh
+        type(t_partit), intent(in), optional :: partit
         integer :: n, q, el, nz, j, nlev, uln, nln, ule, nle
+        integer :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP), allocatable :: vol(:,:), work_array(:,:)
 
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         nlev=ubound(arr,1)
-        allocate(vol(mesh%nl, mesh%nod2D), work_array(nlev, mesh%nod2D))
+        allocate(vol(mesh%nl, nNodL), work_array(nlev, nNodL))
 
         ! First sweep: precompute the (inverse) patch areas, then smooth.
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             uln = mesh%ulevels_nod2d(n)
             nln = min(nlev, mesh%nlevels_nod2d(n))
             vol(       1:nln,n) = 0._WP
@@ -266,18 +282,18 @@ contains
                 vol(nz,n) = 1._WP / (3._WP * vol(nz,n))  ! inverse, scaled by 1/3
             end do
         end do
-        do n=1, mesh%nod2D
+        do n=1, nNodO
             uln = mesh%ulevels_nod2d(n)
             nln = min(nlev, mesh%nlevels_nod2d(n))
             do nz=uln,nln
                 arr(nz, n) = work_array(nz, n) * vol(nz,n)
             end do
         end do
-        ! (1-rank: exchange_nod(arr) no-op)
+        if (is_multirank(partit)) call exchange_nod(arr, partit)
 
         ! Remaining sweeps reuse the precomputed inverse patch areas.
         do q=1,N_smooth-1
-            do n=1, mesh%nod2D
+            do n=1, nNodO
                 uln = mesh%ulevels_nod2d(n)
                 nln = min(nlev, mesh%nlevels_nod2d(n))
                 work_array(1:nln,n) = 0._WP
@@ -292,14 +308,14 @@ contains
                     end do
                 end do
             end do
-            do n=1, mesh%nod2D
+            do n=1, nNodO
                 uln = mesh%ulevels_nod2d(n)
                 nln = min(nlev, mesh%nlevels_nod2d(n))
                 do nz=uln,nln
                     arr(nz, n) = work_array(nz, n) * vol(nz,n)
                 end do
             end do
-            ! (1-rank: exchange_nod(arr) no-op)
+            if (is_multirank(partit)) call exchange_nod(arr, partit)
         end do
 
         deallocate(vol, work_array)

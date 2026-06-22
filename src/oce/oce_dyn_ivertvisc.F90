@@ -77,22 +77,30 @@ module oce_dyn_ivertvisc
     use mod_param_phys, only: C_d
     use mod_mesh,       only: t_mesh
     use mod_dyn,        only: t_dyn
+    use mod_partit,     only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
     public :: impl_vert_visc_ale
 
 contains
 
-    subroutine impl_vert_visc_ale(dynamics, mesh, dt, Av, stress_surf)
+    subroutine impl_vert_visc_ale(dynamics, mesh, dt, Av, stress_surf, partit)
+        ! M2.12c: optional partit -> owned element loop (FESOM2 oce_ale.F90:3350
+        ! do elem=1,myDim_elem2D). The per-element Thomas solve is column-local with NO
+        ! exchange; UV_rhs is overwritten at owned elements (the halo UV_rhs keeps its
+        ! post-viscosity value, exactly as FESOM2).
         type(t_dyn),   intent(inout), target :: dynamics
         type(t_mesh),  intent(in),    target :: mesh
         real(kind=WP), intent(in)            :: dt
         real(kind=WP), intent(in)            :: Av(:,:)          ! (nl,  elem2D) vertical viscosity (M2.8 mixing)
         real(kind=WP), intent(in)            :: stress_surf(:,:) ! (2,   elem2D) surface wind stress (M2.10 forcing)
+        type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         real(kind=WP) :: a(mesh%nl-1), b(mesh%nl-1), c(mesh%nl-1), ur(mesh%nl-1), vr(mesh%nl-1)
         real(kind=WP) :: cp(mesh%nl-1), up(mesh%nl-1), vp(mesh%nl-1)
         integer       :: nz, elem, nzmin, nzmax, elnodes(3)
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: zinv, m, friction, wu, wd
         real(kind=WP) :: zbar_n(mesh%nl), Z_n(mesh%nl-1)
         real(kind=WP), dimension(:,:,:), pointer :: UV, UV_rhs
@@ -101,9 +109,10 @@ contains
         UV     => dynamics%uv
         UV_rhs => dynamics%uv_rhs
         Wvel_i => dynamics%w_i
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         !______________________________________________________________________
-        do elem = 1, mesh%elem2D
+        do elem = 1, nElemO
             elnodes = mesh%elem2D_nodes(1:3, elem)
             nzmin   = mesh%ulevels(elem)
             nzmax   = mesh%nlevels(elem)
