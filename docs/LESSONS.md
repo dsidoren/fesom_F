@@ -1470,3 +1470,49 @@ multi-rank model is byte-identical to FESOM2 — the architectural MVP.** The re
   that produced this: transcribe FESOM2's loop bounds + halo exchanges exactly, gate per-rank vs the same partition
   (L8), keep the optional-`partit`-absent path byte-for-byte the proven 1-rank code so nothing can regress, and verify
   a scoped partition invariant empirically before building machinery for it (L33).
+
+## L35 — Production validation (multi-rank FREE-RUNNING lifecycle): the single-step prescribe-and-stop gate MASKS live-multi-step halo bugs; UV over-exchange FIXED, `tr_xy` "exchange" was a KNEM single-copy MPI bug — RESOLVED, `max|Δ|=0`
+
+The m2-mvp byte-match was proven by SINGLE-STEP prescribe-and-stop gates (`run_step_gate_multirank.sh` etc.): the
+whole state is prescribed at owned+halo each run, so a wrong/stale HALO is invisible — the prescribed halo is always
+correct, and the step runs once. **That cannot validate halo MAINTENANCE across steps.** The production-validation
+**multi-rank FREE-RUNNING lifecycle** (`fesom_lifecycle_mr` + `run_lifecycle_gate_multirank.sh`, CORE2 dist_2,
+dt=1800 — the multi-rank analog of the byte-exact 1-rank L29 lifecycle) was the FIRST test of *multi-rank ×
+free-running × many-steps*, and it immediately exposed two latent bugs the single-step gates masked:
+
+- **UV halo over-exchange — FIXED.** `update_vel` exchanged UV over `com_elem2D_full` (eDim+eXDim); FESOM2 uses
+  `com_elem2D` (eDim, `exchange_elem(UV)`). The extra eXDim fill diverged from FESOM2's stale-0 eXDim and (compounded
+  by the same exchange pathology as the open bug below) corrupted the UV halo → viscosity blew it up (eta→2708 by
+  step 3) while FESOM2 stayed at eta≈0.54. Fix: match FESOM2's eDim exchange. Model then STABLE + matches FESOM2 to
+  all printed digits. **Lesson: match FESOM2's exact halo WIDTH per field — UV is eDim, `tr_xy` is full; the extra
+  halo is not "harmless superset" when a downstream kernel reads it.**
+
+- **`tr_xy` halo "drift" was an OpenMPI `vader` KNEM single-copy bug — RESOLVED.** The element tracer-gradient
+  `tr_xy`, exchanged over `com_elem2D_full` before the MUSCL `fill_up_dn_grad`, got a WRONG halo at step 2+ (OWNED
+  byte-exact; HALO 456/636 wrong, F2≈1e-6 vs F3≈1e-11), drifting T/S → gross step-3 `ssh_rhs`. The exchange LOGIC was
+  provably correct, and it was — the corruption was BELOW our code, in the MPI transport. **Bisection (cross-rank
+  buffer trace in `core_blk_r`):** rank1's packed `sbuf` was correct, rank0's unpack `rbuf→arr` was faithful, but the
+  bytes *in transit* `sbuf→rbuf` were correct for the first **134656 bytes** (16832 reals) then garbage — a contiguous
+  truncation, not a shift or a logic error. **Root cause:** OpenMPI 4.1.2's `vader` (shared-memory) BTL uses a
+  single-copy mechanism for large messages; on levante it falls back to **KNEM** (CMA needs ptrace, blocked by
+  `kernel.yama.ptrace_scope=3`), and KNEM here CORRUPTS messages above the eager limit. Proof: same binary, same
+  buffers — under `--mca btl self,tcp` `total-diff=0`; under `--mca btl_vader_single_copy_mechanism none` (forces the
+  copy-in/copy-out two-copy path) `total-diff=0`; only default `vader`+KNEM corrupts. **Fix:** `env.sh` exports
+  `OMPI_MCA_btl_vader_single_copy_mechanism=none` (levante branch) → the CORE2 dist_2 free-running lifecycle is
+  `max|Δ|=0` (195 records), with no 1-rank/pi regression (ctest 13/13, step gates 65/65 `=0`). RULED OUT (correctly, in
+  the end): eXDim halo ordering (`myList_elem2D` is read VERBATIM from the same `my_list*.out` as FESOM2 — identical
+  owned AND halo), `core_blk_r` impl, com corruption, the gid-test (it was telling the truth — our logic is right).
+  **Why it hid until now:** the bug needs a message >~131 KB; every pi-mesh gate's halos stay well under it, and FESOM2's
+  `MPI_TYPE_INDEXED` exchange uses a different `vader` path that dodges KNEM. CORE2's `tr_xy` block exchange (94×636 =
+  478 KB) is the FIRST live F3 message above the threshold — only the big-mesh free-running lifecycle could expose it.
+
+**Meta-lessons:** (1) a single-step prescribe-and-stop byte-gate is necessary but NOT sufficient — only a free-running
+multi-step gate validates halo maintenance; and only a BIG-MESH one exercises the message sizes that trip a buggy MPI
+single-copy path. (2) When OWNED is byte-exact and the exchange logic is provably correct yet the HALO is still wrong,
+suspect the LAYER BELOW your code (the MPI transport): bisect pack→transport→unpack with a cross-rank buffer trace
+keyed by gid; here `sbuf`(correct)→`rbuf`(corrupt)→`arr`(faithful) pointed straight at MPI. (3) "Provably impossible by
+every verified fact" usually means a fact lives one layer down — verify the transport itself, not just your indices.
+(4) The clean gid-exchange self-test (`g3(owned)=gid`) verifies the slist/rlist MAPPING and was NOT misleading — it
+correctly said the logic was right; trust it for what it tests and look elsewhere (not "it must be a subtle logic bug
+the test can't see"). (5) `myList_elem2D` (owned AND halo) is byte-identical to FESOM2 by construction — both read the
+same `dist_N/my_list*.out` verbatim — so a position-keyed dump diff IS gid-aligned; don't chase an "ordering" ghost.

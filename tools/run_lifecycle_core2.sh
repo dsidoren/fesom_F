@@ -19,13 +19,17 @@
 #                    MFCT/QR4C/FCT, i_vert_diff=.true., K_hor=0, use_instabmix, ...)
 # Needs the hand-crafted CORE2 dist_1/ (tools/make_dist1.py, M2.11a).
 #
-#   tools/run_lifecycle_core2.sh [run_dir] [dump_prefix] [nsteps]
+#   tools/run_lifecycle_core2.sh [run_dir] [dump_prefix] [nsteps] [nranks]
+# [nranks] (default 1) selects CORE2 dist_<nranks>; npes>1 is the production-validation
+# multi-rank oracle (the built-in dump_shim is gid-keyed -> per-rank <DUMP>.<mype5> dumps;
+# the npes==1 io_meandata early-return is inactive so the normal multi-rank io_gather runs).
 set -euo pipefail
 
 F2=/home/a/a270088/port2/fesom2
 RUN="${1:-/scratch/a/a270088/lifecycle_core2}"
 DUMP="${2:-$RUN/life_f2}"
 NSTEPS="${3:-3}"
+NP="${4:-1}"
 
 source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 
@@ -61,8 +65,8 @@ cd "$RUN"
 export FESOM_DUMP_FILE="$DUMP"          # built-in per-substep node dumps (multi-step)
 export FESOM_DUMP_MAXSTEPS="$NSTEPS"
 ulimit -s unlimited
-echo "run_lifecycle_core2: 1 rank, $NSTEPS steps (unforced) -> ${DUMP}.<rank>"
-mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n 1 ./fesom.x > "$RUN/run.log" 2>&1 || true
+echo "run_lifecycle_core2: $NP rank(s), $NSTEPS steps (unforced) -> ${DUMP}.<rank>"
+mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n "$NP" ./fesom.x > "$RUN/run.log" 2>&1 || true
 if ls "${DUMP}".* >/dev/null 2>&1; then
     echo "run_lifecycle_core2: done -> ${DUMP}.00000 ($(stat -c%s "${DUMP}".00000) bytes)"
     grep -E 'FESOM Run|fesom_dump_shim|complete|blowup|NaN|Error|error' "$RUN/run.log" | head -20 || true

@@ -35,19 +35,24 @@ module oce_initial_state
     !   nod_in_elem2D order match FESOM2's global order (geometry-gate proven, L9), so
     !   the sweep is deterministic and byte-identical.
     !
-    ! SCOPE: 1-rank, no cavity (use_cavity=.false. on CORE2), no RECOM, T/S only. The
-    ! cavity bilinear/vertical branches + the MPI broadcast/reduce machinery are
-    ! v1-dropped (deferred to a multi-rank/cavity re-gate). do_ic3d takes a t_ic3d_config
-    ! the driver fills from the namelist (no namelist reader in v1).
+    ! SCOPE: no cavity (use_cavity=.false. on CORE2), no RECOM, T/S only. M2.12-MVP added
+    ! the MULTI-RANK path via an OPTIONAL partit (absent => the proven 1-rank path verbatim;
+    ! present+npes>1 => owned / owned+halo loop bounds + the FESOM2 extrap_nod3D exchange_nod
+    ! + allreduce_max(glob_max), gated per-rank vs same-partition FESOM2, L8). The cavity
+    ! bilinear/vertical branches stay v1-dropped (deferred to a cavity re-gate). do_ic3d takes
+    ! a t_ic3d_config the driver fills from the namelist (no namelist reader in v1).
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     use, intrinsic :: iso_fortran_env, only: real64
     use mod_precision,    only: WP
     use mod_constants,    only: rad
     use mod_mesh,         only: t_mesh
+    use mod_partit,       only: t_partit
     use mod_tracer,       only: t_tracer
     use mod_io_netcdf,    only: nc_open_read, nc_close, nc_dimlen, nc_get_axis_dp, &
                                 nc_get_var3d_dp
     use mod_forcing_read, only: forcing_binarysearch
+    use mod_part_bounds,  only: owned_bounds, is_multirank
+    use mod_halo,         only: exchange_nod, allreduce_max
     use oce_pressure_bv,  only: insitu2pot
     implicit none
     private
@@ -112,14 +117,16 @@ contains
     !===========================================================================
     ! Per-node bilinear source indices (FESOM2 nc_ic3d_ini, non-cavity branch
     ! 281-300). Reads the grid first (nc_readGrid is called from here, as in FESOM2).
-    subroutine nc_ic3d_ini(filename, ic, mesh)
+    subroutine nc_ic3d_ini(filename, ic, mesh, partit)
         character(len=*),    intent(in) :: filename
         type(t_ic3d_config), intent(in) :: ic
         type(t_mesh),        intent(in) :: mesh
-        integer  :: i
+        type(t_partit),      intent(in), optional :: partit
+        integer  :: i, nNodO, nNodL, nEdgeO, nElemO
         real(WP) :: x, y
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         call nc_readGrid(filename, ic)
-        do i = 1, mesh%nod2D
+        do i = 1, nNodO            ! FESOM2 nc_ic3d_ini: do i=1, myDim_nod2D (owned)
             x = mesh%geo_coord_nod2D(1, i)/rad
             y = mesh%geo_coord_nod2D(2, i)/rad
             if (x < 0._WP)   x = x + 360._WP
@@ -140,18 +147,22 @@ contains
     !===========================================================================
     ! Read the 3-D double cube, mask missing -> dummy, spatial bilinear + vertical
     ! linear interp onto Z_3d_n. FESOM2 getcoeffld (303-491, non-cavity branch).
-    subroutine getcoeffld(filename, varname, ic, values, mesh)
+    subroutine getcoeffld(filename, varname, ic, values, mesh, partit)
         character(len=*),    intent(in)    :: filename, varname
         type(t_ic3d_config), intent(in)    :: ic
         type(t_mesh),        intent(in)    :: mesh
-        real(WP),            intent(inout) :: values(mesh%nl-1, mesh%nod2D)
+        real(WP),            intent(inout) :: values(:,:)   ! (nl-1, nNodL) — assumed-shape so
+                                                            ! values(:,:)=dummy spans the LOCAL size
+        type(t_partit),      intent(in), optional :: partit
         integer  :: ncid, i, j, ii, ip1, jp1, k, d_indx, d_indx_p1, nl1, ul1
+        integer  :: nNodO, nNodL, nEdgeO, nElemO
         real(WP) :: cf_a, cf_b, delta_d, denom, x1, x2, y1, y2, x, y, d1, d2
         real(WP) :: dummy
         real(real64), allocatable :: raw(:,:,:)
         real(WP),     allocatable :: ncdata(:,:,:), data1d(:)
 
         dummy = ic%dummy
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         allocate(ncdata(nc_Nlon, nc_Nlat, nc_Ndepth), data1d(nc_Ndepth))
         allocate(raw(nc_Nlon-2, nc_Nlat, nc_Ndepth))
         ncdata = 0.0_WP
@@ -176,8 +187,10 @@ contains
         end do
         deallocate(raw)
 
-        ! bilinear space interp + vertical linear interp (data on a regular grid)
-        do ii = 1, mesh%nod2D
+        ! bilinear space interp + vertical linear interp (data on a regular grid).
+        ! Owned nodes only (FESOM2 getcoeffld: do ii=1, myDim_nod2D); the halo is filled
+        ! by extrap_nod3D's exchange_nod (per-node independent => halo == owner's value).
+        do ii = 1, nNodO
             nl1 = mesh%nlevels_nod2D(ii) - 1
             ul1 = mesh%ulevels_nod2D(ii)
             i   = bilin_indx_i(ii)
@@ -227,18 +240,28 @@ contains
     ! (to convergence over the surface) + downward vertical fill. FESOM2
     ! extrap_nod3D (gen_support.F90:400-507). 1-rank: exchange_nod is a no-op and the
     ! MPI_AllREDUCE collapses to the local maxval, so they are dropped.
-    subroutine extrap_nod3D(arr, ic, mesh)
+    subroutine extrap_nod3D(arr, ic, mesh, partit)
         type(t_ic3d_config), intent(in)    :: ic
         type(t_mesh),        intent(in)    :: mesh
-        real(WP),            intent(inout) :: arr(mesh%nl-1, mesh%nod2D)
+        real(WP),            intent(inout) :: arr(:,:)   ! (nl-1, nNodL) assumed-shape (FESOM2 form)
+        type(t_partit),      intent(in), optional :: partit
         integer  :: n, nl1, nz, k, j, el, cnt
+        integer  :: nNodO, nNodL, nEdgeO, nElemO
         integer  :: enodes(3)
         logical  :: success
         real(WP) :: val, glob_max, dummy
         real(WP), allocatable :: work_array(:)
         dummy = ic%dummy
-        allocate(work_array(mesh%nod2D))
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        allocate(work_array(nNodL))
+        ! FESOM2 extrap_nod3D (gen_support.F90:418-424): initial halo exchange so the
+        ! owned-node Gauss-Seidel sees valid halo neighbours; glob_max is the GLOBAL
+        ! surface max (it only drives the loop COUNT). 1-rank: both are no-ops. An owned
+        ! node's nod_in_elem2D references only OWNED elements (build_nod_in_elem_local),
+        ! so elem2D_nodes(:,el) is in-bounds; halo node VALUES come from work_array(nNodL).
+        if (is_multirank(partit)) call exchange_nod(arr, partit)
         glob_max = maxval(arr(1,:))
+        if (is_multirank(partit)) call allreduce_max(glob_max, partit)
         do while (glob_max > 0.99_WP*dummy)
             ! horizontal extrapolation
             do nz = 1, mesh%nl-1
@@ -246,7 +269,7 @@ contains
                 success = .true.
                 do while (success)               ! runs as long as success==.true.
                     success = .false.
-                    do n = 1, mesh%nod2D
+                    do n = 1, nNodO            ! OWNED nodes (FESOM2: do n=1, myDim_nod2D)
                         if ((work_array(n) > 0.99_WP*dummy) .and. (mesh%nlevels_nod2D(n) > nz)) then
                             cnt = 0
                             val = 0._WP
@@ -272,38 +295,45 @@ contains
                 end do
                 arr(nz,:) = work_array
             end do
+            ! propagate the filled owned values into neighbours' halos, then re-check the
+            ! global surface max (FESOM2 gen_support.F90:484-488).
+            if (is_multirank(partit)) call exchange_nod(arr, partit)
             glob_max = maxval(arr(1,:))
+            if (is_multirank(partit)) call allreduce_max(glob_max, partit)
         end do
-        ! vertical extrapolation
-        do n = 1, mesh%nod2D
+        ! vertical extrapolation (owned nodes; FESOM2: do n=1, myDim_nod2D)
+        do n = 1, nNodO
             nl1 = mesh%nlevels_nod2D(n) - 1
             do nz = 2, nl1
                 if (arr(nz,n) > 0.99_WP*dummy) arr(nz,n) = arr(nz-1,n)
             end do
         end do
+        if (is_multirank(partit)) call exchange_nod(arr, partit)   ! FESOM2 final exchange
         deallocate(work_array)
     end subroutine extrap_nod3D
 
     !===========================================================================
     ! Orchestrate: per (file,var) read+interp+extrap into the matching tracer; zero
     ! land/bottom; Kelvin guard; in-situ->potential. FESOM2 do_ic3d (493-644).
-    subroutine do_ic3d(tracers, ic, mesh)
+    subroutine do_ic3d(tracers, ic, mesh, partit)
         type(t_tracer),      intent(inout) :: tracers
         type(t_ic3d_config), intent(in)    :: ic
         type(t_mesh),        intent(in)    :: mesh
-        integer :: n, ct
+        type(t_partit),      intent(in), optional :: partit
+        integer :: n, ct, nNodO, nNodL, nEdgeO, nElemO
         real(WP) :: dummy
         dummy = ic%dummy
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
-        allocate(bilin_indx_i(mesh%nod2D), bilin_indx_j(mesh%nod2D))
+        allocate(bilin_indx_i(nNodL), bilin_indx_j(nNodL))
         do n = 1, ic%n_ic3d
             do ct = 1, tracers%num_tracers
                 if (tracers%data(ct)%ID == ic%idlist(n)) then
-                    call nc_ic3d_ini(trim(ic%filelist(n)), ic, mesh)
+                    call nc_ic3d_ini(trim(ic%filelist(n)), ic, mesh, partit)
                     call getcoeffld(trim(ic%filelist(n)), trim(ic%varlist(n)), ic, &
-                                    tracers%data(ct)%values, mesh)
+                                    tracers%data(ct)%values, mesh, partit)
                     call nc_end()
-                    call extrap_nod3D(tracers%data(ct)%values, ic, mesh)
+                    call extrap_nod3D(tracers%data(ct)%values, ic, mesh, partit)
                     exit
                 elseif (ct == tracers%num_tracers) then
                     write(*,*) 'do_ic3d: idlist contains tracer ID not in tracer list: ', ic%idlist(n)
@@ -318,8 +348,9 @@ contains
             where (tracers%data(ct)%values > 0.9_WP*dummy)
                 tracers%data(ct)%values = 0.0_WP
             end where
-            ! ensure bottom is zero (no cavity -> no surface zeroing)
-            do n = 1, mesh%nod2D
+            ! ensure bottom is zero (no cavity -> no surface zeroing); owned+halo
+            ! (FESOM2 do_ic3d: do n=1, myDim_nod2D+eDim_nod2D).
+            do n = 1, nNodL
                 tracers%data(ct)%values(mesh%nlevels_nod2D(n):mesh%nl-1, n) = 0.0_WP
             end do
         end do
@@ -329,7 +360,7 @@ contains
         end where
 
         if (ic%t_insitu) then
-            call insitu2pot(tracers%data(1)%values, tracers%data(2)%values, mesh)
+            call insitu2pot(tracers%data(1)%values, tracers%data(2)%values, mesh, partit)
         end if
     end subroutine do_ic3d
 

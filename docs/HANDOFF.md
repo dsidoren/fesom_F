@@ -13,9 +13,12 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   (SSH stiffness + free-surface CG → d_eta) + c-3 (post-SSH ALE update + tracer SOLVE + the WHOLE step via step_oce,
   all 65 substep records `max|Δ|=0`).** The whole-model multi-rank byte-match — the architectural MVP — holds at dist_2
   AND dist_8 with no 1-rank regression. **MVP CLOSED 2026-06-22: baseline re-confirmed after a clean rebuild (all 8
-  byte-gates `max|Δ|=0`/green) → M2.12b–c committed → tag `m2-mvp` created.** Remaining (OPTIONAL): the production
-  dt=1800 multi-step reduced-M2 run (validation beyond the prescribe-and-stop gate). Next milestone: M3 (sea ice EVP +
-  `oce_fluxes` air-sea budget). See "Next task".
+  byte-gates `max|Δ|=0`/green) → M2.12b–c committed → tag `m2-mvp` created.** **PRODUCTION VALIDATION DONE 2026-06-22:
+  the multi-rank FREE-RUNNING CORE2 lifecycle (dt=1800, reduced-M2) is now BYTE-EXACT vs FESOM2 (195 records
+  `max|Δ|=0`); it exposed two latent multi-rank bugs — a UV halo over-exchange (FIXED, eDim) and a `tr_xy` halo "drift"
+  that turned out to be an OpenMPI `vader` KNEM single-copy corruption of large (>131 KB) messages, fixed by
+  `env.sh` exporting `OMPI_MCA_btl_vader_single_copy_mechanism=none` (LESSONS L35; not a FESOM3 bug).** Next milestone:
+  M3 (sea ice EVP + `oce_fluxes` air-sea budget). See "Next task".
 
 A compact list; full per-milestone detail + the gate recipes are archived in
 [`HANDOFF-archive.md`](HANDOFF-archive.md).
@@ -175,18 +178,34 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
   sanity probes — matching FESOM2's exact owned loop bounds + exchanges makes any stale halo unobservable in the owned
   dumps. **NO 1-rank regression** (step 65 + pressure 57 + advhor MR dist_2/8 + stepdyn MR dist_2/8 + 13/13 ctest all
   `max|Δ|=0`). See LESSONS **L34**.
-- **ACTIVE NEXT: M3 — sea ice (EVP).** **MVP CLOSED 2026-06-22** — the whole-model multi-rank byte-match (M2.12) is
-  committed and tagged `m2-mvp` (baseline re-confirmed after a clean rebuild: all 8 byte-gates `max|Δ|=0`/green, see
-  the gate list in "RESUME HERE"). OPTIONAL secondary validation still open: a production dt=1800 multi-step reduced-M2
-  run (the multi-rank lifecycle analog, going beyond the prescribe-and-stop gate — per-substep `max|Δ|=0` vs a FESOM2
-  reduced-config run + a non-drifting multi-step sanity run). **M3** turns the prescribed `heat_flux`/`water_flux`/
-  `virtual_salt`/`relax_salt` into the real air-sea budget: sea ice (EVP rheology + thermo) → `oce_fluxes` → the
-  obudget in `ice_thermo_oce.F90`. Scope sketch in the Roadmap (plan §M3).
+- **MVP CLOSED 2026-06-22** — the whole-model multi-rank byte-match (M2.12) is committed and tagged `m2-mvp` (baseline
+  re-confirmed after a clean rebuild: all 8 byte-gates `max|Δ|=0`/green, see the gate list in "RESUME HERE").
+- **PRODUCTION VALIDATION (multi-rank FREE-RUNNING lifecycle) — ✅ DONE, BYTE-EXACT.** Built the multi-rank analog
+  of the 1-rank CORE2 lifecycle (`fesom_lifecycle_mr` + `tools/run_lifecycle_gate_multirank.sh`, CORE2 dist_2, dt=1800,
+  reduced-M2) — the FIRST test of *multi-rank × free-running × many-steps* (the m2-mvp gates are all single-step
+  prescribe-and-stop, which MASK live-multi-step halo bugs). It found two latent bugs, **both now fixed**:
+  1. ✅ **UV halo blow-up FIXED** — `update_vel` exchanged UV over `com_elem2D_full` (eDim+eXDim); FESOM2 uses
+     `com_elem2D` (eDim). Wrong UV halo → viscosity → blow-up. Fix (`oce_ale.F90`): eDim `exchange_elem(UV)`. Model now
+     STABLE + matches FESOM2's physical values to all printed digits.
+  2. ✅ **`tr_xy` halo "drift" SOLVED — it was an OpenMPI `vader` KNEM single-copy bug, NOT a FESOM3 bug.** The
+     exchange logic is correct; KNEM (the `vader` shared-memory single-copy path; CMA is blocked by
+     `kernel.yama.ptrace_scope=3`) CORRUPTS messages >~131 KB on levante. A cross-rank buffer trace localized it to the
+     MPI transport (`sbuf` packed correct → `rbuf` corrupt from byte 134656 → unpack faithful). The CORE2 `tr_xy`
+     block exchange (478 KB) is the FIRST live F3 message above the threshold (every pi gate stays under it; FESOM2's
+     `MPI_TYPE_INDEXED` path dodges KNEM) — which is why it only surfaced in the big-mesh free-running lifecycle.
+     **Fix: `env.sh` exports `OMPI_MCA_btl_vader_single_copy_mechanism=none`** (forces byte-faithful copy-in/copy-out).
+     Verified: CORE2 dist_2 lifecycle gate **195 records `max|Δ|=0`**; no 1-rank/pi regression. Full writeup +
+     meta-lessons: [`HANDOFF-multirank-lifecycle-trxy.md`](HANDOFF-multirank-lifecycle-trxy.md) + LESSONS **L35**.
+- **ACTIVE NEXT: M3 — sea ice (EVP).** The prescribed `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt` become the
+  real air-sea budget (sea ice EVP + thermo → `oce_fluxes` → the obudget in `ice_thermo_oce.F90`). Scope sketch in the
+  Roadmap (plan §M3).
 
-**↳ RESUME HERE (next session): the MVP is CLOSED + tagged `m2-mvp` (baseline re-confirmed 2026-06-22, all gates below
-`max|Δ|=0`/green). Start M3 — sea ice (EVP).** Scope M3 from FESOM2 (`ice_EVP.F90`/`ice_maEVP.F90`/`ice_thermo_*.F90` +
-`oce_fluxes`), mirroring the M2.x decomposition: build `t_ice` from scratch, then per-kernel operator-diff `max|Δ|=0`
-then whole-model byte-gate. OPTIONAL before M3: the production dt=1800 multi-rank reduced-M2 run.
+**↳ RESUME HERE (next session): M3 (sea ice EVP).** The multi-rank free-running lifecycle is byte-exact; the m2-mvp
+single-step gates stay `max|Δ|=0`/green (no-regression baseline). The production-validation work (UV eDim fix +
+`do_ic3d` MR lift + `fesom_lifecycle_mr` + the `env.sh` `single_copy_mechanism=none` MPI fix) is **committed to
+`main`** (the M2.12 production-validation commit, immediately after `m2-mvp`), F3-side §6 diagnostics stripped. (The FESOM2 oracle's inert diagnostic shims remain in its own repo —
+out of scope here, harmless.) ⚠️ **Any multi-rank run on levante needs the env.sh MPI flag** (sourcing `env.sh` sets
+it) — without it, large vader messages silently corrupt.
 
 Regression sanity (re-run any time — e.g. after a rebuild; all `max|Δ|=0`/green as of 2026-06-22):
 ```bash

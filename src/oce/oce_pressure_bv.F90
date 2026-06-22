@@ -329,15 +329,19 @@ contains
     ! mid-depth Z(nz) for the pressure proxy pp=abs(Z(nz)) (NOT Z_3d_n — the comment
     ! at :3108 keeps Z for partial-cell stability at init). The IC driver feeds
     ! tracers%data(1)%values (in-situ T) / data(2)%values (S) here (M2.11b do_ic3d,
-    ! t_insitu=.true.). 1-rank: the FESOM2 loop runs n=1..myDim+eDim; here n=1..nod2D.
-    subroutine insitu2pot(temp, salt, mesh)
+    ! t_insitu=.true.). M2.12-MVP: optional partit -> the FESOM2 owned+halo node loop
+    ! (n=1..myDim+eDim); per-node independent so the halo potential T is computed locally
+    ! (= the owner's value, no exchange needed). Absent partit -> n=1..nod2D (1-rank).
+    subroutine insitu2pot(temp, salt, mesh, partit)
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(inout) :: temp(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(in)    :: salt(mesh%nl-1, mesh%nod2D)
-        integer       :: n, nz, nzmin, nzmax
+        type(t_partit), intent(in), optional :: partit
+        integer       :: n, nz, nzmin, nzmax, nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: pp, pr, tt, ss
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         pr = 0.0_WP
-        do n = 1, mesh%nod2D
+        do n = 1, nNodL
             nzmin = mesh%ulevels_nod2D(n)
             nzmax = mesh%nlevels_nod2D(n)
             do nz = nzmin, nzmax-1

@@ -103,10 +103,11 @@ contains
         ! myDim_elem2D), then exchange_elem(UV) (:172). d_eta is read at the owned element's
         ! 3 nodes (within owned+halo, invariant iii) — valid from the CG's exchange_nod(x).
         ! The UV halo is refreshed owner->halo for the NEXT step (compute_vel_nodes/advection);
-        ! the owned UV the post-update kernels read is computed directly here. exchange_elem
-        ! is rank-1/2 only in mod_halo, so the rank-3 UV uses exchange_elem_full (eDim+eXDim,
-        ! a superset of FESOM2's eDim exchange_elem; the owned values are identical and the
-        ! owned-node dumps never depend on the eXDim halo).
+        ! the owned UV the post-update kernels read is computed directly here. The rank-3
+        ! (2,nl-1,elem) UV exchanges over the eDim com_elem2D (exchange_elem_blk_r) — EXACTLY
+        ! FESOM2's exchange_elem(UV), refreshing only the eDim halo the owned-edge viscosity
+        ! reads. (The earlier com_elem2D_full superset corrupted the CORE2 multi-step halo —
+        ! see the production-validation lessons; eDim is the faithful + correct choice.)
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
         real(kind=WP), intent(in) :: dt
@@ -135,7 +136,7 @@ contains
                 UV(2,nz,elem) = UV(2,nz,elem) + UV_rhs(2,nz,elem) + Fy
             end do
         end do
-        if (is_multirank(partit)) call exchange_elem_full(UV, partit)   ! FESOM2 :172
+        if (is_multirank(partit)) call exchange_elem(UV, partit)   ! FESOM2 :172 (eDim com_elem2D)
     end subroutine update_vel
 
     !===========================================================================

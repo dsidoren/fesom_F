@@ -15,7 +15,7 @@ module mod_halo
     implicit none
     private
     public :: exchange_nod, exchange_elem, exchange_elem_full, &
-              allreduce_sum, stale_halo_max_nod, stale_halo_max_elem
+              allreduce_sum, allreduce_max, stale_halo_max_nod, stale_halo_max_elem
 
     interface exchange_nod
         module procedure exchange_nod_2D_r, exchange_nod_3D_r, exchange_nod_2D_i, &
@@ -32,8 +32,17 @@ module mod_halo
         module procedure allreduce_sum_r0, allreduce_sum_r1
     end interface
 
+    ! Cross-rank floating-point MAX reduction. Mirrors the FESOM2 extrap_nod3D /
+    ! do_ic3d MPI_AllREDUCE(loc_max, glob_max, MPI_MAX, MPI_COMM_FESOM): MAX is a
+    ! selection (no rounding) so it is exact + deterministic; glob_max only drives the
+    ! extrapolation loop COUNT (same global max => same iteration count on both codes).
+    ! Guard callers with is_multirank — at npes==1 the local max already IS the global.
+    interface allreduce_max
+        module procedure allreduce_max_r0
+    end interface
+
     interface exchange_elem
-        module procedure exchange_elem_2D_r, exchange_elem_3D_r
+        module procedure exchange_elem_2D_r, exchange_elem_3D_r, exchange_elem_blk_r
     end interface
 
     ! Full element halo (com_elem2D_full = eDim+eXDim) — the FESOM2 convention picks
@@ -46,6 +55,7 @@ module mod_halo
     end interface
 
     integer, parameter :: HALO_TAG = 1
+    integer, parameter :: BLK_TAG  = 2   ! distinct tag for the rank-3 block exchange (core_blk_r)
 
 contains
 
@@ -96,6 +106,18 @@ contains
         call core_3D_r(arr, partit%com_elem2D, partit%MPI_COMM_FESOM)
     end subroutine
 
+    ! Rank-3 (d1,d2,elem) element exchange over the STANDARD eDim halo (com_elem2D) —
+    ! the FESOM2 exchange_elem(UV) for the (2,nl-1,elem) velocity. NOT com_elem2D_full:
+    ! FESOM2's update_vel refreshes only the eDim halo, which is all the owned-edge
+    ! kernels (viscosity etc.) read. core_blk_r is the same block core the node-block
+    ! exchange_nod(UVnode) uses (proven), here driven by com_elem2D.
+    subroutine exchange_elem_blk_r(arr, partit, luse_g2g)
+        real(kind=WP),  intent(inout) :: arr(:,:,:)
+        type(t_partit), intent(in)    :: partit
+        logical, optional, intent(in) :: luse_g2g
+        call core_blk_r(arr, partit%com_elem2D, partit%MPI_COMM_FESOM)
+    end subroutine
+
     ! --------------- full element halo wrappers (com_elem2D_full) -----------
     subroutine exchange_elem_full_2D_r(arr, partit, luse_g2g)
         real(kind=WP),  intent(inout) :: arr(:)
@@ -134,6 +156,14 @@ contains
         call MPI_Allreduce(MPI_IN_PLACE, s, size(s), MPI_WP, MPI_SUM, &
                            partit%MPI_COMM_FESOM, ierr)
     end subroutine allreduce_sum_r1
+
+    subroutine allreduce_max_r0(s, partit)
+        real(kind=WP),  intent(inout) :: s
+        type(t_partit), intent(in)    :: partit
+        integer :: ierr
+        call MPI_Allreduce(MPI_IN_PLACE, s, 1, MPI_WP, MPI_MAX, &
+                           partit%MPI_COMM_FESOM, ierr)
+    end subroutine allreduce_max_r0
 
     ! ===================== cores =============================
     subroutine core_2D_r(arr, com, comm)
@@ -232,42 +262,55 @@ contains
 
     subroutine core_blk_r(arr, com, comm)
         ! Broadcast-only exchange of a (d1, d2, entity) array — the leading two dims
-        ! form a contiguous block transported per halo entity (e.g. tr_xy(2,nl-1,*)).
+        ! form a contiguous block (blk=d1*d2) transported per halo entity (e.g.
+        ! tr_xy(2,nl-1,*)). FLAT rank-1 MPI buffers + explicit copy (the proven core_2D_r
+        ! pattern): pass a rank-1 element to MPI (clean sequence association), never a
+        ! rank-3 array element.
         real(kind=WP),    intent(inout) :: arr(:,:,:)
         type(com_struct), intent(in)    :: com
         integer,          intent(in)    :: comm
-        real(kind=WP), allocatable :: sbuf(:,:,:), rbuf(:,:,:)
+        real(kind=WP), allocatable :: sbuf(:), rbuf(:)
         integer, allocatable :: req(:)
-        integer :: i, off, n, nreq, ierr, d1, d2, k
+        integer :: i, off, n, nreq, ierr, d1, d2, blk, k, base, j1, j2, e
         if (com%rPEnum == 0 .and. com%sPEnum == 0) return
-        d1 = size(arr, 1); d2 = size(arr, 2)
+        d1 = size(arr, 1); d2 = size(arr, 2); blk = d1*d2
         allocate(req(com%rPEnum + com%sPEnum))
-        allocate(rbuf(d1, d2, max(com%rptr(com%rPEnum+1)-1, 0)))
-        allocate(sbuf(d1, d2, max(com%sptr(com%sPEnum+1)-1, 0)))
+        allocate(rbuf(blk * max(com%rptr(com%rPEnum+1)-1, 0)))
+        allocate(sbuf(blk * max(com%sptr(com%sPEnum+1)-1, 0)))
         nreq = 0
         do i = 1, com%rPEnum
             off = com%rptr(i); n = com%rptr(i+1) - com%rptr(i)
             nreq = nreq + 1
-            call MPI_Irecv(rbuf(1,1,off), d1*d2*n, MPI_WP, com%rPE(i), HALO_TAG, comm, req(nreq), ierr)
+            call MPI_Irecv(rbuf((off-1)*blk+1), blk*n, MPI_WP, com%rPE(i), BLK_TAG, comm, req(nreq), ierr)
         end do
         do i = 1, com%sPEnum
             off = com%sptr(i); n = com%sptr(i+1) - com%sptr(i)
             do k = 0, n-1
-                sbuf(:, :, off+k) = arr(:, :, com%slist(off+k))
+                e = com%slist(off+k); base = (off-1+k)*blk
+                do j2 = 1, d2
+                    do j1 = 1, d1
+                        sbuf(base + (j2-1)*d1 + j1) = arr(j1, j2, e)
+                    end do
+                end do
             end do
             nreq = nreq + 1
-            call MPI_Isend(sbuf(1,1,off), d1*d2*n, MPI_WP, com%sPE(i), HALO_TAG, comm, req(nreq), ierr)
+            call MPI_Isend(sbuf((off-1)*blk+1), blk*n, MPI_WP, com%sPE(i), BLK_TAG, comm, req(nreq), ierr)
         end do
         call MPI_Waitall(nreq, req, MPI_STATUSES_IGNORE, ierr)
         do i = 1, com%rPEnum
             off = com%rptr(i); n = com%rptr(i+1) - com%rptr(i)
             do k = 0, n-1
-                arr(:, :, com%rlist(off+k)) = rbuf(:, :, off+k)   ! broadcast-only
+                e = com%rlist(off+k); base = (off-1+k)*blk
+                do j2 = 1, d2
+                    do j1 = 1, d1
+                        arr(j1, j2, e) = rbuf(base + (j2-1)*d1 + j1)
+                    end do
+                end do
             end do
         end do
     end subroutine core_blk_r
 
-    ! ============ stale-halo probe (exchange-and-compare) ============
+    ! ============ stale-halo probe (exchange-and-compare; used by test_halo) ============
     real(kind=WP) function stale_halo_max_nod(arr, partit) result(maxdiff)
         real(kind=WP),  intent(in) :: arr(:)
         type(t_partit), intent(in) :: partit
