@@ -73,13 +73,19 @@ contains
             model%tracers%data(i)%ID = i
         end do
 
-        ! ice prognostic
-        allocate(model%ice%a_ice(nn), model%ice%m_ice(nn), model%ice%m_snow(nn))
+        ! ice prognostic (M3: data(1:3) = a_ice/m_ice/m_snow; sigma is EVP stress on elems).
+        ! Convenience skeleton wiring only — the real ice allocation is ice_allocate (M3a).
+        model%ice%num_itracers = 3
+        allocate(model%ice%data(3))
+        do i = 1, 3
+            allocate(model%ice%data(i)%values(nn))
+            model%ice%data(i)%values = 0.0_WP
+            model%ice%data(i)%ID = i
+        end do
         allocate(model%ice%uice(nn), model%ice%vice(nn))
-        allocate(model%ice%sigma11(ne), model%ice%sigma12(ne), model%ice%sigma22(ne))
-        model%ice%a_ice = 0.0_WP; model%ice%m_ice = 0.0_WP; model%ice%m_snow = 0.0_WP
+        allocate(model%ice%work%sigma11(ne), model%ice%work%sigma12(ne), model%ice%work%sigma22(ne))
         model%ice%uice = 0.0_WP; model%ice%vice = 0.0_WP
-        model%ice%sigma11 = 0.0_WP; model%ice%sigma12 = 0.0_WP; model%ice%sigma22 = 0.0_WP
+        model%ice%work%sigma11 = 0.0_WP; model%ice%work%sigma12 = 0.0_WP; model%ice%work%sigma22 = 0.0_WP
     end subroutine allocate_state
 
     subroutine model_step(model)
@@ -121,7 +127,7 @@ contains
         if (allocated(model%dyn%uvnode))  deallocate(model%dyn%uvnode)
         if (allocated(model%dyn%w))       deallocate(model%dyn%w)
         if (allocated(model%tracers%data))deallocate(model%tracers%data)
-        if (allocated(model%ice%a_ice))   deallocate(model%ice%a_ice)
+        if (allocated(model%ice%data))    deallocate(model%ice%data)
         call par_ex(comm, mype)
     end subroutine model_finalize
 

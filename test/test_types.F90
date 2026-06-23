@@ -188,31 +188,33 @@ contains
     end subroutine
 
     subroutine test_ice()
-        type(t_ice) :: a, b
-        integer :: u, ios, i
+        ! M3a: smoke-test the restructured t_ice (data(1:3) ice tracers a_ice/m_ice/m_snow
+        ! + work EVP stress/strain on elements). Restart binary I/O for ice is deferred
+        ! (cold-start lifecycle only through M3; the M3 byte-gates use mod_dump/FADVHDMP,
+        ! not the type's write(unformatted)) — so this is a field-access smoke test.
+        type(t_ice) :: a
+        integer :: i
         integer, parameter :: nn = 7, ne = 5
         a%ice_dt = 1800.0_WP
-        allocate(a%a_ice(nn), a%m_ice(nn), a%uice(nn))
-        allocate(a%sigma11(ne), a%sigma12(ne))
-        allocate(a%work%rhs_a(nn), a%work%eps11(ne))
-        a%a_ice = [(real(i, WP)*0.1_WP, i=1, nn)]
-        a%m_ice = a%a_ice * 2.0_WP
+        a%num_itracers = 3
+        allocate(a%data(3))
+        do i = 1, 3
+            allocate(a%data(i)%values(nn)); a%data(i)%ID = i
+        end do
+        allocate(a%uice(nn))
+        allocate(a%work%sigma11(ne), a%work%sigma12(ne), a%work%eps11(ne))
+        a%data(1)%values = [(real(i, WP)*0.1_WP, i=1, nn)]     ! a_ice
+        a%data(2)%values = a%data(1)%values * 2.0_WP            ! m_ice
         a%uice  = [(real(i, WP)*0.02_WP, i=1, nn)]
-        a%sigma11 = [(real(i, WP)*3.0_WP, i=1, ne)]
-        a%sigma12 = [(real(i, WP)*(-1.5_WP), i=1, ne)]
-        a%work%rhs_a = a%a_ice + 9.0_WP
-        a%work%eps11 = a%sigma11 * 0.5_WP
+        a%work%sigma11 = [(real(i, WP)*3.0_WP, i=1, ne)]
+        a%work%eps11 = a%work%sigma11 * 0.5_WP
 
-        u = scratch_write_open(); write(u, iostat=ios) a; close(u)
-        u = scratch_read_open();  read(u,  iostat=ios) b; close(u)
-
-        if (b%ice_dt /= a%ice_dt) call fail('ice ice_dt')
-        if (maxval(abs(b%a_ice - a%a_ice)) /= 0.0_WP) call fail('ice a_ice')
-        if (maxval(abs(b%m_ice - a%m_ice)) /= 0.0_WP) call fail('ice m_ice')
-        if (maxval(abs(b%sigma11 - a%sigma11)) /= 0.0_WP) call fail('ice sigma11')
-        if (maxval(abs(b%sigma12 - a%sigma12)) /= 0.0_WP) call fail('ice sigma12')
-        if (maxval(abs(b%work%rhs_a - a%work%rhs_a)) /= 0.0_WP) call fail('ice work%rhs_a')
-        if (maxval(abs(b%work%eps11 - a%work%eps11)) /= 0.0_WP) call fail('ice work%eps11')
+        if (a%ice_dt /= 1800.0_WP) call fail('ice ice_dt')
+        if (a%num_itracers /= 3) call fail('ice num_itracers')
+        if (size(a%data) /= 3) call fail('ice data size')
+        if (a%data(2)%ID /= 2) call fail('ice data ID')
+        if (maxval(abs(a%data(2)%values - 2.0_WP*a%data(1)%values)) /= 0.0_WP) call fail('ice m_ice')
+        if (maxval(abs(a%work%eps11 - 0.5_WP*a%work%sigma11)) /= 0.0_WP) call fail('ice eps11')
     end subroutine
 
 end program test_types

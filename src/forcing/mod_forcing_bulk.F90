@@ -26,9 +26,17 @@ module mod_forcing_bulk
     ! (the M2.5/M2.8 pattern; they come from the ocean/ice state, not ported here).
     use mod_precision, only: WP
     use mod_mesh, only: t_mesh
+    use mod_partit, only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
-    public :: forcing_bulk_ncar, forcing_wind_stress, forcing_stress_surf
+    public :: forcing_bulk_ncar, forcing_wind_stress, forcing_ice_stress, forcing_stress_surf
+
+    ! MULTI-RANK (M3f-4): the bulk transfer coefficients + wind stresses are a per-node
+    ! computation (each node reads only its own atm forcing + ocean/ice surface state), so
+    ! they are partition-independent — computed over OWNED+HALO (nNodL, FESOM2's
+    ! myDim+eDim loop in gen_forcing_couple.F90:703/738) with NO exchange. The optional
+    ! partit selects nNodL; absent/npes==1 -> mesh%nod2D (the proven 1-rank path verbatim).
 
     ! FESOM2 ice%thermo defaults (MOD_ICE.F90:53,67) — VERBATIM un-suffixed literals.
     real(kind=WP), parameter :: bulk_inv_rhoair = 1./1.3
@@ -39,14 +47,15 @@ contains
 
     ! ---- ncar_ocean_fluxes_mode (gen_bulk_formulae.F90:126-341) ------------------
     subroutine forcing_bulk_ncar(z_wind, z_tair, z_shum, tair, shum, u_wind, v_wind, &
-                                 sst, u_w, v_w, cd_oce, ch_oce, ce_oce, mesh)
+                                 sst, u_w, v_w, cd_oce, ch_oce, ce_oce, mesh, partit)
         real(kind=WP), intent(in)  :: z_wind, z_tair, z_shum   ! ncar_bulk_z_* (10.0 pi)
         real(kind=WP), intent(in)  :: tair(:), shum(:), u_wind(:), v_wind(:)  ! atm (degC/kg-kg/m-s)
         real(kind=WP), intent(in)  :: sst(:), u_w(:), v_w(:)   ! ocean surface T/u/v (prescribed)
         real(kind=WP), intent(out) :: cd_oce(:), ch_oce(:), ce_oce(:)
         type(t_mesh),  intent(in)  :: mesh
+        type(t_partit), intent(in), optional :: partit
         integer, parameter :: n_itts = 5
-        integer :: i, j
+        integer :: i, j, nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: cd_n10, ce_n10, ch_n10, cd_n10_rt, hl1
         real(kind=WP) :: cd, ce, ch, cd_rt
         real(kind=WP) :: x2, x, stab
@@ -60,7 +69,8 @@ contains
         real(kind=WP), parameter :: u10min = 0.3_WP
         real(kind=WP) :: test, cd_prev, inc_ratio = 1.0e-4
 
-        do i = 1, mesh%nod2D
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do i = 1, nNodL
             if (mesh%ulevels_nod2d(i) > 1) cycle
             t  = tair(i) + bulk_tmelt
             ts = sst(i)  + bulk_tmelt
@@ -163,14 +173,16 @@ contains
 
     ! ---- wind stress on nodes (gen_forcing_couple.F90:749-756) -------------------
     subroutine forcing_wind_stress(swind, u_wind, v_wind, u_w, v_w, cd_oce, &
-                                   stress_x, stress_y, mesh)
+                                   stress_x, stress_y, mesh, partit)
         real(kind=WP), intent(in)  :: swind
         real(kind=WP), intent(in)  :: u_wind(:), v_wind(:), u_w(:), v_w(:), cd_oce(:)
         real(kind=WP), intent(out) :: stress_x(:), stress_y(:)
         type(t_mesh),  intent(in)  :: mesh
-        integer :: i
+        type(t_partit), intent(in), optional :: partit
+        integer :: i, nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: dux, dvy, aux
-        do i = 1, mesh%nod2D
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do i = 1, nNodL
             if (mesh%ulevels_nod2d(i) > 1) then
                 stress_x(i) = 0.0_WP; stress_y(i) = 0.0_WP; cycle
             end if
@@ -181,6 +193,33 @@ contains
             stress_y(i) = cd_oce(i)*aux*dvy
         end do
     end subroutine forcing_wind_stress
+
+    ! ---- wind-on-ICE stress on nodes (gen_forcing_couple.F90:759-763) ------------
+    ! stress_atmice = Cd_atm_ice*(rhoair*|u_wind-u_ice|)*(u_wind-u_ice). Cd_atm_ice is the
+    ! CONSTANT namelist drag (0.0012; AOMIP_drag_coeff=.false. => no cal_wind_drag_coeff),
+    ! NOT the bulk Cd_atm_oce_arr. Cavity nodes -> 0 (matches the combined FESOM2 loop's
+    ! ulevels guard at :740, which zeros BOTH stresses).
+    subroutine forcing_ice_stress(cd_atm_ice, u_wind, v_wind, u_ice, v_ice, &
+                                  stress_x, stress_y, mesh, partit)
+        real(kind=WP), intent(in)  :: cd_atm_ice
+        real(kind=WP), intent(in)  :: u_wind(:), v_wind(:), u_ice(:), v_ice(:)
+        real(kind=WP), intent(out) :: stress_x(:), stress_y(:)
+        type(t_mesh),  intent(in)  :: mesh
+        type(t_partit), intent(in), optional :: partit
+        integer :: i, nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: dux, dvy, aux
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do i = 1, nNodL
+            if (mesh%ulevels_nod2d(i) > 1) then
+                stress_x(i) = 0.0_WP; stress_y(i) = 0.0_WP; cycle
+            end if
+            dux = u_wind(i) - u_ice(i)
+            dvy = v_wind(i) - v_ice(i)
+            aux = sqrt(dux**2 + dvy**2)*bulk_rhoair
+            stress_x(i) = cd_atm_ice*aux*dux
+            stress_y(i) = cd_atm_ice*aux*dvy
+        end do
+    end subroutine forcing_ice_stress
 
     ! ---- node->element surface stress, a_ice=0 (ice_oce_coupling.F90:128-149) -----
     subroutine forcing_stress_surf(stress_x, stress_y, stress_surf, mesh)

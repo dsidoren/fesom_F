@@ -1516,3 +1516,370 @@ every verified fact" usually means a fact lives one layer down — verify the tr
 correctly said the logic was right; trust it for what it tests and look elsewhere (not "it must be a subtle logic bug
 the test can't see"). (5) `myList_elem2D` (owned AND halo) is byte-identical to FESOM2 by construction — both read the
 same `dist_N/my_list*.out` verbatim — so a position-keyed dump diff IS gid-aligned; don't chase an "ordering" ghost.
+
+## L36 — Sea-ice EVP dynamics (M3b): ocean2ice + standard EVP + mEVP byte-match at once; a new `t_mesh` component trips an ifort type-bound-I/O cascade (put ice fields in `t_ice`)
+
+M3b ported `ocean2ice` + the EVP momentum solve and byte-matched FESOM2 `max|Δ|=0` on 7 fields
+(`ice_srfoce_u/v` + `uice/vice` + `sigma11/12/22`), CORE2 1-rank, for **BOTH `whichEVP=0` (standard EVP) AND
+`whichEVP=1` (mEVP)** — `tools/run_evp_gate_core2.sh`, both modes in one run. New `src/ice/mod_ice_dyn.F90`
+(`ocean2ice`, `EVPdynamics` [std], `EVPdynamics_m` [mEVP], `EVPdynamics_solve` dispatcher), same optional-`partit`
+pattern as the M2.12 kernels (1-rank verbatim; `is_multirank`-guarded `exchange_nod`). Gate driver
+`src/drivers/fesom_evpdump.F90` prescribes analytic surface UV / `hbar` / `stress_atmice` (= the oracle, from the
+byte-identical rotated `coord_nod2D`), runs the coupling + EVP, dumps; oracle is `fesom_ice_dump.F90::evp_dump_write`
+(env `FESOM_EVP_DUMP`, dispatches on namelist `whichEVP`, runs the REAL FESOM2 routines).
+
+- **The big gotcha (reusable): do NOT add a component to `t_mesh`.** FESOM3's `t_mesh` has type-bound
+  `write(unformatted)`/`read(unformatted)` (`write_t_mesh` calls `write_bin_array` on each component). Adding ANY new
+  allocatable component (tried `bc_index_nod2D`, both `WP` and `MP`) makes ifort emit error **#7976** ("allocatable
+  dummy may only be associated with an allocatable actual") for EVERY `write_bin_array` call in `write_t_mesh` — a
+  generic-resolution/type-bound-I/O cascade, not a real error in the added line. **Fix:** put ice-owned mesh-derived
+  fields in `t_ice` (which has NO type-bound I/O), not `t_mesh`. FESOM2 keeps `bc_index_nod2D` in `mesh%`; we keep it
+  in `ice%` — the VALUE is byte-identical (0/1 boundary-node mask), so the byte-gate is unaffected. Storage location is
+  a free FESOM3 design choice; faithful = same value + same arithmetic, not same struct.
+- **mEVP specifics** (`ice_maEVP.F90` `EVPdynamics_m`, the INLINED form — NOT the standalone `stress_tensor_m`/
+  `stress2rhs_m`, which are unused in that path): `rdt = ice_dt` (the FULL step, NOT `ice_dt/evp_rheol_steps` like
+  std-EVP); `det2=1/(1+alpha_evp)`, `det1=alpha_evp*det2`; iterates an AUXILIARY velocity `uice_aux/vice_aux` (init =
+  `uice/vice`, copied back at the end); velocity BC is the node mask `bc_index_nod2D(i)` (in `det`) PLUS the edge
+  zeroing; `pressure = pressure_fac/(delta+delta_min)` with `pressure_fac=det2*pstar*msum*exp(...)`. std-EVP and mEVP
+  group the metric/elevation terms differently (`metric_factor*sum/3` vs `sum*val3*metric_factor`; `9.81_WP*A/3` vs
+  `g*val3*A`) — transcribe EACH verbatim against ITS own FESOM2 source; do NOT unify them.
+- **Namelist-double precision (M3a note paid off):** `cd_oce_ice`/`delta_min` are read by the oracle's namelist as
+  DOUBLES (`0.0055`/`1.0e-11`), but the `t_ice` defaults are un-suffixed single→WP (`5.5e-3`/`1.0e-11`) — ~1 ULP off.
+  The driver overrides `ice%cd_oce_ice=0.0055_WP`/`ice%delta_min=1.0e-11_WP`. `alpha_evp`/`beta_evp`=250, `pstar`=30000,
+  `ellipse`=2, `c_pressure`=20, `theta_io`=0 are integer-valued → exactly representable → no override needed.
+- `bc_index_nod2D` + `uice_aux`/`vice_aux` (both M3a-deferred) built in `mod_ice_setup` (`ice_allocate` +
+  `build_bc_index_nod2D`, unconditional like FESOM2's "also for whichEVP==0"). `ice_setup` `mesh` stays `intent(in)`
+  (the mask is in `ice`, not `mesh`). **No regression** (step 65 + M3a ice 4 + 13/13 ctest all `max|Δ|=0`).
+- **Meta:** when the user asks for an extra variant (here mEVP), porting both variants of a dispatched kernel at once
+  is cheap — they share `ocean2ice`, the prescribe driver, the oracle shim, and the gate harness; only the inner solve
+  differs. Gate both by parameterising `whichEVP` end-to-end (driver env + oracle namelist patch + one runner loop).
+
+## L37 — Sea-ice FCT advection (M3c): the whole Zalesak limiter transcribes verbatim once the neighbour-list basis is pinned; an M3a invariant pays its dividend downstream
+
+M3c ported the ice FCT advection (`ice_TG_rhs` Taylor-Galerkin rhs + `ice_fct_solve` = `ice_solve_high_order` 3-iter
+Jacobi → `ice_solve_low_order` → `ice_fem_fct` Zalesak limiter ×3 tracers) and byte-matched FESOM2 `max|Δ|=0` on **6
+fields** (`rhs_a/m/ms` + post-advection `a_ice/m_ice/m_snow`), CORE2 1-rank, for **BOTH `whichEVP=0` AND `whichEVP=1`**
+feeding the advection — `tools/run_icefct_gate_core2.sh`, **first try, no iteration.** New `src/ice/mod_ice_fct.F90` +
+driver `src/drivers/fesom_icefctdump.F90` (extends `fesom_evpdump`: ocean2ice + EVP → `uice/vice`, then `ice_TG_rhs` +
+`ice_fct_solve`) + oracle `fesom_ice_dump.F90::ice_fct_dump_write` (env `FESOM_FCT_DUMP`).
+
+- **The key enabler — an upstream invariant, re-used not re-derived.** FESOM2's FCT indexes the (row, neighbour)
+  mass-matrix slot via `mesh%nn_num`/`nn_pos` (`mass_matrix(clo:clo2)` aligned with `nn_pos(1:cn,row)`). FESOM3 has its
+  OWN `mesh%nn_pos` (built by `muscl_adv_init`) but it may order neighbours differently — so DON'T use it. Instead use
+  the **ssh_stiff CSR** (`rowptr_loc`/`colind_loc`), the same ordered list `ice_mass_matrix_fill` scanned to build
+  `fct_massmatrix`. M3a PROVED `fct_massmatrix` byte-matches FESOM2's `mass_matrix` position-by-position ⇒
+  `colind_loc(rowptr_loc(row):rowptr_loc(row+1)-1)` IS FESOM2's `nn_pos(1:nn_num,row)` as an ORDERED list (incl. self).
+  So `sum(fct_massmatrix(clo:clo2)*field(colind_loc(clo:clo2)))` reproduces FESOM2's `sum(mass_matrix(clo:clo2)*
+  field(nn_pos))` with the SAME operands AND the SAME reduction order → byte-identical. The cluster min/max (`maxval`/
+  `minval` over the neighbour SET) only needs the same set, so the CSR basis serves there too. **Meta: when a kernel
+  needs a neighbour list, reach for the basis a PRIOR gate already pinned (the CSR), not a parallel structure with its
+  own ordering — the FCT solve then depends only on M3a, and inherits its byte-proof for free.**
+- **`ice_diff=0.0` / `ice_gamma_fct=0.5`** are the CORE2 `namelist.ice` values, NOT the `t_ice` defaults (10.0 / 0.25);
+  the driver overrides `ice%ice_diff`/`ice%ice_gamma_fct` (the FCT reads them). Both are exactly representable (unlike
+  `cd_oce_ice=0.0055`) so no ULP subtlety — but they MUST be the namelist values or the diffusion/limiter blend differs
+  by a large margin. `ice_diff=0` zeroes the TG diffusion term, but `scale_area=2.0e8` is still kept correct so
+  `sqrt(elem_area/scale_area)` is finite (else `0*NaN=NaN`).
+- **`ENABLE_OPENMP=OFF` in the oracle (verified in `CMakeCache.txt`)** ⇒ `ice_fem_fct`'s `!$OMP ORDERED`/`ATOMIC` flux
+  scatters run serially in element order = FESOM3's serial path, so the node-accumulation FP order matches (same as
+  M3b's `stress2rhs`). Whenever a ported kernel has a scatter-accumulate, confirm the oracle's OpenMP state — a
+  threaded non-`__openmp_reproducible` build would NOT byte-match.
+- **Dump rhs AND the final tracers** (the pressure-gate "dump-inputs-too" habit): `rhs_a/m/ms` localise a `ice_TG_rhs`
+  bug, the post-FCT `a_ice/m_ice/m_snow` localise an `ice_fct_solve` bug. Both `=0` ⇒ both kernels independently
+  confirmed. The advection is non-trivial (`a_ice` 0.900 → 0.913 — the antidiffusive flux pushed past the IC max, so
+  the limiter clamp path is genuinely exercised). `ice_fct_solve` is called as an external (no interface) exactly like
+  `ice_timestep` (it is NOT in `ice_fct_interfaces`); `ice_TG_rhs` IS, so `use ice_fct_interfaces, only: ice_TG_rhs`.
+- **No regression:** step 65 + M3a ice 4 + M3b evp 7×2 + M3c (6×2 whichEVP) + 13/13 ctest all `max|Δ|=0`/green (the
+  M3b evp gate was re-run explicitly since the shared oracle `fesom_ice_dump.F90` was edited; the byte-exact `rhs` also
+  independently re-confirms M3b — the `uice/vice` feeding `ice_TG_rhs` were byte-identical).
+
+## L38 — Sea-ice thermodynamics (M3d): a Newton-iteration growth model byte-matches verbatim; the win is the namelist-DOUBLE precision discipline + all-scalar arithmetic (no L29 trap)
+
+M3d ported the ice thermodynamics (`cut_off` hmin/Armin clamp + `thermodynamics` per-node driver + `therm_ice` 0-layer
+Semtner/Hibler-1984 ice-class growth + `budget` 5-iter Newton-Raphson surface temperature + `obudget` open-ocean
+growth+evaporation + `flooding` snow→ice + `TFrez`) and byte-matched FESOM2 `max|Δ|=0` on **6 fields** (post-thermo
+`a_ice/m_ice/m_snow` + `flx_h/flx_fw` + `t_skin`), CORE2 1-rank, for **BOTH `whichEVP=0` AND `whichEVP=1`** feeding the
+advection upstream — `tools/run_icethermo_gate_core2.sh`, **first try, no iteration.** The dumped state is rich
+(`flx_h` to ~6 kW/m², `t_skin` to ~15 °C, surface T −1.9→30 °C ⇒ freezing+melting+snow-melt+flooding all exercised). New
+`src/ice/mod_ice_thermo.F90`; driver `fesom_icethermodump.F90` (extends `fesom_icefctdump`); oracle
+`fesom_ice_dump.F90::ice_thermo_dump_write` (env `FESOM_THERMO_DUMP`). Reusable specifics:
+
+- **A 5-iteration Newton-Raphson is not a reproducibility risk when its operands are byte-pinned** (cf. the CG L29
+  scare). `budget` iterates `t = t + (A1+A2+C)/A3` 5× per ice class, and the per-class `t` even *carries across* the
+  iclasses loop (a faithful quirk: each `budget` call mutates the shared skin-temp `t`). Byte-matched on the FIRST gate
+  because every operand is pinned (prescribed atmosphere + M3b/M3c-proven ice state + do_ic3d-proven `srfoce_temp/salt`
+  + geometry-proven `geo_coord`) and the whole subtree is **SCALAR per-node arithmetic** — there is no array loop to
+  vectorise, so the L29 packed-vs-scalar divide trap *cannot* arise. Transcribe verbatim; it just works (the L9 pattern
+  at full thermodynamic complexity).
+
+- **The `&ice_therm` namelist is the precision battleground (extends the M3a note).** The oracle's `ice_init` reads
+  `&ice_therm` → parses each literal as a **DOUBLE**, overwriting the `t_ice_thermo` single→WP type defaults. So
+  `con=2.1656`, `consn=0.31`, `hmin=Armin=0.01`, `emiss_ice=emiss_wat=0.97`, the four albedos, and `albw=0.1` (CORE2,
+  *not* the 0.066 LY2004 default) all differ ~1 ULP between the namelist-double and the single→WP default — the driver
+  MUST re-set them as `_WP` doubles (the namelist-parse == `_WP`-literal identity, proven through M3a–M3c, makes this
+  byte-exact). Same for `Ch_atm_ice=Ce_atm_ice=0.00175_WP` (namelist.forcing `&forcing_exchange_coeff` doubles).
+  Params NOT in the namelist match for free: `h_ml=2.5_WP` (suffixed both sides); `rho*/inv_rho*/clh*/tmelt/boltzmann/
+  cpair` (MOD_ICE single→WP defaults, untouched); and `cc=rhowat·4190 / cl=rhoice·3.34e5` recompute in `ice_init` to
+  values that are *exactly representable* (4294750 / 303940000 are integers below the round-off) so the double recompute
+  == the single→WP literal product. Recipe: override every namelist-listed param in the driver; trust the rest.
+
+- **Config switches that change the math must be matched, not just the literals.** `which_ALE='linfs'` ⇒
+  `use_virt_salt=.true.` (the `(rsss-Sice)/rsss` freshwater branch + the flooding `+iflice·…/rsss` term), and
+  `ref_sss_local=.true.` (namelist.tra) ⇒ `rsss = S_oc` (the per-node surface salinity, *not* the global `ref_sss`).
+  `l_snow=.true.` ⇒ `rain=prec_rain, snow=prec_snow, evap_in=0`. Get any of these wrong and `flx_fw` diverges while the
+  heat-only fields still match — gate every output (we dump `flx_h` AND `flx_fw` AND `t_skin`) so the failure localises.
+
+- **FESOM3 has no global forcing state — bundle it.** FESOM2's `thermodynamics` reads/writes ~22 `g_forcing_arrays`/
+  `o_arrays` module arrays. The FESOM3 port passes them as ONE `t_atmflux` argument (per-node inputs + the thermo flux
+  diagnostics + the scalar config), keeping the explicit-dataflow architecture; the GATED outputs
+  (`a/m_ice/m_snow/flx_h/flx_fw/t_skin`) stay in `t_ice`. The diagnostic outputs (`real_salt_flux/fw_ice/fw_snw/hf_Q*`)
+  are write-only here but become M3e's `oce_fluxes` inputs — `t_atmflux` is their natural home, not throwaway scratch.
+
+- **Dead branches still need their symbols.** `obudget`'s `open_water_albedo>0` solar-zenith block is dead in the gated
+  config (=0) but must link — port `compute_solar_zenith_angle`/`albw_taylor`/`albw_briegleb` anyway, and supply local
+  `daynew/timenew` placeholders for the (never-taken) `g_clock` reads. (Also: the oracle pointer-assigns into an
+  `intent(in)` `ithermp%albw` in that block — ifort allows it; the FESOM3 transcription mirrors it, dead, harmless.)
+
+- **No regression:** step 65 + M3c (6×2 whichEVP) + 13/13 ctest all `max|Δ|=0`/green (the M3c gate re-run since the
+  shared oracle `fesom_ice_dump.F90` was edited — adding `ice_thermo_dump_write` left the existing shims byte-identical).
+
+## L39 — Sea-ice → ocean coupling-out (M3e, THE PAYOFF): the air-sea budget byte-matches first try; a precomputed reduction scalar that was never consumed is an un-gated landmine (the L29 pattern, pre-empted)
+
+M3e ported the air-sea coupling-out (`oce_fluxes_mom` ice-ocean+atm-ocean momentum stress → `stress_surf`, and
+`oce_fluxes` heat/freshwater/salt budget → `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt`) from
+`ice_oce_coupling.F90` and byte-matched FESOM2 `max|Δ|=0` on **5 fields**, CORE2 1-rank, for **BOTH `whichEVP=0` AND
+`whichEVP=1`** — `tools/run_iceflux_gate_core2.sh`, **first try.** These 5 fields ARE the proven M2.11c-2
+`fesom_flux_dump` set: until M3e the ocean step READ them from a FESOM2 dump (the "M3-gap" prescription); now FESOM3
+produces them natively. New `src/ice/mod_ice_oce_coupling.F90`; driver `fesom_icefluxdump.F90` (extends
+`fesom_icethermodump`); oracle `fesom_ice_dump.F90::ice_flux_dump_write` (env `FESOM_OCEFLUX_DUMP`). Reusable specifics:
+
+- **A precomputed scalar that has NEVER been consumed is an un-gated landmine — the L29 pattern, caught BEFORE it bit.**
+  `mesh%ocean_area` is the divisor in every flux-balancing step (`net = integrate_nod(field)/ocean_area`). FESOM3 had
+  computed it as `sum(mesh%area(1,1:nNodO))` since M2.11a — never gated, because nothing read it until M3e. FESOM2
+  computes it as an explicit *sequential* `do`-loop over `areasvol(ulevels,n)` (`oce_mesh.F90:2385`). A `sum()`
+  intrinsic and a sequential loop are NOT guaranteed bit-identical even under `-fp-model precise` (precise stops
+  *reassociation*, but the intrinsic's base evaluation order is processor-dependent), and a 1-ULP `ocean_area` would
+  drift EVERY balanced field. Fix: rewrite `mod_mesh_areas.F90`'s `ocean_area`/`ocean_areawithcav` as the faithful
+  FESOM2 loop. **Generalisable: when a long-dormant precomputed value becomes load-bearing, re-derive it against the
+  oracle's exact arithmetic before trusting it — "computed but unconsumed" == "ungated" (cf. L29's `pr_values`).**
+
+- **`integrate_nod` is an explicit sequential loop, never `sum()`/`dot_product()`.** Transcribe FESOM2
+  `gen_support.F90:318` verbatim: `lval=0; do row=1,nNodO: lval=lval+data(row)*areasvol(ulevels_nod2D(row),row)`, then
+  (multi-rank) `allreduce_sum`. The summation order is the byte-match — a reduction intrinsic would invite the compiler
+  to reorder. At 1-rank the allreduce is identity, so the local partial sum IS the result.
+
+- **`oce_fluxes` is bookkeeping, not physics — the byte-match risk is concentrated, not diffuse.** Strip the disabled
+  features (no `__icepack`/`use_cavity`/`use_icebergs`/`lwiso`/`use_landice_water`/`use_age_tracer`/`__oasis`) and the
+  ~600-line routine collapses to ~80: sign-flips (`heat_flux=-flx_h`), two globally-balanced salt fluxes
+  (`virtual_salt`, `relax_salt`), and a globally-balanced freshwater flux. The ONLY ULP-sensitive operations are the
+  three `integrate_nod` calls and the `/ocean_area` divides — every per-node summand is a byte-pinned M3d/do_ic3d
+  product. Pin the global integrals and the rest is exact. Gate the `use_virt_salt=.true.` (linfs) path; `ref_sss_local`
+  ⇒ `rsss=salt(1,n)`; the additive order of the freshwater `flux(n)` is transcribed left-to-right verbatim.
+
+- **dens_flux (the MOC diagnostic, `oce_fluxes:691`) is the one piece you DON'T port at M3e.** It needs `sw_alpha`/
+  `sw_beta` (EOS) + `vcpw` and feeds only the MOC diagnostic — neither in M3 scope, and it is NOT a surface BC. Skipping
+  it does not touch the 5 gated fields (the oracle computes it into a zeroed `sw_alpha`/`sw_beta` ⇒ `dens_flux=0`, never
+  dumped). Don't thread EOS state through M3e just to reproduce a deferred diagnostic.
+
+- **Same precision/Intel discipline as M3d.** `surf_relax_S=1.929e-06` is a `namelist.tra` DOUBLE (NOT the o_PARAM
+  default `10/(60*3600*24)`); driver re-sets `1.929e-06_WP`. `density_0=1030.0_WP` (mod_constants == o_PARAM, exact). The
+  new analytic prescriptions (`stress_atmoce_x/y`, `Ssurf`) must be byte-identical functions on both sides. And (L27
+  again) declare the `mesh` dummy BEFORE `stress_surf(2,mesh%elem2D)` or ifort #6415 aborts — the only iteration this
+  gate needed was that one declaration reorder.
+
+- **No regression:** M3e 5×2 + M3d 6×2 (shared oracle re-run) + step 65 (1-rank) + step 65 (multirank dist_2,
+  confirming the `mod_mesh_areas` change is geometry-neutral) + pressure 57 + 13/13 ctest all `max|Δ|=0`/green.
+
+## L40 — Native-flux coupled forced lifecycle (M3f-1 + M3f-2): the multi-step ice↔ocean coupling byte-matches first try; isolate the forcing READ from the ice/flux COUPLING by prescribing the post-bulk atmosphere
+
+M3f-1 assembled `ice_timestep` (`src/ice/mod_ice_step.F90` = the FESOM2 `ice_setup_step.F90:96` chain
+`EVPdynamics_solve → ice_TG_rhs → ice_fct_solve → cut_off → thermodynamics`) and M3f-2 wired it into a NATIVE-flux
+forced lifecycle (`src/drivers/fesom_lifecycle_native.F90`): the proven M2.11c-2 ocean init + `step_oce`, but the
+prescribed `FESOM3_FLUX_FILE` (heat_flux/water_flux/virtual_salt/relax_salt/stress_surf) REPLACED by the live chain
+`ocean2ice → ice_timestep → oce_fluxes_mom → oce_fluxes`. **`max|Δ|=0` on the 195-record (3-step) AND 325-record
+(5-step) NODE substep set, BOTH whichEVP=0 (std EVP) AND whichEVP=1 (mEVP) — first try, no iteration.** The chain is
+the M3a–M3e leaf kernels, all already byte-proven single-step; M3f-2 is the FIRST multi-step + coupled test.
+
+- **Prescribe the post-bulk ATMOSPHERE, not the fluxes — isolate the ice/flux COUPLING from the forcing READ.** The
+  established prescribe-the-input discipline applied at the next layer up: instead of prescribing the 5 surface fluxes
+  (M2.11c-2), prescribe the 16 per-step POST-`update_atm_forcing` atmospheric arrays (shortwave/longwave/Tair/shum/
+  prec_rain/prec_snow/runoff/u_wind/v_wind/Ch-Ce_atm_oce_arr/stress_atmoce_x-y/stress_atmice_x-y/Ssurf) and let FESOM3
+  compute the fluxes NATIVELY. New oracle shim `port2/fesom2/src/fesom_atmflux_dump.F90` (env `FESOM_ATMFLUX_DUMP`,
+  wired in `fesom_module.F90` next to `flux_dump_record`, i.e. after the ice step) dumps them; FESOM3 reads them and
+  runs the native chain. This makes the byte-gate localize cleanly: a forcing-read bug (M3f-3) is now SEPARATE from a
+  coupling bug (M3f-2). Module homes: g_forcing_arrays (the 11 atm fields), o_ARRAYS (stress_atmoce_x/y, Ssurf),
+  `ice%` (stress_atmice_x/y).
+- **A coupled fixed-point byte-matches when every link does.** The ice reads the LIVE ocean (ocean2ice reads
+  `dyn%uv(:,1,:)` node-avg + `tracers(1:2,1)` + `mesh%hbar`), produces fluxes, the ocean step reads the fluxes and
+  updates the ocean, the ice reads the updated ocean next step… Step 1: both sides cold-start identical (ocean IC =
+  do_ic3d, ice IC = SST-sign cold start, UV=0). Each link is byte-proven (ocean state via M2.11c, ice/flux via
+  M3a–e), so the whole loop stays byte-locked across steps. The 5-step run (worst |Δ|=0) confirms it does not drift.
+- **A built-in per-step native-vs-oracle flux self-check is the cheapest localizer.** The driver optionally reads the
+  M2.11c-2 `flux_f2` dump (`FESOM3_FLUX_FILE`) and prints `max|Δ(hf,wf,vs,rs,ss)|` each step BEFORE `step_oce`
+  consumes them. `=0` at every step pinpoints the coupling as byte-exact independently of the 195-record substep gate
+  (and it immediately diagnosed the mEVP harness bug below). When a coupled gate can compare an intermediate against a
+  known-good oracle dump, do it inline — don't wait for the end-to-end gate to fail.
+- **The prognostic ice state IS the new test.** `values_old` (a_ice/m_ice/m_snow saved INSIDE `thermodynamics` before
+  the update — `mod_ice_thermo.F90:250`), the EVP `sigma11/12/22` elastic memory (carries across model steps, was 0 at
+  the single-step gate), the `t_skin` Newton initial guess, and `uice/vice` all persist in the live `ice` object. The
+  multi-step gate is the first to exercise their carry-over; first-try `=0` means the single-step transcriptions were
+  faithful to the carry-over too.
+- **A fixed-namelist oracle must be parameterized to match a FESOM3 switch.** The forced-lifecycle oracle
+  (`run_lifecycle_forced_core2.sh`) runs whatever `whichEVP` its `namelist.ice` holds (=0). FESOM3 `whichEVP=1` then
+  "mismatched" — NOT a port bug, the oracle was still running std-EVP. The self-check flagged it instantly (heat_flux
+  off by 1824 W/m² at step 1). Fix: the runner now `sed`-patches `whichEVP` in `namelist.ice` to a passed arg, the
+  gate threads it to BOTH sides → mEVP also `max|Δ|=0`. Lesson: when gating a dispatched kernel against a namelist-
+  driven oracle, parameterize the oracle's namelist from the same switch — never assume the oracle default matches.
+- **`ice_timestep` is sequencing only — omit the unconsumed diagnostics.** The CMIP6 dynamical-growth-rate diagnostics
+  (`ice%thermo%dyngr*`, `ice_setup_step:203`/`:307`) and the post-thermo `h_ice/h_snow` effective thicknesses
+  (`:320`) are write-only output; nothing in the reduced config reads them, so omitting them from the assembled
+  routine is byte-neutral for the gated ocean substeps (the gate proved it). Faithful = same consumed dataflow, not
+  every diagnostic line.
+- **No regression:** step 65 (1-rank) + ctest 13/13 + M2.11c-2 prescribed-flux forced lifecycle 195 + M3e flux 5×2 all
+  `max|Δ|=0`/green (the shared oracle `fesom_module.F90` + `fesom_atmflux_dump.F90` edits are byte-neutral: the
+  `atmflux_dump_record` call is env-gated + npes==1, so the prescribed-flux path is unchanged).
+
+## L41 — Native CORE2 forcing read + bulk (M3f-3a/c): a proven READ machinery re-validates on a 40× mesh by getting the per-step clock right; validate a live-input kernel by self-check inside the coupled run
+
+M3f-3a/c made 14/16 atmospheric arrays NATIVE in the coupled lifecycle (`max|Δ|=0`, both whichEVP): the 8 NCAR fields
+(M2.10a `mod_forcing_read`) + the NCAR bulk Ch/Ce (M2.10b `forcing_bulk_ncar`) + `stress_atmoce` (M2.10b
+`forcing_wind_stress`) + the NEW wind-on-ice `stress_atmice` (`forcing_ice_stress`). Only runoff + Ssurf (the monthly
+climatology) stay prescribed (M3f-3b). Driver `fesom_forcing_core2.F90` (standalone NCAR-read self-check vs the M3f-2
+`atmflux_f2` dump) + `fesom_lifecycle_native` extended with a `FESOM3_FORCING_DIR` per-step native-forcing self-check.
+
+- **A byte-proven READ machinery re-validates on a new mesh for free — the only new thing is the per-step clock.**
+  M2.10a's `mod_forcing_read` was gated on pi against the SAME CORE2 NCAR stub files; the CORE2 read differs ONLY in
+  `geo_coord_nod2D` (where the bilinear lands) — the netCDF read, time-axis transform, bilinear, and g2r rotation are
+  identical. So M3f-3a is just: drive the proven routines on CORE2 + advance `rdate` per step. The load-bearing detail
+  is the clock: FESOM2 `clock()` (`gen_modules_clock.F90:38`) adds `dt` at the TOP of each step (`fesom_module:673`),
+  so at step n `timenew=n·dt`, `daynew=1` (n<48); cold-start `getcoeffld` uses `rdate_cold=julday(1948,1,1,noleap)`
+  (NO half-step, `nc_sbc_ini:643`), per-step `timeinterp` uses `rdate(n)=julday+(daynew-1)+timenew/86400 - dt/2/86400`
+  (the `-dt/2` half-step, `sbc_do:1528`) → `rdate(n)=710820+(2n-1)·900/86400`. For a short run (within forcing day 1)
+  the `getcoeffld` re-trigger (`sbc_do:1561`, `rdate>nc_time(t_indx_p1)`) never fires, so the cold-start coefficients
+  apply every step — `getcoeffld` once + `timeinterp` per step is byte-faithful. (Multi-day runs crossing a forcing
+  interval need the re-trigger — an M3f-3 longer-run deferral.) First try `max|Δ|=0`, 3 steps.
+- **Validate a kernel with LIVE inputs by a self-check INSIDE the coupled run — don't try to gate it standalone.** The
+  NCAR bulk needs the ocean surface state (`ice%srfoce_temp/u/v`, set by `ocean2ice`) and `stress_atmice` needs the
+  previous-step `ice%uice/vice` — neither is in any dump, so a standalone gate can't feed them. Instead: in the
+  lifecycle, after `ocean2ice` (srfoce live) and before `ice_timestep` (uice still the prev step's — exactly when
+  FESOM2 `update_atm_forcing` runs), recompute the native forcing and print `max|Δ|` vs the prescribed atm. The step
+  itself keeps USING the prescribed values (the proven M3f-2 path), so the 195-record gate CANNOT regress from a native
+  bug — the self-check independently proves byte-equality. The oracle's `ncar_ocean_fluxes_mode`
+  (`gen_bulk_formulae.F90:170`) reads `ice%srfoce_u/v/temp`; feeding the native bulk the same live arrays → `max|Δ|=0`
+  on Ch/Ce/stress, both EVP variants (the mEVP `uice` flows into `stress_atmice` byte-exactly too).
+- **`stress_atmice` is the one genuinely-new forcing arithmetic** (`gen_forcing_couple.F90:759`): a single combined
+  FESOM2 loop sets BOTH `stress_atmoce` (drag `Cd_atm_oce_arr` from the bulk, wind relative to ocean via `Swind=0`) and
+  `stress_atmice` (CONSTANT `Cd_atm_ice=0.0012` namelist drag — `AOMIP_drag_coeff=.false.` so no `cal_wind_drag_coeff`
+  — wind relative to ice). Splitting it into `forcing_wind_stress` (M2.10b, oce) + new `forcing_ice_stress` is
+  byte-identical (per-node independent arithmetic); each carries the `ulevels>1` cavity guard the combined loop had.
+- **No regression:** M2.10 forcing gate (pi, `mod_forcing_bulk` recompiled) PASS + ctest 13/13 + the 195-record native
+  lifecycle gate MATCH (both whichEVP) all `max|Δ|=0`/green.
+
+## L42 — Runoff + SSS climatology read (M3f-3b) → the FULLY-NATIVE lifecycle (M3f-3 complete): a distinct read machinery byte-matches first try; the standalone-driver `partit%myDim=0` trap makes an optional-partit routine SILENTLY output all-zeros (no crash)
+
+M3f-3b ported the last 2/16 atmospheric arrays — runoff + sea-surface-salinity restoring (`Ssurf`) — then dropped the
+prescribed atmosphere entirely: the FULLY-NATIVE CORE2 lifecycle (whole air-sea forcing computed in-driver: 8 NCAR +
+NCAR bulk + 2 stresses + runoff + Ssurf → ocean2ice → ice_timestep → oce_fluxes → step_oce) is now `max|Δ|=0` vs FESOM2
+— **195 records (3-step) AND 325 records (5-step), BOTH whichEVP=0 and whichEVP=1**. New `src/forcing/mod_forcing_other.F90`
+(`read_other_NetCDF` + `interp_2d_field`, from FESOM2 `gen_modules_read_NetCDF.F90:6` / `gen_interpolation.F90:145`) +
+two real64 netCDF wrappers (`nc_get_slice_dp`/`nc_get_att_dp` in `mod_io_netcdf`); new gate
+`tools/run_lifecycle_fullynative_gate_core2.sh` (NO `FESOM3_ATMFLUX_FILE`). FESOM2 oracle UNCHANGED (reuses the M3f-2
+`atmflux_f2` dump for the self-check + the `run_lifecycle_forced_core2.sh` 195-record reference).
+
+- **The runoff/SSS read is a DISTINCT machinery — do NOT shoehorn it into `mod_forcing_read`.** Where `mod_forcing_read`
+  (NCAR) is bilinear-index + two-stage time-interp coefficients over bracketing slices, `read_other_NetCDF` is: read ONE
+  2D slice, fill missing/land values ON THE RAW REGULAR GRID, then a direct per-node bilinear with NO time interpolation
+  (CORE runoff is time-constant; the SSS climatology is read once per month — `update_monthly_flag=mstep==1` for a short
+  January run, so a single record `i=month=1`). runoff: `read_other_NetCDF('Foxx_o_roff', rec 1, check_dummy=.false.)`
+  → missing→0, then `/1000` (kg/s/m²→m/s); Ssurf: `read_other_NetCDF('SALT', rec 1, check_dummy=.true.)` → a 30-neighbour
+  expanding-box average fills land. Both `do_onvert=.true.` (vertices); the centroid path is unexercised → guarded with
+  `error stop` (don't ship ungated code).
+- **Why it's byte-exact with NO new gate subtlety:** the raw-grid dummy fill (a deterministic serial loop over the global
+  `ncdata(lon,lat)`) AND the per-node bilinear are PARTITION-INDEPENDENT (each owned node interpolates from the full global
+  raw grid; no cross-rank reduction). So owned values are byte-identical at any partition — like `mod_forcing_read`, every
+  rank reads the file directly (the oracle's read-on-0 + BCast moves the same bytes; no BCast needed). The on-disk fields
+  are `float`; netCDF converts float→real64 on read EXACTLY as the oracle's `real64 ncdata`. **The `missing_value`
+  attribute (`1.e30f` runoff / `-99.f` SALT) is ALSO float → reading it into real64 (`nc_get_att_dp`) makes the `==miss`
+  equality match the (also float→real64) data values bit-for-bit** — read the attribute the same way the data is read, or
+  the mask drifts. `geo_coord_nod2D/rad` is the same deg conversion already proven in M3f-3a.
+- **THE TRAP (cost the only real debugging): a standalone 1-rank driver does NOT populate `partit%myDim_nod2D` — it stays
+  0.** These hand-built drivers (`fesom_lifecycle`, `fesom_lifecycle_native`, …) call `par_init` + `read_mesh` but the
+  ocean/ice kernels are invoked WITHOUT `partit` (the M2.12 optional-`partit`-ABSENT path loops `mesh%nod2D`); nobody ever
+  reads `partit%myDim_nod2D`, so it's never set (the `synthesize_1rank` that would set it isn't on this path). I wrote
+  `read_other_NetCDF` to derive the node count as `present(partit) ? partit%myDim_nod2D+eDim_nod2D : mesh%nod2D` (the
+  M2.12 idiom) and PASSED `partit` → `num=0` → the interp loop `do n=1,num` no-ops → **`model_2Darray` came out all-zeros
+  with NO crash and NO error** (the netCDF read, the fill, everything upstream was correct; only the final write was
+  empty). Presented as "runoff AND Ssurf both EXACTLY 0" (diff = the full prescribed value). Bisected with 3 debug prints
+  (read `[min,max]` OK → fill `[min,max]` OK → `num=0`, `haspartit=T`). **FIX: at 1-rank OMIT the optional `partit`** (so
+  `num=mesh%nod2D`) — exactly how the same driver calls `ocean2ice`/`ice_timestep`. **Generalizable: an optional-`partit`
+  routine whose loop bound comes from `partit%myDim_*` will SILENTLY produce zero-length output if a caller passes a
+  partit whose dims are unset — a degenerate loop is not an error. Either omit partit at 1-rank, or assert `num>0`. M3f-4
+  (multi-rank) WILL pass partit, where `read_dist_partition` sets the dims.**
+- **Completion method — self-check, then flip.** M3f-3b first gated the 2 new fields by a per-step self-check INSIDE the
+  prescribe-mode lifecycle (`max|d clim(runoff,Ssurf)|=0` while the step still USES the prescribed values, so the
+  195-gate can't regress — the L41 pattern). Then the driver was made dual-mode: `FESOM3_ATMFLUX_FILE` present ⇒ prescribe
+  + self-check; absent ⇒ FULLY NATIVE (a `compute_native_forcing` helper feeds either the self-check print or an
+  `apply_native_forcing` that writes `atm%*`/`ice%stress_atmice`). Flipping to fully-native and re-running the 195/325-gate
+  is the end-to-end proof — the per-step flux self-check (`max|d(hf,wf,vs,rs,ss)|=0`) confirms the native atmosphere drives
+  identical air-sea fluxes. **No regression:** ctest 13/13 + forcing pi + step-65 1-rank + step-65 MR dist_2 + pressure 57
+  + iceflux 5×2 all `max|Δ|=0`/green (the `mod_io_netcdf` additions don't touch existing readers; the kernels are untouched).
+
+## L43 — Multi-rank fully-native lifecycle (M3f-4): the whole coupled sea-ice + air-sea + atmosphere step byte-matches at multi-rank FIRST TRY; the M2.12/M3 kernels were already MR-ready — the only NEW work was two loop-bound/reduction fixes
+
+M3f-4 built the MULTI-RANK analog of the fully-native lifecycle (`fesom_lifecycle_native_mr` + `tools/run_lifecycle_
+fullynative_gate_multirank.sh`) and byte-matched FESOM2 `max|Δ|=0` on the per-rank gid-keyed NODE substeps — **195
+records (3-step) AND 325 records (5-step), BOTH whichEVP=0 (std EVP) AND whichEVP=1 (mEVP), on CORE2 dist_2 AND
+dist_8**, ALL on the FIRST gate run. This closes M3 (tag `m3`): the native sea-ice EVP + advection + thermo + air-sea
+budget AND the whole atmosphere (NCAR read + bulk + 2 stresses + runoff + Ssurf, 16/16 arrays) drive the multi-step
+coupled CORE2 ocean step byte-exactly at multi-rank with NO prescribed input. The reusable lessons:
+
+- **The hard part was an AUDIT, not new code.** The single most valuable step was verifying — kernel by kernel against the
+  FESOM2 oracle — which halos each ice/coupling routine reads and which it already exchanges, BEFORE writing anything.
+  The finding: every M3a–e kernel was ALREADY multi-rank-correct because each was transcribed with the M2.12 optional-
+  `partit` pattern (owned/halo bounds + the FESOM2 exchanges) and gated for arithmetic at 1-rank. `ice_setup` sizes via
+  `local_dims` (nNodL/nElemL); `ocean2ice` exchanges `u_w/v_w` (srfoce_temp/salt/ssh computed over owned+halo, no
+  exchange); the EVP exchanges only `uice/vice` per subcycle; `ice_fct_solve` exchanges its solve intermediates +
+  final `a/m/m_snow`; `cut_off` + `thermodynamics` LOOP over owned+halo (so their outputs — incl. `values_old`,
+  `flx_h`, `flx_fw`, `t_skin` — stay halo-valid with no tail exchange); `oce_fluxes`'s `integrate_nod_2D` does the
+  cross-rank `allreduce_sum`. Only TWO things were genuinely missing.
+- **The EVP needs NO sigma (element) halo — the owned-node-completeness invariant carries it.** `stress_tensor` writes
+  sigma11/12/22 at OWNED elements; `stress2rhs` reads sigma at OWNED elements (its element loop is `1..myDim_elem2D`)
+  and scatters into nodes; the velocity update reads `u_rhs_ice` at OWNED nodes only. Because an owned node's complete
+  element-neighbourhood is owned (the M2.12a area invariant), the owned-node rhs is complete from the owned-element
+  scatter — so sigma is never read at a halo element and FESOM2 (`ice_EVP.F90`) has NO `exchange_elem(sigma)`, only
+  `exchange_nod(U_ice,V_ice)`. Verified by grepping the oracle's exchange calls (std EVP: 1 velocity exchange; mEVP:
+  the same on `u_ice_aux/v_ice_aux`). The prognostic sigma elastic memory persists owned-only across steps — correct.
+  **Meta: before adding an element-halo exchange, check whether the consuming kernel only reads OWNED elements; the
+  scatter-into-owned-nodes pattern needs no element halo (L33's "verify the invariant before building machinery").**
+- **Missing #1 — `mesh%ocean_area` was a local-only sum (the M3e landmine, now closed at MR).** `compute_node_areas`
+  built `ocean_area`/`ocean_areawithcav` as `vol`/`vol2` summed over OWNED nodes (correct at 1-rank where local==global,
+  but at npes>1 that is only the rank's partial sum). `oce_fluxes` divides the flux-balance net by `ocean_area`, so a
+  partial divisor would scale every balanced field wrong on every rank. Fix (`mod_mesh_areas.F90`): at npes>1
+  `allreduce_sum(vol/vol2)` — FESOM2 `oce_mesh.F90:2389` `MPI_AllREDUCE(MPI_SUM, MPI_DOUBLE_PRECISION)` over the SAME
+  owned partial sums, byte-identical (L6 deterministic tree). This was the `mod_mesh_areas.F90` TODO; L39 had already
+  flagged `ocean_area` as un-gated until `oce_fluxes` consumed it — M3f-4 is where its MR form first matters.
+- **Missing #2 — the bulk forcing looped over `mesh%nod2D` (GLOBAL), the classic MR loop-bound trap.** The three
+  `mod_forcing_bulk` routines (`forcing_bulk_ncar`/`forcing_wind_stress`/`forcing_ice_stress`) looped `do i=1,mesh%nod2D`
+  — at npes>1 that is the global count (wrong + OOB on the local arrays). FESOM2 computes the bulk + stresses over
+  `myDim+eDim` (`gen_forcing_couple.F90:703/738`) with NO exchange (the per-node bulk is partition-independent given
+  halo-valid inputs). Fix: optional `partit` + `owned_bounds` → loop `nNodL`; absent/npes==1 ⇒ `mesh%nod2D` (1-rank
+  verbatim). The NCAR read (`mod_forcing_read`) needed only `frc%nnod = nNodL` (it already loops `frc%nnod`); and
+  `read_other_NetCDF` already derived `myDim+eDim` from `present(partit)` (the L42 trap) — so at MR, PASS `partit`
+  (`read_dist_partition` sets `myDim`), at 1-rank OMIT it. **Sweep `grep "do .*=.*mesh%(nod2D|elem2D)"` over every
+  module on the new MR path — a loop bounded by the global mesh count is the first thing to break, and it fails
+  silently (OOB read of garbage, or short loop) rather than loudly.**
+- **The oracle's 1-rank-only dumps skip cleanly at npes/=1 — the gid-keyed `dump_shim` is the MR validation.** The
+  `fesom_flux_dump` / `fesom_atmflux_dump` shims `print "skipped (npes/=1)"` and return, so there is no per-step flux
+  self-check at multi-rank (that was the 1-rank isolation aid). The REAL gate is the built-in per-substep `dump_shim`
+  (`<prefix>.<mype5>`, keyed by `myList_nod2D` gid) which IS multi-rank — both codes share `dist_<NP>/myList`, so each
+  global probe id is owned by the same rank on both, and `dump_diff.py --glob` matches per-rank by gid (the L8/L34
+  same-partition rule). The forced FESOM2 lifecycle runs cleanly at npes>1 (the 1-rank `io_meandata`/`next_io_rank`
+  workarounds are inactive — they patched 1-rank-only bugs; the normal `io_gather` runs). The MR driver is fully-native
+  ONLY (no prescribe path — the per-rank atm dump the prescribe path would need isn't produced at MR).
+- **Building the MR driver = `fesom_lifecycle_mr` (MR mesh/state/dump scaffold) ⊕ `fesom_lifecycle_native` (ice/atm/
+  forcing setup + runloop), at LOCAL sizes.** Take the `set_partition`+`read_mesh`(local remap)+`nNodO/nNodL/nElemF`
+  bounds + gid-keyed `dump_init` + `do_ic3d(...,partit)`/`muscl_adv_init(...,partit)`/`init_stiff_mat_ale(...,partit)`
+  from the ocean MR driver; take the `ice_setup`/`alloc_atm`/native-forcing-read + the `ocean2ice → apply_native_forcing
+  → ice_timestep → oce_fluxes_mom → oce_fluxes → step_oce` runloop from the native driver; size EVERY array `nNodL`/
+  `nElemF` and append `, partit` to every kernel call. No arithmetic, no new exchange logic in the driver — the kernels
+  carry it. First try, `max|Δ|=0`. **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi
+  + step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`/green.

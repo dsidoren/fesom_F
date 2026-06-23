@@ -660,11 +660,24 @@ Each milestone: feature behind an off-by-default flag; off-switch byte-gates the
 transcribe math from FESOM2; per-kernel operator-diff then whole-model byte-gate; validate at
 production dt=1800; tag.
 
-- **M3 — Sea ice (EVP).** `ocean2ice` → EVP (120 subcycles, `Tevp_inv=3/ice_dt`, **`ice_strength`
-  0.5 factor** near `ice_EVP.F90:599` — re-verify exact line when detailing M3, `m_ice`=h·a, σ elastic
-  memory persists) → `tg_rhs` → ice FCT →
-  `cut_off` → thermo → `oce_fluxes`. Watch: `bc_index_nod2D` multi-rank-safe; ice_dt synced to ocean
-  dt; NaN-vs-0 ice masking in diagnostics. Build `t_ice` from scratch.
+- **M3 — Sea ice (EVP). DETAILED 2026-06-22** into M3a–M3f (full byte-gate breakdown in `docs/HANDOFF.md` "Next
+  task" + "M3 entry notes"). Call sequence: `ocean2ice` → `ice_timestep` (EVP 120 subcycles, `Tevp_inv=3/ice_dt`,
+  **`ice_strength` 0.5 factor** at `ice_EVP.F90:621`, `m_ice`=h·a, σ elastic memory persists → `ice_TG_rhs` → ice
+  FCT `ice_fct_solve` → `cut_off` → `thermodynamics`) → `oce_fluxes_mom` → `oce_fluxes`. The `t_ice` skeleton already
+  exists (`src/types/mod_ice.F90`); flesh out from `MOD_ICE.F90`. Oracle = the proven forced lifecycle
+  (`run_lifecycle_forced_core2.sh` already runs the real ice path) + a `fesom_ice_dump` prescribe-and-stop shim.
+  Reuses: M2.6 `ssh_stiff` CSR (ice mass matrix), the M1/M2.12b FCT pattern, M2.11b `do_ic3d` SST (cold-start IC).
+  M3a = foundation+IC; M3b = ocean2ice+EVP; M3c = ice FCT; M3d = thermo; M3e = `oce_fluxes` (the prescribed M3-gap
+  becomes native — THE PAYOFF); M3f = whole step + forced lifecycle (native fluxes) + multi-rank, tag `m3`.
+  **✅ M3a–M3e DONE (all `max|Δ|=0`, CORE2 1-rank, BOTH whichEVP; L36–L39). ✅ M3f-1 (`ice_timestep` assembly) +
+  M3f-2 (native-flux coupled multi-step forced lifecycle: `ocean2ice → ice_timestep → oce_fluxes_mom → oce_fluxes →
+  step_oce`, `max|Δ|=0` 195/325 records × both whichEVP; the post-bulk atmosphere prescribed from a new
+  `fesom_atmflux_dump` oracle, L40) DONE 2026-06-23. ✅ M3f-3 COMPLETE (native CORE2 forcing read, all 16 atm arrays):
+  M3f-3a NCAR read + M3f-3c bulk/stresses (L41) + M3f-3b runoff + SSS climatology (`read_other_NetCDF`/`interp_2d_field`
+  in `mod_forcing_other.F90`, L42) — the FULLY-NATIVE lifecycle (NO prescribed atmosphere) is `max|Δ|=0` 195/325 records
+  × both whichEVP (`tools/run_lifecycle_fullynative_gate_core2.sh`). Active = M3f-4 (multi-rank), tag `m3`.** Watch:
+  `bc_index_nod2D` multi-rank-safe; ice_dt synced to ocean dt; NaN-vs-0 ice masking in diagnostics. Standard EVP
+  only (`whichEVP=0`; NO icepack/meltponds/cavity/oasis-yac).
 - **M4 — GM/Redi.** sigma_xy/neutral_slope → Γ solve (TDMA) → bolus velocities (**`fer_w` from
   `div(fer_uv·h)`; never per-cell clamp**) → rotated Redi diffusion; master off-switch byte-matches
   pre-GM model. Producers: `sw_alpha_beta`. Active: `K_GM_max=1000`, ODM95 tapering.

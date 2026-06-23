@@ -97,7 +97,7 @@ module mod_param_phys
 
     ! --- &tracer_phys: PP background diffusivity + mo_convect enhancements ---
     ! Members of the FESOM2 &tracer_phys namelist group (oce_modules.F90 cites below)
-    ! read by M2.8 oce_mixing_pp (Kv0_const) and M2.8b mo_convect (the use_*/*_kv set).
+    ! read by M2.8 oce_mixing_pp (Kv0_const) and M2.8b mo_convect (the use_* / *_kv set).
     ! pi does NOT set any of these -> the FESOM2 defaults hold (Kv0_const=.true. routes
     ! the simple Kv = mix_coeff_PP*factor^3 + K_ver background; use_momix=.true. but it
     ! needs forcing/ice not present pre-forcing, so the M2.8b gate FORCES use_momix=.false.

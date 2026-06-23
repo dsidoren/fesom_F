@@ -11,7 +11,11 @@
 # cal_shortwave_rad is then skipped so heat_flux is the raw obudget value. Needs the np=1
 # next_io_rank fix + the output()/write_initial_conditions() npes==1 early-returns.
 #
-#   tools/run_lifecycle_forced_core2.sh [run_dir] [dump_prefix] [flux_prefix] [nsteps]
+#   tools/run_lifecycle_forced_core2.sh [run_dir] [dump_prefix] [flux_prefix] [nsteps] [atmflux] [whichEVP] [np]
+# [np] (default 1) selects CORE2 dist_<np> (FESOM2 auto-reads dist_<npes> from the mesh path);
+# np>1 is the M3f-4 multi-rank oracle — the dump_shim is gid-keyed -> per-rank <DUMP>.<mype5>,
+# and the 1-rank-only flux/atmflux dumps skip harmlessly (npes/=1), so the per-rank node-substep
+# dump is the gate target. The 1-rank io workarounds are inactive at npes>1 (normal io_gather).
 set -euo pipefail
 F2=/home/a/a270088/port2/fesom2
 STUB="$F2/test/input/global"
@@ -20,11 +24,15 @@ RUN="${1:-/scratch/a/a270088/lifecycle_forced_core2}"
 DUMP="${2:-$RUN/lifef_f2}"
 FLUX="${3:-$RUN/flux_f2}"
 NSTEPS="${4:-3}"
+ATMFLUX="${5:-$RUN/atmflux_f2}"   # M3f: per-step post-bulk atmospheric forcing (fesom_atmflux_dump)
+WHICHEVP="${6:-0}"                # M3f: ice EVP solver (0=std EVP, 1=mEVP) — must match FESOM3
+NP="${7:-1}"                      # M3f-4: number of ranks (CORE2 dist_<NP>)
 
 source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 rm -rf "$RUN"; mkdir -p "$RUN"
 cp "$F2"/work_core/namelist.* "$RUN"/
 cp "$F2"/work_core/namelist.forcing.CORE2 "$RUN"/namelist.forcing
+sed -i "s/^whichEVP *=.*/whichEVP = ${WHICHEVP}/" "$RUN"/namelist.ice   # M3f: match FESOM3 EVP variant
 ln -sf "$F2"/build/bin/fesom.x "$RUN"/fesom.x
 printf '0 1 1948\n0 1 1948\n' > "$RUN"/fesom.clock
 
@@ -53,11 +61,12 @@ PY
 
 cd "$RUN"
 export FESOM_DUMP_FILE="$DUMP" FESOM_DUMP_MAXSTEPS="$NSTEPS" FESOM_FLUX_DUMP="$FLUX"
+export FESOM_ATMFLUX_DUMP="$ATMFLUX"   # M3f native-flux gate (harmless extra dump for the M2.11c-2 gate)
 ulimit -s unlimited
-echo "run_lifecycle_forced_core2: 1 rank, $NSTEPS steps (FORCED use_ice) -> ${DUMP}.* + ${FLUX}.*"
-timeout 600 mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n 1 ./fesom.x > "$RUN/run.log" 2>&1 || true
-if ls "${DUMP}".* >/dev/null 2>&1 && ls "${FLUX}".* >/dev/null 2>&1; then
-    echo "run_lifecycle_forced_core2: done -> dump $(stat -c%s "${DUMP}".00000)B, flux $(stat -c%s "${FLUX}".00000)B"
+echo "run_lifecycle_forced_core2: $NP rank(s), $NSTEPS steps (FORCED use_ice) -> ${DUMP}.*"
+timeout 600 mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n "$NP" ./fesom.x > "$RUN/run.log" 2>&1 || true
+if ls "${DUMP}".* >/dev/null 2>&1; then
+    echo "run_lifecycle_forced_core2: done -> dump $(stat -c%s "${DUMP}".00000)B ($(ls "${DUMP}".* | wc -l) rank file(s))"
     grep -E 'FESOM Run|FDBG step|forcing init' "$RUN/run.log" | head
 else
     echo "run_lifecycle_forced_core2: MISSING DUMP — see $RUN/run.log"; tail -30 "$RUN/run.log"; exit 1

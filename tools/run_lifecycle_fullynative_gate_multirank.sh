@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# M3f-4 MULTI-RANK FULLY-NATIVE forced lifecycle byte-gate (CORE2 dist_<NP>). The REAL forced
+# FESOM2 lifecycle (use_ice=.true., real CORE2 forcing + ice EVP + oce_fluxes) at NP ranks vs
+# FESOM3's FULLY NATIVE multi-rank lifecycle: FESOM3 reads NOTHING from the oracle atmosphere —
+# it computes the WHOLE air-sea forcing itself each step over owned+halo (8 NCAR + NCAR bulk +
+# stresses + runoff + Ssurf), then ocean2ice -> ice_timestep -> oce_fluxes -> step_oce, all
+# through the optional partit. Both codes share dist_<NP>/myList, so each global probe id is
+# owned by the same rank on both (the L8 same-partition rule); the per-rank gid-keyed dump_shim
+# / mod_dump are matched by GLOBAL id (dump_diff.py --glob). 13 NODE substeps x 5 probes x N
+# steps (SW_AB substep 2 ignored). NOTE: the oracle flux/atmflux dumps skip at npes/=1, so the
+# node-substep gate is the validation (the 1-rank fully-native self-check proved the fluxes).
+#
+#   tools/run_lifecycle_fullynative_gate_multirank.sh [np] [nsteps] [whichEVP] [run_dir]
+set -euo pipefail
+F3=/home/a/a270088/fesom3
+COREMESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+ICFILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc
+POOL=/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0
+NP="${1:-2}"
+NSTEPS="${2:-3}"
+WHICHEVP="${3:-0}"
+RUN="${4:-/scratch/a/a270088/lifecycle_fullynative_mr${NP}}"
+
+echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, $NP-rank CORE2 dist_$NP, use_ice, whichEVP=$WHICHEVP)"
+bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" "$NP" | tail -4
+
+echo "[2/3] FESOM3 FULLY NATIVE MR lifecycle ($NSTEPS steps, $NP-rank dist_$NP, whichEVP=$WHICHEVP) — NO prescribed atmosphere"
+source "$F3/env.sh" intel >/dev/null 2>&1
+export FESOM3_MESH_DIR="$COREMESH" FESOM3_IC_FILE="$ICFILE"
+export FESOM3_FORCING_DIR="/home/a/a270088/port2/fesom2/test/input/global"  # native NCAR read
+export FESOM3_RUNOFF_FILE="$POOL/CORE2_runoff.nc"   # native runoff (M3f-3b)
+export FESOM3_SSS_FILE="$POOL/PHC2_salx.nc"          # native SSS restoring (M3f-3b)
+export FESOM3_WHICHEVP="$WHICHEVP"
+export FESOM_DUMP_FILE="$RUN/lifen_f3" FESOM_DUMP_MAXSTEPS="$NSTEPS" FESOM3_NSTEPS="$NSTEPS"
+ulimit -s unlimited
+mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n "$NP" \
+    "$F3/build_intel_dp/bin/fesom_lifecycle_native_mr" > "$RUN/run_f3.log" 2>&1 || \
+    { echo "  FESOM3 run failed"; tail -40 "$RUN/run_f3.log"; exit 1; }
+grep -E 'nod2D|IC\(|native runoff|step [0-9]|done' "$RUN/run_f3.log" || true
+
+echo "[3/3] compare per-rank (gid-keyed; 13 NODE substeps x 5 probes x $NSTEPS steps; SW_AB substep 2 ignored)"
+python3 "$F3/tools/dump_diff.py" "$RUN/lifef_f2" "$RUN/lifen_f3" --glob --ignore-substep=2

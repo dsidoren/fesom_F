@@ -23,7 +23,7 @@ program fesom_analytic
     if (model%mesh%nl     /= NL)             nfail = nfail + 1
     if (.not. allocated(model%dyn%uv))       nfail = nfail + 1
     if (.not. allocated(model%tracers%data)) nfail = nfail + 1
-    if (.not. allocated(model%ice%a_ice))    nfail = nfail + 1
+    if (.not. allocated(model%ice%data))     nfail = nfail + 1
     if (model%mesh%edge2D <= 0)              nfail = nfail + 1
     if (.not. allocated(model%mesh%gradient_sca)) nfail = nfail + 1
 

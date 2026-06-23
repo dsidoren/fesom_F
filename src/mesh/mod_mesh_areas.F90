@@ -36,7 +36,7 @@ module mod_mesh_areas
     use mod_constants,   only: r_earth, omega
     use mod_mesh,        only: t_mesh, MAX_NV
     use mod_partit,      only: t_partit
-    use mod_halo,        only: exchange_elem, exchange_elem_full, exchange_nod
+    use mod_halo,        only: exchange_elem, exchange_elem_full, exchange_nod, allreduce_sum
     use mod_mesh_rotate, only: trim_cyclic, get_cyclic_length, r2g
     implicit none
     private
@@ -86,7 +86,7 @@ contains
             call exchange_elem(center_y, partit)
             call exchange_elem_cos(mesh, partit, nElemF)
         end if
-        call compute_node_areas(mesh, nNodO, nNodL)                     ! accumulate area, then scale
+        call compute_node_areas(mesh, nNodO, nNodL, partit)             ! accumulate area, then scale
         if (partit%npes > 1) then
             ! M2.12b: halo elem_area (FULL halo) for MUSCL fill_up_dn_grad's area
             ! weighting at the halo elements reached through a halo node's element list,
@@ -326,7 +326,7 @@ contains
         end do
     end subroutine compute_edge_geometry
 
-    subroutine compute_node_areas(mesh, nNodO, nNodL)
+    subroutine compute_node_areas(mesh, nNodO, nNodL, partit)
         ! Control-volume area per level (oce_mesh.F90:2252-2351). area(nz,n) gathers
         ! elem_area/nv from adjacent elements deep enough to reach level nz. The
         ! accumulation runs on UNSCALED elem_area; then elem_area, area and areasvol
@@ -334,8 +334,9 @@ contains
         ! FESOM2 mesh_areas:2313-2315) so the per-node sums round identically. Owned
         ! nodes are accumulated locally (the partition guarantees a complete owned
         ! element-neighbourhood); the area halo exchange is deferred to M2.12b.
-        type(t_mesh), intent(inout) :: mesh
-        integer,      intent(in)    :: nNodO, nNodL
+        type(t_mesh),   intent(inout) :: mesh
+        integer,        intent(in)    :: nNodO, nNodL
+        type(t_partit), intent(in)    :: partit
         integer :: n, j, elem, nz, nzmin, nzmax
         allocate(mesh%area(mesh%nl, nNodL), mesh%area_inv(mesh%nl, nNodL))
         allocate(mesh%areasvol(mesh%nl, nNodL), mesh%areasvol_inv(mesh%nl, nNodL))
@@ -380,7 +381,35 @@ contains
             end do
         end do
         mesh%areasvol_inv = mesh%area_inv
-        mesh%ocean_area = sum(mesh%area(1, 1:nNodO))
+        ! ocean_area / ocean_areawithcav: faithful FESOM2 oce_mesh.F90:2385 sequential
+        ! accumulation over areasvol (cavity-aware), NOT sum(area(1,:)). ocean_area is the
+        ! divisor in the M3e oce_fluxes flux balancing (net/ocean_area), so its summation
+        ! order must match FESOM2 bit-for-bit (-fp-model precise stops reassociation, but a
+        ! sum() intrinsic and a do-loop are not guaranteed identical — the explicit loop is).
+        ! At 1-rank this local partial sum IS the global value; at npes>1 (M3f-4) the owned
+        ! partial sums are summed across ranks by allreduce_sum (FESOM2 oce_mesh.F90:2389
+        ! MPI_AllREDUCE(vol/vol2, MPI_SUM, MPI_DOUBLE_PRECISION) — the reduction is over the
+        ! SAME owned-node partial sums in the same comm, so it is byte-identical, L6/L33).
+        block
+            real(kind=MP) :: vol, vol2
+            real(kind=WP) :: gvol, gvol2
+            vol = 0.0_MP; vol2 = 0.0_MP
+            do n = 1, nNodO
+                vol2 = vol2 + mesh%areasvol(mesh%ulevels_nod2D(n), n)
+                if (mesh%ulevels_nod2D(n) > 1) cycle
+                vol  = vol + mesh%areasvol(1, n)
+            end do
+            if (partit%npes > 1) then
+                gvol = real(vol, WP); gvol2 = real(vol2, WP)
+                call allreduce_sum(gvol,  partit)     ! ocean_area      (surface, no cavity)
+                call allreduce_sum(gvol2, partit)     ! ocean_areawithcav (incl. cavity)
+                mesh%ocean_area        = real(gvol,  MP)
+                mesh%ocean_areawithcav = real(gvol2, MP)
+            else
+                mesh%ocean_area        = vol
+                mesh%ocean_areawithcav = vol2
+            end if
+        end block
     end subroutine compute_node_areas
 
 end module mod_mesh_areas

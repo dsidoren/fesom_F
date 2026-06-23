@@ -17,7 +17,8 @@ module mod_io_netcdf
     implicit none
     private
     public :: nc_open_read, nc_close, nc_dimlen, nc_get_axis_dp, &
-              nc_get_slice_r4, nc_get_var3d_dp, nc_get_att_text, nc_varid
+              nc_get_slice_r4, nc_get_slice_dp, nc_get_var3d_dp, &
+              nc_get_att_text, nc_get_att_dp, nc_varid
 
 contains
 
@@ -96,6 +97,36 @@ contains
              start=[1, 1, t_indx], count=[size(buf,1), size(buf,2), 1]), &
              'get_slice '//trim(names(1)))
     end subroutine nc_get_slice_r4
+
+    ! Read a real(8) 2-D lon x lat slice at time index `t_indx` from a (lon,lat,time)
+    ! variable. buf must be shape (nLon, nLat). The real64 analog of nc_get_slice_r4 —
+    ! mirrors FESOM2 read_other_NetCDF (gen_modules_read_NetCDF.F90:102) which reads the
+    ! 2D slice straight into a real64 ncdata via nf90_get_var with start=(1,1,itime),
+    ! count=(lonlen,latlen,1). On-disk float -> real64 is an exact netCDF conversion.
+    subroutine nc_get_slice_dp(ncid, names, t_indx, buf)
+        integer, intent(in) :: ncid
+        character(len=*), intent(in) :: names(:)
+        integer, intent(in) :: t_indx
+        real(real64), intent(out) :: buf(:,:)
+        integer :: vid
+        vid = nc_varid(ncid, names)
+        call nc_check(nf90_get_var(ncid, vid, buf, &
+             start=[1, 1, t_indx], count=[size(buf,1), size(buf,2), 1]), &
+             'get_slice_dp '//trim(names(1)))
+    end subroutine nc_get_slice_dp
+
+    ! Read a scalar real attribute (e.g. 'missing_value') into real64. Mirrors FESOM2
+    ! read_other_NetCDF (gen_modules_read_NetCDF.F90:105) nf90_get_att into a real64 miss;
+    ! an on-disk float attribute (1.e30f / -99.f) converts float -> real64 exactly, so the
+    ! ==miss equality against the (also float->real64) data values matches the oracle.
+    real(real64) function nc_get_att_dp(ncid, varnames, attname) result(val)
+        integer, intent(in) :: ncid
+        character(len=*), intent(in) :: varnames(:)
+        character(len=*), intent(in) :: attname
+        integer :: vid
+        vid = nc_varid(ncid, varnames)
+        call nc_check(nf90_get_att(ncid, vid, trim(attname), val), 'get_att_dp '//trim(attname))
+    end function nc_get_att_dp
 
     ! Read a full real(8) (lon,lat,depth) cube from a 3-D variable into buf, whose
     ! shape (nLon, nLat, nDepth) must match the on-disk extents. Mirrors the FESOM2
