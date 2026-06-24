@@ -74,6 +74,15 @@ module mod_dyn
         real(kind=WP), allocatable, dimension(:)     :: stable, caseA    ! (nod2D) stable flag / caseA flag
         real(kind=WP), allocatable, dimension(:)     :: ustar, Bo        ! (nod2D) friction velocity / surface buoyancy flux
         integer,       allocatable, dimension(:)     :: kbl              ! (nod2D) first level below the OBL
+        ! M7 TKE vertical mixing (oce_mixing_tke). Allocated only when TKE (mix_scheme_nmb==5);
+        ! the KPP/PP step never touches them. tke is the FIRST stateful mixing field — a prognostic
+        ! tke(nl,node) carried step->step (tke_old -> integrate_tke -> tke_new in the same slab);
+        ! tke restart serialization is the M8 item (NOT in write_t_dyn_work). tke_Av/tke_Kv are
+        ! FRESH overwrites each step (node KappaM/KappaH); tke_Kv -> Kv (nodes), tke_Av -> Av
+        ! (node->elem 3-vertex mean). FESOM2 g_cvmix_tke module-array names.
+        real(kind=WP), allocatable, dimension(:,:)   :: tke              ! (nl, nod2D) prognostic TKE [m2/s2]
+        real(kind=WP), allocatable, dimension(:,:)   :: tke_Av           ! (nl, nod2D) node KappaM (-> Av)
+        real(kind=WP), allocatable, dimension(:,:)   :: tke_Kv           ! (nl, nod2D) node KappaH (-> Kv)
     contains
         procedure :: write_dw => write_t_dyn_work
         procedure :: read_dw  => read_t_dyn_work

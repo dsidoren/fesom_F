@@ -53,8 +53,13 @@ program fesom_lifecycle_native
     ! the KPP nonlocal counter-gradient flux (FESOM3_KPP_NONLCL — dead in production).
     use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit, &
                                   use_kpp_nonlclflx, ref_sss, ref_sss_local
+    use mod_param_phys,     only: tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, &
+                                  tke_kappaM_min, tke_kappaM_max, tke_min, tke_surf_min, &
+                                  tke_mxl_choice, tke_only, tke_use_ubound_dirichlet, &
+                                  tke_use_lbound_dirichlet, tke_dolangmuir
     use mod_config,         only: use_sw_pene, which_ALE
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
+    use oce_mixing_tke,     only: tke_init
     use oce_shortwave_pene, only: cal_shortwave_rad
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
@@ -103,6 +108,7 @@ program fesom_lifecycle_native
     ! nonlocal counter-gradient flux (do_nonlcl — DEAD in the production config). chl is the
     ! constant chlorophyll (work_core chl_const=0.1) cal_shortwave_rad reads (floored in place).
     logical :: use_kpp, do_swpene, do_nonlcl
+    logical :: use_tke      ! M7c: FESOM3_MIX_TKE -> cvmix_TKE producer (forced; pair FESOM3_SW_PENE=1)
     real(kind=WP), allocatable :: chl(:)
     ! oracle flux arrays for the optional self-check
     real(kind=WP), allocatable :: o_hf(:), o_wf(:), o_vs(:), o_rs(:), o_ss(:,:)
@@ -147,6 +153,8 @@ program fesom_lifecycle_native
     use_redi = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_MIX_KPP', env, length=env_len, status=ios)
     use_kpp = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_MIX_TKE', env, length=env_len, status=ios)
+    use_tke = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_SW_PENE', env, length=env_len, status=ios)
     do_swpene = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_KPP_NONLCL', env, length=env_len, status=ios)
@@ -383,6 +391,25 @@ program fesom_lifecycle_native
         dyn%work%caseA = 0.0_WP; dyn%work%ustar = 0.0_WP; dyn%work%Bo = 0.0_WP; dyn%work%kbl = 0
         call oce_mixing_kpp_init(Ricr, concv)   ! wmt/wst lookup tables + Vtc/cg (once)
         write(*,'(a)') 'fesom_lifecycle_native: KPP vertical mixing ENABLED (work_core KPP)'
+    end if
+
+    !===========================================================================
+    ! M7c TKE vertical mixing (FESOM3_MIX_TKE) — the prognostic cvmix_TKE Av/Kv producer, the
+    ! FORCED/native analog of the M7b unforced block. mix_scheme_nmb=5 routes step_oce to
+    ! calc_cvmix_tke (assemble vshear2/bvfreq2/dz_trr + the REAL forc_tke_surf=|stress_node_surf|/
+    ! density_0 -> integrate_tke -> Kv=tke_Kv + Av=avg(tke_Av)) + mo_convect. stress_node_surf is
+    ! the real node stress from oce_fluxes_mom (allocated by the forcing path). ⚠️ work_*_tke has
+    ! use_sw_pene=.true. -> the runner MUST set FESOM3_SW_PENE=1 (the sw_3d tracer term is allocated
+    ! by the do_swpene block below, NOT here). tke restart-write is M8 (tke=0 at cold start).
+    if (use_tke) then
+        mix_scheme_nmb = 5
+        allocate(dyn%work%tke(nl, mesh%nod2D), dyn%work%tke_Av(nl, mesh%nod2D), &
+                 dyn%work%tke_Kv(nl, mesh%nod2D))
+        dyn%work%tke = 0.0_WP; dyn%work%tke_Av = 0.0_WP; dyn%work%tke_Kv = 0.0_WP
+        call tke_init(tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, tke_kappaM_min, &
+                      tke_kappaM_max, tke_min, tke_surf_min, tke_mxl_choice, tke_only, &
+                      tke_use_ubound_dirichlet, tke_use_lbound_dirichlet, tke_dolangmuir)
+        write(*,'(a)') 'fesom_lifecycle_native: TKE vertical mixing ENABLED (cvmix_TKE)'
     end if
 
     !===========================================================================

@@ -88,6 +88,33 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   restart write + run-length-in-years + Fortran comparison, ~byte-identical). **Tag `m6` at the M6a
   commit.** The WHOLE default FESOM config (zstar + KPP + GM + Redi + sw_pene, native ice/forcing) is
   now byte-exact 1-rank AND multi-rank, both whichEVP.
+  **→ M7 (TKE vertical mixing — Gaspar'90 + Blanke-Delecluse mixing length, library-free) ✅ COMPLETE
+  2026-06-25 (all M7a–M7e DONE, `max|Δ|=0` 1-rank AND multi-rank, both whichEVP) — tag `m7`.** Plan:
+  `docs/plans/2026-06-24-m7-tke.md`. `mix_scheme='cvmix_TKE'` (mix_scheme_nmb==5) → a prognostic-TKE
+  Av/Kv producer transcribed DIRECTLY from the FESOM2 CVMix files (`cvmix_tke.F90` integrate_tke +
+  `cvmix_utils_addon.F90` solve_tridiag + `gen_modules_cvmix_tke.F90` calc_cvmix_tke) into a clean
+  `src/oce/oce_mixing_tke.F90` — NO CVMix library, NO tke_type put/get, NO diagnostics-output bloat
+  (the C-port interpretation). `tke_only=.true.` (IDEMIX/Langmuir/Dirichlet branches all dead);
+  `tke_mxl_choice==2` (the only ported mixing length). The `&param_tke` DOUBLES are baked in
+  `mod_param_phys` (⚠️ `tke_cd=3.75`, the namelist-over-codedefault trap; used at the Neumann surface BC).
+  **M7a-1 (isolated column CONTROLLED REPLAY):** `fesom_tkereplay` ingests the oracle `tke_dump` per-step
+  INPUTS → integrate_tke → emits OUTPUTS, byte-identical to the oracle (13 tags × 3 steps `max|Δ|=0`).
+  The literals transcribed VERBATIM (`6.6`, `**(3./2.)`, `sqrt(2D0)`, reciprocal-multiply Thomas) are
+  byte-exact under the `-r8` anchor — the C-port's 6.6/pow/fmax traps are ABSENT in Fortran↔Fortran.
+  **M7b (unforced linfs+TKE lifecycle):** the prognostic `tke` recurrence (`dyn%work%tke` step→step) +
+  the Av/Kv producer + mo_convect — `max|Δ|=0` 195+325. **M7c (forced/fully-native, both whichEVP):** the
+  surface WIND term (`forc_tke_surf=|stress_node_surf|/density_0` → Neumann `(cd*forc**(3./2.))/dzt(1)`)
+  + sw_pene + GM + Redi — `max|Δ|=0` 195+325 BOTH whichEVP. **M7d (multi-rank dist_2/dist_8):** PURE WIRING
+  (the M4f/M5d lesson) — `calc_cvmix_tke` is optional-`partit` from the start (owned-loop +
+  `exchange_nod(tke_Kv)`/`exchange_nod(tke_Av)` BEFORE the node→elem 3-vertex average; `tke` is NEVER
+  exchanged — the recurrence is partition-local) — `max|Δ|=0`. **M7e (zstar+TKE production):** the FULL
+  default config with TKE — `max|Δ|=0` 1-rank AND multi-rank, both whichEVP (zstar `hnode`/`Z_3d_n` are
+  time-varying, read live by `calc_cvmix_tke` — a pure config flip; TKE does not touch the ALE thickness
+  machinery). NET consumer-side change vs M6 was ZERO (Av element / Kv node UNCHANGED; no ghats; `sw_3d`
+  already M5c) — markedly simpler than M5. No regression: KPP / zstar+KPP / ctest 13/13 all `max|Δ|=0`.
+  **`tke` restart serialization = M8** (the FIRST stateful mixing field — `dyn%work%tke`; not in
+  `write_t_dyn_work`). **Tag `m7`. RESUME at M8** = production months/years runs (netCDF output + restart
+  write + run-length-in-years + Fortran comparison ~byte-identical) — its own plan.
   (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,

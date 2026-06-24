@@ -29,11 +29,14 @@ REDI="${REDI:-0}"
 MIX_KPP="${MIX_KPP:-0}"
 SW_PENE="${SW_PENE:-0}"
 KPP_NONLCL="${KPP_NONLCL:-0}"
+# M7c: MIX_TKE=1 runs mix_scheme='cvmix_TKE' (prognostic TKE) in BOTH sides. Pair with SW_PENE=1
+# (work_*_tke has use_sw_pene=.true.). Default 0.
+MIX_TKE="${MIX_TKE:-0}"
 # M6a-3: WHICH_ALE=zstar runs the production free surface + real freshwater flux in BOTH sides.
 WHICH_ALE="${WHICH_ALE:-linfs}"
 
-echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice; WHICH_ALE=$WHICH_ALE FER_GM=$FER_GM REDI=$REDI MIX_KPP=$MIX_KPP SW_PENE=$SW_PENE NONLCL=$KPP_NONLCL)"
-WHICH_ALE="$WHICH_ALE" FER_GM="$FER_GM" REDI="$REDI" MIX_KPP="$MIX_KPP" SW_PENE="$SW_PENE" KPP_NONLCL="$KPP_NONLCL" \
+echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice; WHICH_ALE=$WHICH_ALE FER_GM=$FER_GM REDI=$REDI MIX_KPP=$MIX_KPP MIX_TKE=$MIX_TKE SW_PENE=$SW_PENE NONLCL=$KPP_NONLCL)"
+WHICH_ALE="$WHICH_ALE" FER_GM="$FER_GM" REDI="$REDI" MIX_KPP="$MIX_KPP" MIX_TKE="$MIX_TKE" SW_PENE="$SW_PENE" KPP_NONLCL="$KPP_NONLCL" \
     bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" | tail -4
 
 echo "[2/3] FESOM3 FULLY NATIVE lifecycle ($NSTEPS steps, whichEVP=$WHICHEVP) — NO prescribed atmosphere"
@@ -49,6 +52,7 @@ if [ "$WHICH_ALE" != linfs ]; then export FESOM3_WHICH_ALE="$WHICH_ALE"; fi  # M
 if [ "$FER_GM" = 1 ]; then export FESOM3_FER_GM=1; fi   # M4e: GM bolus in the native lifecycle
 if [ "$REDI" = 1 ]; then export FESOM3_REDI=1; fi       # M4e: Redi isopycnal diffusion
 if [ "$MIX_KPP" = 1 ]; then export FESOM3_MIX_KPP=1; fi # M5c: KPP vertical mixing
+if [ "$MIX_TKE" = 1 ]; then export FESOM3_MIX_TKE=1; fi # M7c: TKE vertical mixing (cvmix_TKE)
 if [ "$SW_PENE" = 1 ]; then export FESOM3_SW_PENE=1; fi # M5c: shortwave penetration (sw_3d term)
 if [ "$KPP_NONLCL" = 1 ]; then export FESOM3_KPP_NONLCL=1; fi # M5c: ghats nonlocal flux (gate variant)
 export FESOM_DUMP_FILE="$RUN/lifen_f3" FESOM_DUMP_MAXSTEPS="$NSTEPS" FESOM3_NSTEPS="$NSTEPS"

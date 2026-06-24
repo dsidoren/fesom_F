@@ -127,6 +127,29 @@ module mod_param_phys
     real(kind=WP) :: ref_sss           = 34.7_WP   ! oce_modules.F90:37
     logical       :: ref_sss_local     = .false.   ! oce_modules.F90:36
 
+    ! --- M7: TKE (cvmix_TKE) vertical mixing — &param_tke namelist DOUBLES (L38) ---
+    ! Baked from the work_*_tke namelist.cvmix &param_tke group (init_cvmix_tke reads it,
+    ! gen_modules_cvmix_tke.F90:166-169,313-322). mix_scheme='cvmix_TKE' -> mix_scheme_nmb==5
+    ! -> tke_only=.true. (pure standalone TKE; IDEMIX uncoupled, nmb/=56). tke_mxl_choice==2 is
+    ! the only ported mixing-length branch (Blanke-Delecluse). use_ubound/lbound_dirichlet keep
+    ! the code defaults (.false. -> the Neumann BC). ⚠️ tke_cd: the namelist value 3.75 OVERRIDES
+    ! the gen_modules code default 1.0 (the feedback_namelist_over_codedefault trap); it IS used
+    ! at the Neumann (cd*forc_tke_surf**(3./2.))/dzt(1) surface term despite the "Dirichlet" name.
+    real(kind=WP) :: tke_c_k                  = 0.1_WP    ! TKE parameter c_k
+    real(kind=WP) :: tke_c_eps                = 0.7_WP    ! dissipation parameter c_eps
+    real(kind=WP) :: tke_alpha                = 30.0_WP   ! diffusion-of-TKE parameter alpha_tke
+    real(kind=WP) :: tke_mxl_min              = 1.0e-8_WP ! minimum mixing length [m]
+    real(kind=WP) :: tke_kappaM_min           = 0.0_WP    ! minimum Kappa_M [m2/s]
+    real(kind=WP) :: tke_kappaM_max           = 100.0_WP  ! maximum Kappa_M [m2/s]
+    real(kind=WP) :: tke_cd                   = 3.75_WP   ! surface BC coeff (namelist override of 1.0)
+    real(kind=WP) :: tke_surf_min             = 1.0e-4_WP ! minimum surface TKE [m2/s2]
+    real(kind=WP) :: tke_min                  = 1.0e-6_WP ! minimum interior TKE [m2/s2]
+    integer       :: tke_mxl_choice           = 2         ! 2 = Blanke-Delecluse (only ported branch)
+    logical       :: tke_only                 = .true.    ! standalone TKE (nmb/=56 -> IDEMIX off)
+    logical       :: tke_use_ubound_dirichlet = .false.   ! .false. -> Neumann surface BC
+    logical       :: tke_use_lbound_dirichlet = .false.   ! .false. -> Neumann bottom BC
+    logical       :: tke_dolangmuir           = .false.   ! Langmuir term (l_lc); dead here
+
 contains
 
     subroutine read_param_phys(nml_path, ierr)

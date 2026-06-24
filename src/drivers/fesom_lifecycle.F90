@@ -39,8 +39,13 @@ program fesom_lifecycle
     use mod_param_phys,     only: Redi_Kmax, Redi_Kmin, Redi_Ktaper, K_hor, &
                                   scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97
     use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit
+    use mod_param_phys,     only: tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, &
+                                  tke_kappaM_min, tke_kappaM_max, tke_min, tke_surf_min, &
+                                  tke_mxl_choice, tke_only, tke_use_ubound_dirichlet, &
+                                  tke_use_lbound_dirichlet, tke_dolangmuir
     use mod_config,         only: use_sw_pene, which_ALE
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
+    use oce_mixing_tke,     only: tke_init
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
     use mod_partitioning,   only: par_init, par_ex
@@ -82,6 +87,9 @@ program fesom_lifecycle
     ! M5b: enable KPP vertical mixing (FESOM3_MIX_KPP). stress_node_surf is the KPP surface
     ! stress on nodes (unforced ⇒ zero); left unallocated for PP ⇒ step_oce sees it absent.
     logical :: use_kpp
+    ! M7b: enable TKE vertical mixing (FESOM3_MIX_TKE). mix_scheme_nmb=5 routes step_oce to
+    ! calc_cvmix_tke (the prognostic dyn%work%tke + Av/Kv producer). stress_node_surf zero (unforced).
+    logical :: use_tke
     real(kind=WP), allocatable :: stress_node_surf(:,:)
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
@@ -99,6 +107,8 @@ program fesom_lifecycle
     use_redi = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_MIX_KPP', env, length=env_len, status=ios)
     use_kpp = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_MIX_TKE', env, length=env_len, status=ios)
+    use_tke = (ios == 0 .and. env_len > 0)
     ! M6a-2: ALE vertical coordinate (default linfs; 'zstar' -> Shchepetkin PGF + per-step
     ! stiffness update + the vert_vel_ale/update_thickness_ale stretch). Cold start hbar=0
     ! => the rest-state hnode/zbar_3d_n/Z_3d_n init above already matches zstar at t=0.
@@ -344,6 +354,26 @@ program fesom_lifecycle
         allocate(stress_node_surf(2, mesh%nod2D)); stress_node_surf = 0.0_WP
         call oce_mixing_kpp_init(Ricr, concv)   ! wmt/wst lookup tables + Vtc/cg (once)
         write(*,'(a)') 'fesom_lifecycle: KPP vertical mixing ENABLED (work_core KPP; unforced, sw_pene off)'
+    end if
+
+    ! M7b TKE (FESOM3_MIX_TKE set): swap the reduced PP for the prognostic cvmix_TKE producer.
+    ! mix_scheme_nmb=5 routes step_oce to calc_cvmix_tke (assemble vshear2/bvfreq2/dz_trr/normstress
+    ! -> integrate_tke -> Kv=tke_Kv + Av=avg(tke_Av)), then mo_convect. Av stays element-based and
+    ! Kv node-based so impl_vert_visc_ale + the tracer TDMA are BYTE-UNCHANGED from M6. UNFORCED ⇒
+    ! stress_node_surf=0 ⇒ forc_tke_surf=0 (the wind term + **(3./2.) are first exercised in M7c).
+    ! tke is the FIRST stateful mixing field — dyn%work%tke carries the prognostic recurrence
+    ! step->step (tke=0 at cold start; restart-write is M8). The &param_tke DOUBLES (tke_cd=3.75,
+    ! the namelist-over-codedefault) come from mod_param_phys (baked).
+    if (use_tke) then
+        mix_scheme_nmb = 5
+        allocate(dyn%work%tke(nl, mesh%nod2D), dyn%work%tke_Av(nl, mesh%nod2D), &
+                 dyn%work%tke_Kv(nl, mesh%nod2D))
+        dyn%work%tke = 0.0_WP; dyn%work%tke_Av = 0.0_WP; dyn%work%tke_Kv = 0.0_WP
+        allocate(stress_node_surf(2, mesh%nod2D)); stress_node_surf = 0.0_WP
+        call tke_init(tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, tke_kappaM_min, &
+                      tke_kappaM_max, tke_min, tke_surf_min, tke_mxl_choice, tke_only, &
+                      tke_use_ubound_dirichlet, tke_use_lbound_dirichlet, tke_dolangmuir)
+        write(*,'(a)') 'fesom_lifecycle: TKE vertical mixing ENABLED (cvmix_TKE; unforced, sw_pene off)'
     end if
 
     ! SSH stiffness (built ONCE; dt = CORE2 namelist timestep).

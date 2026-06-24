@@ -56,8 +56,13 @@ program fesom_lifecycle_native_mr
     ! M5d: KPP vertical mixing + shortwave penetration + (gated-off) ghats nonlocal flux at MR.
     use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit, &
                                   use_kpp_nonlclflx, ref_sss, ref_sss_local
+    use mod_param_phys,     only: tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, &
+                                  tke_kappaM_min, tke_kappaM_max, tke_min, tke_surf_min, &
+                                  tke_mxl_choice, tke_only, tke_use_ubound_dirichlet, &
+                                  tke_use_lbound_dirichlet, tke_dolangmuir
     use mod_config,         only: use_sw_pene, which_ALE
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
+    use oce_mixing_tke,     only: tke_init
     use oce_shortwave_pene, only: cal_shortwave_rad
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
@@ -99,6 +104,7 @@ program fesom_lifecycle_native_mr
     real(kind=WP) :: is_nonlinfs
     logical :: use_fer_gm, use_redi   ! M4f: GM bolus / Redi isopycnal diffusion toggles
     logical :: use_kpp, do_swpene, do_nonlcl   ! M5d: KPP / shortwave pene / ghats nonlocal flux
+    logical :: use_tke      ! M7d: FESOM3_MIX_TKE -> cvmix_TKE producer at multi-rank (LOCAL nNodL)
     real(kind=WP), allocatable :: chl(:)       ! M5d: constant chlorophyll (work_core 0.1)
     ! native CORE2 forcing read (the whole atmosphere, over owned+halo).
     character(len=512)  :: forcing_dir, runoff_file, sss_file
@@ -128,6 +134,8 @@ program fesom_lifecycle_native_mr
     use_redi = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_MIX_KPP', env, length=env_len, status=ios)
     use_kpp = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_MIX_TKE', env, length=env_len, status=ios)
+    use_tke = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_SW_PENE', env, length=env_len, status=ios)
     do_swpene = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_KPP_NONLCL', env, length=env_len, status=ios)
@@ -371,6 +379,22 @@ program fesom_lifecycle_native_mr
         call oce_mixing_kpp_init(Ricr, concv)   ! wmt/wst lookup tables + Vtc/cg (once)
         if (partit%mype == 0) write(*,'(a)') &
             'fesom_lifecycle_native_mr: KPP vertical mixing ENABLED (work_core KPP)'
+    end if
+    !===========================================================================
+    ! M7d TKE vertical mixing (FESOM3_MIX_TKE) at MULTI-RANK — the M7c block with LOCAL-sized
+    ! (nNodL) dyn%work arrays. oce_mixing_tke.calc_cvmix_tke is optional-`partit` from the start
+    ! (owned-node loop over nNodO + exchange_nod(tke_Kv)/exchange_nod(tke_Av) BEFORE the element
+    ! average; tke is NEVER exchanged — the recurrence is partition-local), so this is pure WIRING
+    ! (the M4f/M5d lesson). Pair FESOM3_SW_PENE=1 (work_*_tke use_sw_pene=.true.).
+    if (use_tke) then
+        mix_scheme_nmb = 5
+        allocate(dyn%work%tke(nl, nNodL), dyn%work%tke_Av(nl, nNodL), dyn%work%tke_Kv(nl, nNodL))
+        dyn%work%tke = 0.0_WP; dyn%work%tke_Av = 0.0_WP; dyn%work%tke_Kv = 0.0_WP
+        call tke_init(tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, tke_kappaM_min, &
+                      tke_kappaM_max, tke_min, tke_surf_min, tke_mxl_choice, tke_only, &
+                      tke_use_ubound_dirichlet, tke_use_lbound_dirichlet, tke_dolangmuir)
+        if (partit%mype == 0) write(*,'(a)') &
+            'fesom_lifecycle_native_mr: TKE vertical mixing ENABLED (cvmix_TKE)'
     end if
     !===========================================================================
     ! M5d shortwave penetration (FESOM3_SW_PENE) — chl const 0.1; cal_shortwave_rad (partit) fills

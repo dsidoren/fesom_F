@@ -38,6 +38,10 @@ REDI="${REDI:-0}"
 # instead of the reduced-M2 sed-to-PP. use_sw_pene stays .false. (unforced => sw_3d=0).
 # Default 0 = the proven PP gate.
 MIX_KPP="${MIX_KPP:-0}"
+# M7b: MIX_TKE=1 sets mix_scheme='cvmix_TKE' (the prognostic TKE producer) and supplies the
+# namelist.cvmix &param_tke group (from work_tke_dump). use_sw_pene stays .false. (unforced =>
+# sw_3d=0). Default 0 = the PP/KPP gate. (MIX_TKE takes precedence over MIX_KPP.)
+MIX_TKE="${MIX_TKE:-0}"
 # M6a-2: WHICH_ALE selects the vertical coordinate (default linfs = the reduced-M2 gate).
 # WHICH_ALE=zstar keeps the production zstar free surface (Shchepetkin PGF + thickness stretch).
 WHICH_ALE="${WHICH_ALE:-linfs}"
@@ -46,12 +50,14 @@ source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 
 rm -rf "$RUN"; mkdir -p "$RUN"
 cp "$F2"/work_core/namelist.* "$RUN"/
+# M7b: cvmix_TKE needs the &param_tke namelist group (tke_cd=3.75, the namelist-over-codedefault).
+[ "$MIX_TKE" = 1 ] && cp "$F2"/work_tke_dump/namelist.cvmix "$RUN"/
 ln -sf "$F2"/build/bin/fesom.x "$RUN"/fesom.x      # loads build/lib64/libfesom.so (output 1-rank fix)
 printf '0 1 1948\n0 1 1948\n' > "$RUN"/fesom.clock # cold start, year 1948 (unforced: year irrelevant)
 
-python3 - "$RUN" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" "$WHICH_ALE" <<'PY'
+python3 - "$RUN" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" "$WHICH_ALE" "$MIX_TKE" <<'PY'
 import re, sys
-run, nsteps, fer_gm, redi, mix_kpp, which_ale = sys.argv[1:7]
+run, nsteps, fer_gm, redi, mix_kpp, which_ale, mix_tke = sys.argv[1:8]
 # namelist.config
 p = run + '/namelist.config'; s = open(p).read()
 s = re.sub(r"ResultPath\s*=\s*'[^']*'", "ResultPath       = './'", s, count=1)
@@ -66,8 +72,11 @@ s = re.sub(r"run_length\s*=\s*\d+",     f"run_length        = {nsteps}", s, coun
 open(p, 'w').write(s)
 # namelist.oce  (reduced-M2 dynamics)
 p = run + '/namelist.oce'; s = open(p).read()
-# M5b: keep work_core mix_scheme='KPP' when MIX_KPP=1; else reduce to PP.
-if mix_kpp != '1':
+# M7b: MIX_TKE=1 -> mix_scheme='cvmix_TKE' (prognostic TKE). Else M5b: keep 'KPP' when
+# MIX_KPP=1, otherwise reduce to 'PP'.
+if mix_tke == '1':
+    s = re.sub(r"mix_scheme\s*=\s*'KPP'", "mix_scheme         = 'cvmix_TKE'", s, count=1)
+elif mix_kpp != '1':
     s = re.sub(r"mix_scheme\s*=\s*'KPP'", "mix_scheme         = 'PP'", s, count=1)
 # M4c/M4d: keep work_core Fer_GM/Redi=.true. when FER_GM=1 / REDI=1; else reduce them off.
 if fer_gm != '1':

@@ -38,6 +38,9 @@ REDI="${REDI:-0}"
 MIX_KPP="${MIX_KPP:-0}"
 SW_PENE="${SW_PENE:-0}"
 KPP_NONLCL="${KPP_NONLCL:-0}"
+# M7c: MIX_TKE=1 sets mix_scheme='cvmix_TKE' (prognostic TKE producer) + supplies namelist.cvmix
+# &param_tke (tke_cd=3.75). Pair with SW_PENE=1 (work_*_tke has use_sw_pene=.true.). Default 0.
+MIX_TKE="${MIX_TKE:-0}"
 # M6a-3: WHICH_ALE selects the vertical coordinate (default linfs reduced gate). zstar keeps
 # the production free surface (Shchepetkin PGF + stretch) + the REAL freshwater flux path.
 WHICH_ALE="${WHICH_ALE:-linfs}"
@@ -46,13 +49,15 @@ source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 rm -rf "$RUN"; mkdir -p "$RUN"
 cp "$F2"/work_core/namelist.* "$RUN"/
 cp "$F2"/work_core/namelist.forcing.CORE2 "$RUN"/namelist.forcing
+# M7c: cvmix_TKE needs the &param_tke namelist group (tke_cd=3.75, the namelist-over-codedefault).
+[ "$MIX_TKE" = 1 ] && cp "$F2"/work_tke_dump/namelist.cvmix "$RUN"/
 sed -i "s/^whichEVP *=.*/whichEVP = ${WHICHEVP}/" "$RUN"/namelist.ice   # M3f: match FESOM3 EVP variant
 ln -sf "$F2"/build/bin/fesom.x "$RUN"/fesom.x
 printf '0 1 1948\n0 1 1948\n' > "$RUN"/fesom.clock
 
-python3 - "$RUN" "$STUB" "$POOL" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" "$SW_PENE" "$KPP_NONLCL" "$WHICH_ALE" <<'PY'
+python3 - "$RUN" "$STUB" "$POOL" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" "$SW_PENE" "$KPP_NONLCL" "$WHICH_ALE" "$MIX_TKE" <<'PY'
 import re,sys
-run,stub,pool,nsteps,fer_gm,redi,mix_kpp,sw_pene,kpp_nonlcl,which_ale=sys.argv[1:11]
+run,stub,pool,nsteps,fer_gm,redi,mix_kpp,sw_pene,kpp_nonlcl,which_ale,mix_tke=sys.argv[1:12]
 p=run+'/namelist.config'; s=open(p).read()
 s=re.sub(r"ResultPath\s*=\s*'[^']*'","ResultPath       = './'",s,1)
 s=re.sub(r"which_ALE\s*=\s*'zlevel'",f"which_ALE          = '{which_ale}'",s,1)
@@ -65,8 +70,10 @@ if sw_pene!='1':
     s=re.sub(r"use_sw_pene\s*=\s*\.true\.","use_sw_pene              = .false.",s,1)
 open(p,'w').write(s)
 p=run+'/namelist.oce'; s=open(p).read()
-# M5c: MIX_KPP=1 keeps work_core mix_scheme='KPP'; else reduce to PP (the M2-M4 reduced core).
-if mix_kpp!='1':
+# M7c: MIX_TKE=1 -> mix_scheme='cvmix_TKE'. Else M5c: keep 'KPP' when MIX_KPP=1, else reduce to 'PP'.
+if mix_tke=='1':
+    s=re.sub(r"mix_scheme\s*=\s*'KPP'","mix_scheme         = 'cvmix_TKE'",s,1)
+elif mix_kpp!='1':
     s=re.sub(r"mix_scheme\s*=\s*'KPP'","mix_scheme         = 'PP'",s,1)
 # M4e: keep work_core Fer_GM/Redi=.true. when FER_GM=1 / REDI=1; else reduce them off.
 if fer_gm!='1':

@@ -57,6 +57,7 @@ module mod_step_oce
     use oce_pgf,            only: pressure_force_4_linfs_fullcell, pressure_force_4_zxxxx_shchepetkin
     use oce_ale_mixing_pp,  only: oce_mixing_pp
     use oce_mixing_kpp,     only: oce_mixing_kpp_driver
+    use oce_mixing_tke,     only: calc_cvmix_tke
     use oce_mo_conv,        only: mo_convect
     use oce_dyn_velrhs,     only: compute_vel_rhs
     use oce_dyn_visc,       only: viscosity_filter
@@ -94,10 +95,11 @@ contains
         ! (mix_scheme_nmb==1) -> ustar; absent ⇒ PP path, never read. Unforced ⇒ zero.
         real(kind=WP),  intent(in), optional :: stress_node_surf(2, mesh%nod2D)
 
-        logical :: is_kpp
+        logical :: is_kpp, is_tke
         integer :: node, nNodO, nNodL, nEdgeO, nElemO
 
         is_kpp = (mix_scheme_nmb == 1)
+        is_tke = (mix_scheme_nmb == 5)
 
         !_______________________________________________________________________
         ! nodal velocity (the REAL uvnode source, was prescribed at M2.8)
@@ -164,6 +166,10 @@ contains
         ! impl_vert_visc_ale is UNCHANGED, and Kv = Kv_double(:,:,1) (T channel) so the tracer
         ! TDMA is UNCHANGED (the same single Kv as PP). PP (else): Richardson-number Kv/Av.
         ! Both fill only interior levels; surface/bottom keep their setup 0. mo_convect runs after.
+        ! TKE (mix_scheme_nmb==5): calc_cvmix_tke is the WHOLE producer — it does the Kv=tke_Kv
+        ! and Av=avg(tke_Av) write-back INTERNALLY (oracle-faithful, unlike KPP's dispatch-level
+        ! Kv=Kv_double loop), so the branch only calls it then mo_convect. Av stays element-based
+        ! and Kv node-based -> impl_vert_visc_ale + the tracer TDMA are BYTE-UNCHANGED from M6.
         if (is_kpp) then
             if (.not. present(stress_node_surf)) &
                 error stop 'step_oce: KPP (mix_scheme_nmb==1) requires stress_node_surf'
@@ -172,6 +178,11 @@ contains
             do node = 1, nNodL
                 dynamics%work%Kv(:, node) = dynamics%work%Kv_double(:, node, 1)
             end do
+            call mo_convect(dynamics, mesh, partit)
+        else if (is_tke) then
+            if (.not. present(stress_node_surf)) &
+                error stop 'step_oce: TKE (mix_scheme_nmb==5) requires stress_node_surf'
+            call calc_cvmix_tke(dynamics, stress_node_surf, dt, mesh, partit)
             call mo_convect(dynamics, mesh, partit)
         else
             call oce_mixing_pp(dynamics, mesh, partit)
