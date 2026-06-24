@@ -8,7 +8,7 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
 - **Milestone:** M2 (minimal ocean dynamical core) — **multi-rank MVP byte-match ACHIEVED (tag `m2-mvp`).**
   **→ M3 (sea ice EVP) ✅ COMPLETE 2026-06-23 (all M3a–M3f DONE, `max|Δ|=0` 1-rank AND multi-rank) — ✅ COMMITTED
   (`b591153`, tag `m3`).**
-  **→ M4 (GM/Redi) ✅ COMPLETE 2026-06-24 (all M4a–M4f DONE, `max|Δ|=0` 1-rank AND multi-rank) — ✅ COMMITTED (tag `m4`).**
+  **→ M4 (GM/Redi) ✅ COMPLETE 2026-06-24 (all M4a–M4f DONE, `max|Δ|=0` 1-rank AND multi-rank) — ✅ COMMITTED (`7a088de`, tag `m4`).**
   M4a (producers) + M4b (GM diffusivity/streamfunction/bolus-velocity) + M4c (GM bolus into advection) + M4d (Redi
   isopycnal diffusion) + M4e (GM+Redi in the FORCED/fully-native lifecycle) + M4f (multi-rank) all byte-gated
   `max|Δ|=0` vs FESOM2 (CORE2 1-rank AND dist_2/dist_8, both whichEVP). Plan: `docs/plans/2026-06-23-m4-gm-redi.md`.
@@ -434,7 +434,7 @@ plan doc `2026-06-18-fesom3-architecture.md`.
 
 ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35). ⚠️ Gate every consumed intermediate (L29). ⚠️ **Read the
 ACTUAL FESOM2 `.F90` + `work_core` namelists, NOT the plan summaries** (they were wrong on `MLD1_ind` + `K_hor` in M4).
-M3 ✅ COMMITTED (`b591153`, tag `m3`); M4 ✅ COMMITTED (tag `m4`); the M2 baseline stays at `m2-mvp`.
+M3 ✅ COMMITTED (`b591153`, tag `m3`); M4 ✅ COMMITTED (`7a088de`, tag `m4`); the M2 baseline stays at `m2-mvp`.
 
 **Milestone ordering (plan doc `2026-06-18-fesom3-architecture.md`):** M4 = GM/Redi → M5 = KPP + production
 multi-year (paper-parity) → M6 = beyond-paper (zstar/zlevel ALE, TKE, aEVP). mEVP (whichEVP=1) was already
