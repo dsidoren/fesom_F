@@ -141,7 +141,7 @@ contains
     end subroutine update_vel
 
     !===========================================================================
-    subroutine compute_hbar_ale(dynamics, mesh, dt, partit)
+    subroutine compute_hbar_ale(dynamics, mesh, dt, partit, water_flux)
         ! FESOM2 oce_ale.F90:2165-2307. Advance hbar (the elevation on semi-integer
         ! timesteps) by the depth-integrated horizontal divergence of the UPDATED UV:
         !   ssh_rhs_old = div_h( int(UV) dz )        (edge-scatter, NO alpha here)
@@ -162,6 +162,7 @@ contains
         type(t_mesh), intent(inout), target :: mesh
         real(kind=WP), intent(in) :: dt
         type(t_partit), intent(in), optional :: partit
+        real(kind=WP),  intent(in), optional :: water_flux(:)   ! M6a-3: non-linfs freshwater (zstar)
         !______________________________________________________________________
         integer       :: ed, el(2), enodes(2), elem, elnodes(3), n, nz, nzmin, nzmax
         integer       :: nNodO, nNodL, nEdgeO, nElemO
@@ -209,7 +210,18 @@ contains
             ssh_rhs_old(enodes(2)) = ssh_rhs_old(enodes(2)) - (c1+c2)
         end do
 
-        ! linfs: the water_flux term + exchange_nod(ssh_rhs_old) are skipped (.not. linfs)
+        ! M6a-3: non-linfs (zstar) freshwater flux enters the SSH balance — the real
+        ! water_flux (positive out of the ocean) is subtracted from the divergence before
+        ! hbar is advanced (FESOM2 oce_ale.F90:2262-2271). linfs skips it (virtual salt
+        ! instead). water_flux*areasvol so it matches the edge-divergence units (un-divided
+        ! by area until the hbar update below).
+        if (trim(which_ALE)/='linfs' .and. present(water_flux)) then
+            do n = 1, nNodO
+                if (mesh%ulevels_nod2D(n) > 1) cycle
+                ssh_rhs_old(n) = ssh_rhs_old(n) - water_flux(n)*mesh%areasvol(mesh%ulevels_nod2D(n), n)
+            end do
+            if (is_multirank(partit)) call exchange_nod(ssh_rhs_old, partit)   ! FESOM2 :2270
+        end if
 
         do n = 1, nNodL
             mesh%hbar_old(n) = mesh%hbar(n)
@@ -254,7 +266,7 @@ contains
     end subroutine update_eta_n
 
     !===========================================================================
-    subroutine vert_vel_ale(dynamics, mesh, dt, partit)
+    subroutine vert_vel_ale(dynamics, mesh, dt, partit, water_flux)
         ! FESOM2 oce_ale.F90:2323-2884, the which_ale='linfs' path. Vertical velocity from
         ! the layer-thickness divergence:
         !   Wvel(:,n)  = 0
@@ -274,6 +286,7 @@ contains
         type(t_mesh), intent(inout), target :: mesh
         real(kind=WP), intent(in) :: dt
         type(t_partit), intent(in), optional :: partit
+        real(kind=WP),  intent(in), optional :: water_flux(:)   ! M6a-3: non-linfs freshwater (zstar)
         !______________________________________________________________________
         integer       :: ed, el(2), enodes(2), n, nz, nzmin, nzmax
         integer       :: nNodO, nNodL, nEdgeO, nElemO
@@ -390,6 +403,10 @@ contains
                         Wvel(nz, n)          = Wvel(nz, n) - (mesh%zbar_3d_n(nz,n) - dd1)*dddt
                         mesh%hnode_new(nz,n) = mesh%hnode(nz,n) + (mesh%zbar_3d_n(nz,n) - mesh%zbar_3d_n(nz+1,n))*dd
                     end do
+                    ! M6a-3: surface freshwater flux as the upper continuity BC (FESOM2 :2809).
+                    ! linfs uses virtual salt; unforced => water_flux=0 (no-op). Present only
+                    ! when step_oce threads it (the pressure shim / unforced path omit it).
+                    if (present(water_flux)) Wvel(nzmin, n) = Wvel(nzmin, n) - water_flux(n)
                 end if
             end do
         end if

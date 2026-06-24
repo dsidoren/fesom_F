@@ -60,6 +60,7 @@ module oce_ssh_rhs
     use mod_precision,  only: WP, MP
     use mod_constants,  only: g
     use mod_param_phys, only: alpha, theta
+    use mod_config,     only: which_ALE          ! M6a-3: 'linfs'/'zlevel'/'zstar'
     use mod_mesh,       only: t_mesh
     use mod_dyn,        only: t_dyn
     use mod_partit,     only: t_partit
@@ -266,10 +267,12 @@ contains
     end subroutine update_stiff_mat_ale
 
     !===========================================================================
-    subroutine compute_ssh_rhs_ale(dynamics, mesh, partit)
+    subroutine compute_ssh_rhs_ale(dynamics, mesh, partit, water_flux)
         ! Assemble dynamics%ssh_rhs = depth-integrated horizontal divergence of
         ! alpha*(UV+UV_rhs), scattered as an edge flux into the two edge nodes
         ! (+ the linfs (1-alpha)*ssh_rhs_old term, = 0 on pi since alpha=1).
+        ! M6a-3: for non-linfs (zstar) the real freshwater flux enters here too
+        ! (ssh_rhs -= alpha*water_flux*areasvol; FESOM2 oce_ale.F90:2122-2134).
         ! M2.12c: optional partit -> ssh_rhs zeroed at owned+halo (FESOM2 :2045
         ! do n=1,myDim_nod2D+eDim_nod2D), the flux scatter over OWNED edges (FESOM2 :2053
         ! do ed=1,myDim_edge2D — every edge incident to an owned node is owned, so the
@@ -278,6 +281,7 @@ contains
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
         type(t_partit), intent(in), optional :: partit
+        real(kind=WP),  intent(in), optional :: water_flux(:)   ! M6a-3: non-linfs freshwater (zstar)
         !______________________________________________________________________
         integer       :: ed, el(2), enodes(2), nz, n, nzmin, nzmax
         integer       :: nNodO, nNodL, nEdgeO, nElemO
@@ -331,11 +335,21 @@ contains
             ssh_rhs(enodes(2)) = ssh_rhs(enodes(2)) - (c1+c2)
         end do
 
-        ! linfs water-flux term: ssh_rhs += (1-alpha)*ssh_rhs_old (= 0 since alpha=1).
-        ! The non-linfs water_flux branch (zstar) is deferred with its own ALE gate.
-        do n = 1, nNodO
-            ssh_rhs(n) = ssh_rhs(n) + (1.0_WP-alpha)*ssh_rhs_old(n)
-        end do
+        ! water-flux term (FESOM2 oce_ale.F90:2122-2138). linfs: ssh_rhs += (1-alpha)*ssh_rhs_old
+        ! (= 0 since alpha=1). M6a-3 non-linfs (zstar): the REAL freshwater flux enters the SSH rhs
+        ! — ssh_rhs -= alpha*water_flux*areasvol (+ the (1-alpha)*ssh_rhs_old term). Open ocean
+        ! only (cavity dead, use_cavity=.false. -> use_cavity_fw2press branch skipped).
+        if (trim(which_ALE)/='linfs' .and. present(water_flux)) then
+            do n = 1, nNodO
+                if (mesh%ulevels_nod2D(n) > 1) cycle   ! cavity (dead)
+                ssh_rhs(n) = ssh_rhs(n) - alpha*water_flux(n)*mesh%areasvol(mesh%ulevels_nod2D(n),n) &
+                                        + (1.0_WP-alpha)*ssh_rhs_old(n)
+            end do
+        else
+            do n = 1, nNodO
+                ssh_rhs(n) = ssh_rhs(n) + (1.0_WP-alpha)*ssh_rhs_old(n)
+            end do
+        end if
         if (is_multirank(partit)) call exchange_nod(ssh_rhs, partit)   ! FESOM2 :2145
     end subroutine compute_ssh_rhs_ale
 

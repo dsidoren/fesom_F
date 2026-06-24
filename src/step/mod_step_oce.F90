@@ -196,7 +196,7 @@ contains
         ! tracks the moving surface: update it by the (lagged) dhe from the previous step's
         ! compute_hbar_ale BEFORE assembling/solving (FESOM2 oce_ale.F90:3921; step-1 dhe=0).
         if (trim(which_ALE)/='linfs') call update_stiff_mat_ale(mesh, dt, partit)
-        call compute_ssh_rhs_ale(dynamics, mesh, partit)
+        call compute_ssh_rhs_ale(dynamics, mesh, partit, water_flux=water_flux)
         call dump_node_2d(DUMP_SUBSTEP_SSH_RHS, n, 'ssh_rhs', dynamics%ssh_rhs)
         call solve_ssh_ale(dynamics, mesh, partit=partit)
         call dump_node_2d(DUMP_SUBSTEP_SSH_SOLVE, n, 'd_eta', dynamics%d_eta)
@@ -204,7 +204,7 @@ contains
         !_______________________________________________________________________
         ! velocity update + elevation
         call update_vel(dynamics, mesh, dt, partit)
-        call compute_hbar_ale(dynamics, mesh, dt, partit)
+        call compute_hbar_ale(dynamics, mesh, dt, partit, water_flux=water_flux)
         call dump_node_2d(DUMP_SUBSTEP_HBAR, n, 'hbar', mesh%hbar)
         call update_eta_n(dynamics, mesh, partit)
         call dump_node_2d(DUMP_SUBSTEP_ETA_N, n, 'eta_n', dynamics%eta_n)
@@ -230,7 +230,7 @@ contains
 
         !_______________________________________________________________________
         ! vertical velocity / ALE thickness (linfs: hnode_new = hnode)
-        call vert_vel_ale(dynamics, mesh, dt, partit)
+        call vert_vel_ale(dynamics, mesh, dt, partit, water_flux=water_flux)
         call dump_node(DUMP_SUBSTEP_ALE, n, 'hnode_new', mesh%hnode_new, mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_ALE, n, 'w',         dynamics%w,     mesh%nlevels_nod2D)
 

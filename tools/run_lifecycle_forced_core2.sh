@@ -38,6 +38,9 @@ REDI="${REDI:-0}"
 MIX_KPP="${MIX_KPP:-0}"
 SW_PENE="${SW_PENE:-0}"
 KPP_NONLCL="${KPP_NONLCL:-0}"
+# M6a-3: WHICH_ALE selects the vertical coordinate (default linfs reduced gate). zstar keeps
+# the production free surface (Shchepetkin PGF + stretch) + the REAL freshwater flux path.
+WHICH_ALE="${WHICH_ALE:-linfs}"
 
 source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 rm -rf "$RUN"; mkdir -p "$RUN"
@@ -47,12 +50,12 @@ sed -i "s/^whichEVP *=.*/whichEVP = ${WHICHEVP}/" "$RUN"/namelist.ice   # M3f: m
 ln -sf "$F2"/build/bin/fesom.x "$RUN"/fesom.x
 printf '0 1 1948\n0 1 1948\n' > "$RUN"/fesom.clock
 
-python3 - "$RUN" "$STUB" "$POOL" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" "$SW_PENE" "$KPP_NONLCL" <<'PY'
+python3 - "$RUN" "$STUB" "$POOL" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" "$SW_PENE" "$KPP_NONLCL" "$WHICH_ALE" <<'PY'
 import re,sys
-run,stub,pool,nsteps,fer_gm,redi,mix_kpp,sw_pene,kpp_nonlcl=sys.argv[1:10]
+run,stub,pool,nsteps,fer_gm,redi,mix_kpp,sw_pene,kpp_nonlcl,which_ale=sys.argv[1:11]
 p=run+'/namelist.config'; s=open(p).read()
 s=re.sub(r"ResultPath\s*=\s*'[^']*'","ResultPath       = './'",s,1)
-s=re.sub(r"which_ALE\s*=\s*'zlevel'","which_ALE          = 'linfs'",s,1)
+s=re.sub(r"which_ALE\s*=\s*'zlevel'",f"which_ALE          = '{which_ale}'",s,1)
 s=re.sub(r"yearnew\s*=\s*1958","yearnew = 1948",s,1)
 s=re.sub(r"run_length\s*=\s*\d+",f"run_length        = {nsteps}",s,1)
 s=re.sub(r"include_fleapyear\s*=\s*\.true\.","include_fleapyear = .false.",s,1)   # CORE noleap

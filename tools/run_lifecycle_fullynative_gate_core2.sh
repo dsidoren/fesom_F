@@ -29,9 +29,11 @@ REDI="${REDI:-0}"
 MIX_KPP="${MIX_KPP:-0}"
 SW_PENE="${SW_PENE:-0}"
 KPP_NONLCL="${KPP_NONLCL:-0}"
+# M6a-3: WHICH_ALE=zstar runs the production free surface + real freshwater flux in BOTH sides.
+WHICH_ALE="${WHICH_ALE:-linfs}"
 
-echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice; FER_GM=$FER_GM REDI=$REDI MIX_KPP=$MIX_KPP SW_PENE=$SW_PENE NONLCL=$KPP_NONLCL)"
-FER_GM="$FER_GM" REDI="$REDI" MIX_KPP="$MIX_KPP" SW_PENE="$SW_PENE" KPP_NONLCL="$KPP_NONLCL" \
+echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice; WHICH_ALE=$WHICH_ALE FER_GM=$FER_GM REDI=$REDI MIX_KPP=$MIX_KPP SW_PENE=$SW_PENE NONLCL=$KPP_NONLCL)"
+WHICH_ALE="$WHICH_ALE" FER_GM="$FER_GM" REDI="$REDI" MIX_KPP="$MIX_KPP" SW_PENE="$SW_PENE" KPP_NONLCL="$KPP_NONLCL" \
     bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" | tail -4
 
 echo "[2/3] FESOM3 FULLY NATIVE lifecycle ($NSTEPS steps, whichEVP=$WHICHEVP) — NO prescribed atmosphere"
@@ -43,6 +45,7 @@ export FESOM3_RUNOFF_FILE="$POOL/CORE2_runoff.nc"   # native runoff (M3f-3b)
 export FESOM3_SSS_FILE="$POOL/PHC2_salx.nc"          # native SSS restoring (M3f-3b)
 export FESOM3_FLUX_FILE="$RUN/flux_f2.00000"        # native-vs-oracle flux self-check
 export FESOM3_WHICHEVP="$WHICHEVP"
+if [ "$WHICH_ALE" != linfs ]; then export FESOM3_WHICH_ALE="$WHICH_ALE"; fi  # M6a-3: zstar free surface + freshwater
 if [ "$FER_GM" = 1 ]; then export FESOM3_FER_GM=1; fi   # M4e: GM bolus in the native lifecycle
 if [ "$REDI" = 1 ]; then export FESOM3_REDI=1; fi       # M4e: Redi isopycnal diffusion
 if [ "$MIX_KPP" = 1 ]; then export FESOM3_MIX_KPP=1; fi # M5c: KPP vertical mixing
