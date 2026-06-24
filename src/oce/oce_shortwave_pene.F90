@@ -21,30 +21,39 @@ module oce_shortwave_pene
     use mod_precision, only: WP
     use mod_constants, only: vcpw
     use mod_mesh, only: t_mesh
+    use mod_partit, only: t_partit
+    use mod_part_bounds, only: owned_bounds
     implicit none
     private
     public :: cal_shortwave_rad
 
 contains
 
-    subroutine cal_shortwave_rad(use_ice, albw, shortwave, chl, a_ice, heat_flux, sw_3d, mesh)
+    subroutine cal_shortwave_rad(use_ice, albw, shortwave, chl, a_ice, heat_flux, sw_3d, mesh, partit)
         logical,       intent(in)    :: use_ice
         real(kind=WP), intent(in)    :: albw
         real(kind=WP), intent(in)    :: shortwave(:), a_ice(:)
         real(kind=WP), intent(inout) :: chl(:)             ! floored at 0.02 in place
         real(kind=WP), intent(inout) :: heat_flux(:)       ! += visible swsurf
-        real(kind=WP), intent(out)   :: sw_3d(:,:)         ! (nl, nod2D)
+        real(kind=WP), intent(out)   :: sw_3d(:,:)         ! (nl, nNodL)
         type(t_mesh),  intent(in)    :: mesh
-        integer :: n2, k, nzmax, nzmin
+        ! M5d multi-rank: optional partit -> loop owned+halo nodes (nNodL = FESOM2
+        ! myDim_nod2D+eDim_nod2D). ⚠️ in the LOCAL mesh mesh%nod2D = the GLOBAL count
+        ! (read_mesh_local), so it CANNOT be the loop bound when partit is present; the
+        ! arrays (shortwave/sw_3d/...) are nNodL-sized. Absent ⇒ 1-rank, nNodL = mesh%nod2D.
+        type(t_partit), intent(in), optional :: partit
+        integer :: n2, k, nzmax, nzmin, nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: swsurf, aux, c, c2, c3, c4, c5, v1, v2, sc1, sc2
 
-        do n2 = 1, mesh%nod2D
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+
+        do n2 = 1, nNodL
             do k = 1, mesh%nl
                 sw_3d(k, n2) = 0.0_WP
             end do
         end do
 
-        do n2 = 1, mesh%nod2D
+        do n2 = 1, nNodL
             if (mesh%ulevels_nod2D(n2) > 1) cycle                 ! no penetration in cavity
             if (use_ice .and. a_ice(n2) > 0._WP) cycle            ! no penetration under ice
             swsurf = (1.0_WP - albw)*shortwave(n2)

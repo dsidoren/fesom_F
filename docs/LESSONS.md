@@ -2020,3 +2020,15 @@ by up to 7.3e-5 over 3 steps vs ghats-off) — so the otherwise-dead term is byt
   explicitly — fail-safe beats faithful-to-the-namelist-default here.
 - **Gate the dead code too.** When a faithful port includes a term that's off in production, add a cheap variant that
   turns it on (both oracle + F3) and prove it byte-exact + non-vacuous, rather than shipping untested transcription.
+
+**M5d (multi-rank) — pure wiring, first try (the L44/M4f lesson again).** The whole production KPP+sw_pene+GM+Redi
+native lifecycle byte-matched at MULTI-RANK (CORE2 dist_2 + dist_8, BOTH whichEVP, 195+325) on the FIRST try — because
+the KPP module was written optional-`partit` from the start (`oce_mixing_kpp_driver` already does owned-loops +
+`exchange_nod(blmc/Kv_double/ghats/viscA)` + the 3-sweep `smooth_blmc`), so M5d was a config block in
+`fesom_lifecycle_native_mr` (LOCAL-sized `nNodL`) + one signature fix. The ONE new MR gotcha:
+- **In the LOCAL mesh, `mesh%nod2D` = the GLOBAL node count** (`read_mesh_local: mesh%nod2D = nNodG`), NOT the local
+  owned/owned+halo count. A 1-rank-correct routine that loops `do n=1,mesh%nod2D` over LOCAL-sized arrays is therefore
+  OUT OF BOUNDS at multi-rank. `cal_shortwave_rad` had exactly this (it predates the optional-`partit` discipline, M2.10c)
+  — fixed by adding an optional `partit` and looping `nNodL` from `owned_bounds` (absent ⇒ `nNodL=mesh%nod2D`, the 1-rank
+  /pi path verbatim). When lifting an OLDER routine to MR, grep it for bare `mesh%nod2D`/`mesh%elem2D` loop bounds — those
+  are the global-count landmines; the routines written since M2.12 already use `owned_bounds`/`local_dims`.

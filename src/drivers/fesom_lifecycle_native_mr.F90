@@ -53,6 +53,12 @@ program fesom_lifecycle_native_mr
                                   scaling_GINsea, GMzexp_zref, GMzexp_smin
     use mod_param_phys,     only: Redi_Kmax, Redi_Kmin, Redi_Ktaper, K_hor, &
                                   scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97
+    ! M5d: KPP vertical mixing + shortwave penetration + (gated-off) ghats nonlocal flux at MR.
+    use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit, &
+                                  use_kpp_nonlclflx, ref_sss, ref_sss_local
+    use mod_config,         only: use_sw_pene
+    use oce_mixing_kpp,     only: oce_mixing_kpp_init
+    use oce_shortwave_pene, only: cal_shortwave_rad
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
     use mod_partitioning,   only: par_init, par_ex, set_partition
@@ -92,6 +98,8 @@ program fesom_lifecycle_native_mr
     real(kind=WP), allocatable :: Ki(:,:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
     logical :: use_fer_gm, use_redi   ! M4f: GM bolus / Redi isopycnal diffusion toggles
+    logical :: use_kpp, do_swpene, do_nonlcl   ! M5d: KPP / shortwave pene / ghats nonlocal flux
+    real(kind=WP), allocatable :: chl(:)       ! M5d: constant chlorophyll (work_core 0.1)
     ! native CORE2 forcing read (the whole atmosphere, over owned+halo).
     character(len=512)  :: forcing_dir, runoff_file, sss_file
     type(t_atm_forcing) :: frc
@@ -118,6 +126,12 @@ program fesom_lifecycle_native_mr
     use_fer_gm = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_REDI', env, length=env_len, status=ios)
     use_redi = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_MIX_KPP', env, length=env_len, status=ios)
+    use_kpp = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_SW_PENE', env, length=env_len, status=ios)
+    do_swpene = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_KPP_NONLCL', env, length=env_len, status=ios)
+    do_nonlcl = (ios == 0 .and. env_len > 0)
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
@@ -323,6 +337,58 @@ program fesom_lifecycle_native_mr
         end if
     end if
 
+    !===========================================================================
+    ! M5d KPP vertical mixing (FESOM3_MIX_KPP) at MULTI-RANK — the M5c block with LOCAL-sized
+    ! (nNodL) dyn%work arrays. The KPP module is optional-`partit` from the start (oce_mixing_
+    ! kpp_driver does the owned-loop + exchange_nod(blmc/diffK/ghats/viscA) + smooth_blmc), so
+    ! this is pure WIRING (the M4f lesson). sw_alpha/sw_beta were allocated by the GM/Redi block.
+    if (use_kpp) then
+        mix_scheme_nmb = 1
+        Ricr = 0.3_WP; concv = 1.6_WP
+        visc_sh_limit = 5.0e-3_WP; diff_sh_limit = 5.0e-3_WP
+        ref_sss = 34.0_WP; ref_sss_local = .true.
+        if (.not. allocated(dyn%work%sw_alpha)) then
+            allocate(dyn%work%sw_alpha(nl-1, nNodL), dyn%work%sw_beta(nl-1, nNodL))
+            dyn%work%sw_alpha = 0.0_WP; dyn%work%sw_beta = 0.0_WP
+        end if
+        allocate(dyn%work%Kv_double(nl, nNodL, tracers%num_tracers))
+        allocate(dyn%work%viscA_kpp(nl, nNodL), dyn%work%blmc(nl, nNodL, 3))
+        allocate(dyn%work%ghats(nl-1, nNodL), dyn%work%dkm1(nNodL, 3))
+        allocate(dyn%work%dbsfc(nl, nNodL), dyn%work%dVsq(nl, nNodL))
+        allocate(dyn%work%sw_3d(nl, nNodL))
+        allocate(dyn%work%hbl(nNodL), dyn%work%bfsfc(nNodL))
+        allocate(dyn%work%stable(nNodL), dyn%work%caseA(nNodL))
+        allocate(dyn%work%ustar(nNodL), dyn%work%Bo(nNodL), dyn%work%kbl(nNodL))
+        dyn%work%Kv_double = 0.0_WP; dyn%work%viscA_kpp = 0.0_WP; dyn%work%blmc = 0.0_WP
+        dyn%work%ghats = 0.0_WP; dyn%work%dkm1 = 0.0_WP; dyn%work%dbsfc = 0.0_WP
+        dyn%work%dVsq = 0.0_WP; dyn%work%sw_3d = 0.0_WP
+        dyn%work%hbl = 0.0_WP; dyn%work%bfsfc = 0.0_WP; dyn%work%stable = 0.0_WP
+        dyn%work%caseA = 0.0_WP; dyn%work%ustar = 0.0_WP; dyn%work%Bo = 0.0_WP; dyn%work%kbl = 0
+        call oce_mixing_kpp_init(Ricr, concv)   ! wmt/wst lookup tables + Vtc/cg (once)
+        if (partit%mype == 0) write(*,'(a)') &
+            'fesom_lifecycle_native_mr: KPP vertical mixing ENABLED (work_core KPP)'
+    end if
+    !===========================================================================
+    ! M5d shortwave penetration (FESOM3_SW_PENE) — chl const 0.1; cal_shortwave_rad (partit) fills
+    ! dyn%work%sw_3d over owned+halo after oce_fluxes. sw_3d allocated by the KPP block.
+    if (do_swpene) then
+        use_sw_pene = .true.
+        allocate(chl(nNodL)); chl = 0.1_WP
+        if (.not. allocated(dyn%work%sw_3d)) then
+            allocate(dyn%work%sw_3d(nl, nNodL)); dyn%work%sw_3d = 0.0_WP
+        end if
+        if (partit%mype == 0) write(*,'(a)') &
+            'fesom_lifecycle_native_mr: shortwave penetration ENABLED (chl_const=0.1)'
+    end if
+    !===========================================================================
+    ! M5d KPP nonlocal counter-gradient flux (FESOM3_KPP_NONLCL) — DEAD in production; the gate
+    ! variant turns it on BOTH sides to byte-verify the ghats term at multi-rank.
+    if (do_nonlcl) then
+        use_kpp_nonlclflx = .true.
+        if (partit%mype == 0) write(*,'(a)') &
+            'fesom_lifecycle_native_mr: KPP nonlocal counter-gradient flux ENABLED (ghats)'
+    end if
+
     ! SSH stiffness (built ONCE; dt = CORE2 namelist timestep).
     call init_stiff_mat_ale(mesh, dt, partit)
 
@@ -457,9 +523,15 @@ program fesom_lifecycle_native_mr
         call ice_timestep(ice, mesh, atm, partit)
         call oce_fluxes_mom(ice, atm, stress_surf, mesh, partit)
         call oce_fluxes(ice, tracers, atm, mesh, partit)
+        ! M5d: shortwave penetration after oce_fluxes (over owned+halo via partit) — fills
+        ! dyn%work%sw_3d + adds the visible band back to atm%heat_flux. albw = ice%thermo%albw.
+        if (use_sw_pene) call cal_shortwave_rad(.true., ice%thermo%albw, atm%shortwave, chl, &
+                              ice%data(1)%values(1:nNodL), atm%heat_flux, dyn%work%sw_3d, mesh, partit)
+        ! M5d: stress_node_surf=atm%stress_node_surf (oce_fluxes_mom) feeds KPP ustar (PP ignores it).
         call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
                       atm%heat_flux, atm%water_flux, atm%virtual_salt, atm%relax_salt, &
-                      real_salt_flux, is_nonlinfs, stress_surf, partit)
+                      real_salt_flux, is_nonlinfs, stress_surf, partit, &
+                      stress_node_surf=atm%stress_node_surf)
         if (partit%mype == 0) &
             write(*,'(a,i0,a,es12.4,a,es12.4,a,es12.4)') 'fesom_lifecycle_native_mr: step ', n, &
                 '  max|eta_n(owned)|=', maxval(abs(dyn%eta_n(1:nNodO))), &

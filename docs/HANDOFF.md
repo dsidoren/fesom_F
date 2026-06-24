@@ -12,27 +12,33 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   M4a (producers) + M4b (GM diffusivity/streamfunction/bolus-velocity) + M4c (GM bolus into advection) + M4d (Redi
   isopycnal diffusion) + M4e (GM+Redi in the FORCED/fully-native lifecycle) + M4f (multi-rank) all byte-gated
   `max|Δ|=0` vs FESOM2 (CORE2 1-rank AND dist_2/dist_8, both whichEVP). Plan: `docs/plans/2026-06-23-m4-gm-redi.md`.
-  **→ M5 (KPP vertical mixing + sw_pene) IN PROGRESS 2026-06-24.** Scoped + decomposed M5a–M5d
-  (plan: `docs/plans/2026-06-24-m5-kpp.md`). **M5a (isolated KPP module gate, 95 pressure-gate
-  fields) ✅ DONE; M5b (wire KPP into `step_oce` + UNFORCED CORE2 lifecycle) ✅ DONE 2026-06-24:
-  `max|Δ|=0` KPP-alone 195 (3-step) + 325 (5-step) AND KPP+GM+Redi 195** (`tools/run_lifecycle_kpp_gate_core2.sh`).
+  **→ M5 (KPP vertical mixing + sw_pene) ✅ COMPLETE 2026-06-24 (all M5a–M5d DONE, `max|Δ|=0`
+  1-rank AND multi-rank) — tag `m5`.** Scoped + decomposed M5a–M5d (plan: `docs/plans/2026-06-24-m5-kpp.md`).
+  **M5a (isolated KPP module gate, 95 pressure-gate fields) ✅ DONE; M5b (wire KPP into `step_oce` +
+  UNFORCED CORE2 lifecycle) ✅ DONE: `max|Δ|=0` KPP-alone 195+325 AND KPP+GM+Redi 195.**
   M5a-1 (init + wscale) + M5a-2 (ri_iwmix) + M5a-3 (prestep dVsq/ustar/Bo + dbsfc + bldepth) +
   M5a-4 (blmix_kpp + enhance + combine + viscAE average) all byte-exact on BOTH pi AND CORE2, all
   FOUR first try; M5b assembled the real `oce_mixing_kpp_driver` + the `mix_scheme_nmb==1` dispatch
-  (one new physics step beyond M5a: `smooth_blmc` — see the M5 block + LESSONS **L45**).
-  **M5c (forced/fully-native lifecycle + sw_pene) ✅ DONE 2026-06-24 (first try, LESSONS L46): the
-  PRODUCTION CORE2 column physics (KPP + GM + Redi + shortwave penetration) byte-exact in the
-  fully-native forced lifecycle — `max|Δ|=0` at 195 (3-step) AND 325 (5-step), BOTH whichEVP**
+  (one new physics step beyond M5a: `smooth_blmc` — LESSONS **L45**).
+  **M5c (forced/fully-native lifecycle + sw_pene) ✅ DONE (first try, LESSONS L46): the PRODUCTION
+  CORE2 column physics (KPP + GM + Redi + shortwave penetration) byte-exact in the fully-native
+  forced lifecycle — `max|Δ|=0` at 195 (3-step) AND 325 (5-step), BOTH whichEVP**
   (`tools/run_lifecycle_kpp_native_gate_core2.sh`). KEY FINDING: of the two tracer-TDMA terms the
   plan named, only `sw_3d` is LIVE in work_core — the `ghats` nonlocal flux is gated off by
   `use_kpp_nonlclflx=.false.` (absent from work_core, like MLD1_ind/K_hor in M4); ghats was
   transcribed anyway + byte-gated by a `KPP_NONLCL=1` variant (`max|Δ|=0`, non-vacuous 7.3e-5).
-  `use_sw_pene` consolidated to its single `mod_config` home (default flipped `.true.`→`.false.`,
-  "unset=off"; it was a latent duplicate with `mod_param_phys`). NO regression (ctest 13/13 + M5b
-  KPP + M4e GM/Redi-native + M3f baseline all `max|Δ|=0`).
-  **RESUME at M5d (multi-rank): the KPP kernels are optional-`partit` from the start (owned-loop
-  bounds + the oracle's `exchange_nod`/`smooth_nod` already in `oce_mixing_kpp_driver`) — expect
-  pure wiring + gating, the M4f lesson. Then tag `m5`.** See "Milestone ordering" + "↳ RESUME HERE".
+  `use_sw_pene` consolidated to its single `mod_config` home (a latent duplicate with `mod_param_phys`).
+  **M5d (multi-rank) ✅ DONE (first try, the M4f lesson): the production KPP+sw_pene+GM+Redi native
+  lifecycle byte-matches FESOM2 `max|Δ|=0` at MULTI-RANK — CORE2 dist_2 + dist_8, BOTH whichEVP,
+  195 (3-step) + 325 (5-step)** (`tools/run_lifecycle_kpp_native_gate_multirank.sh`). PURE WIRING:
+  the KPP module was optional-`partit` from the start (`oce_mixing_kpp_driver` does owned-loops +
+  `exchange_nod(blmc/Kv_double/ghats/viscA)` + `smooth_blmc`); the only NEW work was the
+  `fesom_lifecycle_native_mr` KPP/sw_pene block (LOCAL-sized) + `cal_shortwave_rad`'s optional
+  `partit` (loop owned+halo `nNodL`, since the local mesh's `mesh%nod2D` = the GLOBAL count). NO
+  regression (ctest 13/13 + 1-rank production + pi M2.10c forcing-gate `sw_3d` all `max|Δ|=0`).
+  **RESUME at M6 (beyond-paper: zstar/zlevel ALE, TKE, aEVP) — see "Milestone ordering".** The
+  whole paper-parity CORE2 production config (KPP + GM + Redi + sw_pene, linfs) is now byte-exact
+  1-rank AND multi-rank.
   (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,
@@ -423,23 +429,22 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
       `dump_shim` is the gate). **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi +
       step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`. ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35).
 
-**↳ RESUME HERE (next session): M5d — multi-rank KPP + sw_pene.** M5a–M5c are byte-exact at 1-rank;
-M5d lifts the production KPP+sw_pene+GM+Redi native lifecycle to multi-rank (CORE2 dist_2 + dist_8,
-BOTH whichEVP, `max|Δ|=0`, 195 + 325 records), completing M5 → tag `m5`. Expect PURE WIRING (the M4f
-lesson): the KPP module (`oce_mixing_kpp.F90`) was written optional-`partit` from the START (owned-loop
-bounds + the oracle's `exchange_nod(blmc 1/2/3, diffK 1/2, ghats, viscA)` + `smooth_nod`/`smooth_blmc`
-per-sweep are already in `oce_mixing_kpp_driver`), `cal_shortwave_rad` loops `nod2D` (owned at 1-rank;
-add the `myDim+eDim` halo bound + `partit` for MR like the oracle `n2=1,myDim+eDim`), and the sw_3d /
-ghats tracer terms loop `nNodO` (already owned). Plan: build `fesom_lifecycle_native_mr` KPP+sw_pene
-wiring (mirror the M4f `fesom_lifecycle_native_mr` GM/Redi block + the M5c KPP/sw_pene block) + a
-`run_lifecycle_kpp_native_gate_multirank.sh` (mirror `run_lifecycle_gmredi_native_gate_multirank.sh`
-with MIX_KPP=1 SW_PENE=1). ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35). Then tag `m5`.
+**↳ RESUME HERE (next session): M5 ✅ COMPLETE (tag `m5`) → M6 (beyond-paper).** The whole CORE2
+paper-parity production config — KPP vertical mixing + GM bolus + Redi isopycnal diffusion + shortwave
+penetration, on the linfs free surface — is byte-exact `max|Δ|=0` vs FESOM2 v2.7.3, 1-rank AND
+multi-rank (CORE2 dist_2 + dist_8), BOTH whichEVP, over the multi-step fully-native FORCED lifecycle.
+M5a (isolated KPP module, 95 fields) + M5b (KPP in step_oce, unforced lifecycle) + M5c (forced/native
++ sw_pene) + M5d (multi-rank) ALL DONE. Gates: `run_lifecycle_kpp_gate_core2.sh` (M5b unforced),
+`run_lifecycle_kpp_native_gate_core2.sh` (M5c forced/native, 195+325 both EVP),
+`run_lifecycle_kpp_native_gate_multirank.sh` (M5d, dist_2/8), `run_lifecycle_kppnonlcl_native_gate_core2.sh`
+(the dead-by-default ghats nonlocal flux, byte-verified via `KPP_NONLCL=1`). See LESSONS **L46** (+ L45).
 
-**M5c ✅ DONE byte-exact (see the M5 block below):** the PRODUCTION CORE2 column physics (KPP + GM +
-Redi + sw_pene) is `max|Δ|=0` in the fully-native FORCED lifecycle, 195 (3-step) + 325 (5-step), BOTH
-whichEVP (`tools/run_lifecycle_kpp_native_gate_core2.sh`). Only `sw_3d` is live in work_core; the
-`ghats` nonlocal flux is gated off (`use_kpp_nonlclflx=.false.`) but transcribed + byte-gated by the
-`KPP_NONLCL=1` variant (`tools/run_lifecycle_kppnonlcl_native_gate_core2.sh`). See LESSONS **L46**.
+**M6 (beyond-paper, per "Milestone ordering"):** zstar/zlevel ALE (production `which_ALE='zlevel'` — M5
+kept the reduced `linfs`), TKE vertical mixing (the oracle has `work_tke_dump`/`work_zstar_tke` staged),
+aEVP (`whichEVP=2`, deferred in M3). The reduced-gate downgrades that remain are `which_ALE` (linfs vs
+zlevel) — everything else in `work_core` is now native. ⚠️ multi-rank levante needs the `env.sh` KNEM
+flag (L35); gate every consumed intermediate (L29); read the ACTUAL `.F90` + `work_core` namelists, not
+the plan summaries (the M4 `MLD1_ind`/`K_hor` + the M5c `use_kpp_nonlclflx` lessons).
 
 ### M5 progress (KPP vertical mixing + sw_pene) — scoped + started 2026-06-24. Plan: `docs/plans/2026-06-24-m5-kpp.md`.
 - **Decomposition:** M5a (producers, isolated gate; sub-stepped a1–a4 mirroring the C-port K1–K8) →
@@ -581,6 +586,21 @@ whichEVP (`tools/run_lifecycle_kpp_native_gate_core2.sh`). Only `sw_3d` is live 
     all `max|Δ|=0`. Changed: `oce_ale_tracer.F90` (sw_3d + ghats terms), `mod_param_phys.F90` (+use_kpp_nonlclflx/ref_sss),
     `mod_config.F90` (use_sw_pene default), `fesom_lifecycle_native.F90` (KPP/sw_pene wiring), the forced-oracle +
     fully-native gate runners (+MIX_KPP/SW_PENE/KPP_NONLCL env), + 2 new gate scripts. No oracle SOURCE change.
+- **M5d ✅ DONE (2026-06-24, first try — the M4f lesson) → M5 COMPLETE.** The production KPP+sw_pene+GM+Redi
+  fully-native FORCED lifecycle byte-matches FESOM2 `max|Δ|=0` at MULTI-RANK: CORE2 **dist_2 + dist_8, BOTH whichEVP,
+  195 (3-step) + 325 (5-step)** — all 8 (dist × EVP × nsteps) cells green (`tools/run_lifecycle_kpp_native_gate_multirank.sh
+  [np] [nsteps] [whichEVP]`). PURE WIRING: the KPP module (`oce_mixing_kpp.F90`) was written optional-`partit` from the
+  START — `oce_mixing_kpp_driver` already does owned-loop bounds + `exchange_nod(blmc 1/2/3, Kv_double 1/2, ghats, viscA)`
+  + the 3-sweep `smooth_blmc` (per-sweep `smooth_nod` exchange), and the sw_3d/ghats tracer terms loop `nNodO` (owned).
+  The only NEW work: (i) the `fesom_lifecycle_native_mr` KPP/sw_pene/nonlcl config block (LOCAL-sized `nNodL`/`nElemF`,
+  mirror of the M5c 1-rank block + the M4f GM/Redi block) + `cal_shortwave_rad` after `oce_fluxes` (partit) +
+  `stress_node_surf=atm%stress_node_surf` to `step_oce`; (ii) **`cal_shortwave_rad` gained an optional `partit`** —
+  ⚠️ in the LOCAL mesh `mesh%nod2D` = the GLOBAL count (`read_mesh_local`), so it can't be the loop bound; now loops
+  `nNodL` (owned+halo = oracle `myDim+eDim`) via `owned_bounds` (absent partit ⇒ `nNodL=mesh%nod2D`, 1-rank/pi verbatim).
+  The gate runners `run_lifecycle_fullynative_gate_multirank.sh` + the forced oracle thread MIX_KPP/SW_PENE/KPP_NONLCL.
+  No regression (ctest 13/13 + 1-rank production 195 + pi M2.10c forcing-gate `sw_3d`/`chl`/`heat_flux_sw` all `max|Δ|=0`).
+  Changed: `fesom_lifecycle_native_mr.F90`, `oce_shortwave_pene.F90` (optional partit), the MR gate runner, + the new
+  `run_lifecycle_kpp_native_gate_multirank.sh`. No oracle SOURCE change.
 - **M5b PLAN (done above):** the isolated KPP module is fully byte-proven — now ASSEMBLE the driver + wire it into the step.
   Build the real `oce_mixing_KPP` driver in `oce_mixing_kpp.F90` (prestep dVsq/ustar/Bo + `ri_iwmix` → `bldepth` →
   `blmix_kpp` → `enhance` → combine → node→elem viscAE average — all four sub-kernels already byte-proven, so this is
@@ -620,8 +640,8 @@ plan doc `2026-06-18-fesom3-architecture.md`.
 ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35). ⚠️ Gate every consumed intermediate (L29). ⚠️ **Read the
 ACTUAL FESOM2 `.F90` + `work_core` namelists, NOT the plan summaries** (they were wrong on `MLD1_ind` + `K_hor` in M4).
 M3 ✅ COMMITTED (`b591153`, tag `m3`); M4 ✅ COMMITTED (`7a088de`, tag `m4`); the M2 baseline stays at `m2-mvp`.
-**M5a+M5b ✅ COMMITTED (`30760c3`); M5c (forced/native + sw_pene) ✅ COMMITTED (`2fd05b8`) — both UNTAGGED; M5d
-(multi-rank) remains before tag `m5`.**
+**M5 ✅ COMPLETE + COMMITTED — tag `m5`. M5a+M5b (`30760c3`), M5c forced/native + sw_pene (`2fd05b8`), M5d multi-rank
+(this commit; hash referenced in the follow-up docs commit, the m3/m4 pattern). The M2 baseline stays at `m2-mvp`.**
 
 **Milestone ordering (plan doc `2026-06-18-fesom3-architecture.md`):** M4 = GM/Redi → M5 = KPP + production
 multi-year (paper-parity) → M6 = beyond-paper (zstar/zlevel ALE, TKE, aEVP). mEVP (whichEVP=1) was already
