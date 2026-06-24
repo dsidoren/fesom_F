@@ -50,11 +50,12 @@ module oce_pressure_bv
     private
     public :: pressure_bv, densityJM_components, insitu2pot
     public :: sw_alpha_beta, compute_sigma_xy, compute_neutral_slope
+    public :: smooth_nod   ! area-weighted patch smoother (= FESOM2 smooth_nod3D); KPP smooth_blmc
 
 contains
 
     !===========================================================================
-    subroutine pressure_bv(temp, salt, density_ref, mesh, density_m_rho0, hpressure, bvfreq, partit)
+    subroutine pressure_bv(temp, salt, density_ref, mesh, density_m_rho0, hpressure, bvfreq, partit, dbsfc)
         ! temp/salt/density_ref: (nl-1, nod2D) inputs. density_m_rho0: (nl-1, nod2D)
         ! out. hpressure/bvfreq: (nl, nod2D) out (only 1..nzmax used). The caller
         ! pre-zeros the three outputs (see header).
@@ -62,6 +63,9 @@ contains
         ! myDim_nod2D+eDim_nod2D — the EOS is per-node so computing the halo here saves
         ! an exchange; the downstream pgf/smoothing then read it locally) + smooth_nod's
         ! per-sweep exchange_nod(bvfreq).
+        ! M5a-3 (KPP): optional dbsfc (nl, nod2D) buoyancy-difference-wrt-surface output —
+        ! the bulk-Ri numerator bldepth consumes. Only the KPP gate/driver passes it; the
+        ! lifecycle/step callers omit it (a separate NOVECTOR loop, byte-neutral when absent).
         type(t_mesh),  intent(in)    :: mesh
         real(kind=WP), intent(in)    :: temp(mesh%nl-1, mesh%nod2D)
         real(kind=WP), intent(in)    :: salt(mesh%nl-1, mesh%nod2D)
@@ -70,13 +74,14 @@ contains
         real(kind=WP), intent(inout) :: hpressure(mesh%nl, mesh%nod2D)
         real(kind=WP), intent(inout) :: bvfreq(mesh%nl, mesh%nod2D)
         type(t_partit), intent(in), optional :: partit
+        real(kind=WP), intent(inout), optional :: dbsfc(mesh%nl, mesh%nod2D)
 
         integer       :: node, nz, nzmax, nzmin
         integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: zmean, dz_inv, a, rho_up, rho_dn, t, s, smin
-        real(kind=WP) :: bulk_up, bulk_dn
+        real(kind=WP) :: bulk_up, bulk_dn, rho_surf
         real(kind=WP) :: rhopot(mesh%nl), bulk_0(mesh%nl), bulk_pz(mesh%nl)
-        real(kind=WP) :: bulk_pz2(mesh%nl), rho(mesh%nl), bv1(mesh%nl)
+        real(kind=WP) :: bulk_pz2(mesh%nl), rho(mesh%nl), bv1(mesh%nl), dbsfc1(mesh%nl)
 
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
@@ -116,6 +121,26 @@ contains
                 rho(nz) = rho(nz)*rhopot(nz)/(rho(nz)+0.1_WP*mesh%Z_3d_n(nz,node)*real(state_equation,WP))-density_ref(nz,node)
                 density_m_rho0(nz,node) = rho(nz)
             end do
+
+            !___________________________________________________________________
+            ! M5a-3 (KPP): buoyancy difference wrt the surface (dbsfc, m/s2) — the bulk-Ri
+            ! numerator bldepth consumes. Bring the surface water adiabatically to depth nz
+            ! (rho_surf = surface bulk-modulus components evaluated at Z_3d_n(nz)), then
+            ! dbsfc1 = -g*(rho_surf - rho_full(nz))/rho_full(nz). Faithful to FESOM2
+            ! oce_ale_pressure_bv.F90:326-339 (filled there under mixing_kpp). !DIR$ NOVECTOR
+            ! keeps the divide scalar (L29): the oracle's dbsfc1 sits in the db_max-reduction
+            ! density loop (scalar); operands are the byte-matched density_m_rho0+density_ref,
+            ! so scalar-vs-scalar is exact. dbsfc1(nzmin)=0 (rho_surf==rho_full there).
+            if (present(dbsfc)) then
+                !DIR$ NOVECTOR
+                do nz=nzmin, nzmax-1
+                    rho_surf = bulk_0(nzmin) + mesh%Z_3d_n(nz,node)*(bulk_pz(nzmin) + mesh%Z_3d_n(nz,node)*bulk_pz2(nzmin))
+                    rho_surf = rho_surf*rhopot(nzmin)/(rho_surf+0.1_WP*mesh%Z_3d_n(nz,node)*real(state_equation,WP))
+                    dbsfc1(nz) = -g*(rho_surf - (density_m_rho0(nz,node)+density_ref(nz,node))) / (density_m_rho0(nz,node)+density_ref(nz,node))
+                end do
+                dbsfc1(nzmax) = dbsfc1(nzmax-1)
+                dbsfc(nzmin:nzmax, node) = dbsfc1(nzmin:nzmax)
+            end if
 
             !___________________________________________________________________
             ! fill density levels occupied by the cavity (nzmin>1; v1-dropped, ungated

@@ -42,7 +42,7 @@ program fesom_lifecycle_native_mr
     use mod_precision,      only: WP, MP
     use mod_constants,      only: density_0
     use mod_param_phys,     only: N2smth_h, alpha, theta
-    use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const
+    use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const, mix_scheme_nmb
     use mod_param_phys,     only: use_instabmix, instabmix_kv, use_momix, use_windmix
     ! M4f: GM bolus (FESOM3_FER_GM) + Redi isopycnal diffusion (FESOM3_REDI) at MULTI-RANK —
     ! the work_core GM+Redi config (the M4 routines already thread the optional partit + exchanges).
@@ -268,6 +268,7 @@ program fesom_lifecycle_native_mr
     ! reduced-M2 module config (= the FESOM2 oracle / CORE2 namelist).
     alpha = 1.0_WP; theta = 1.0_WP
     N2smth_h     = .true.
+    mix_scheme_nmb = 2           ! reduced-M2 mixing = PP (KPP is M5c/M5d)
     mix_coeff_PP = 0.01_WP
     A_ver        = 1.0e-4_WP
     K_ver        = 1.0e-5_WP

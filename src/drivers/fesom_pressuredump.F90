@@ -36,12 +36,17 @@ program fesom_pressuredump
     use oce_ssh_solve,    only: solve_ssh_ale
     use oce_ale,          only: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
     use oce_ale_mixing_pp, only: oce_mixing_pp
+    use oce_mixing_kpp,   only: ri_iwmix, bldepth, oce_mixing_kpp_init, blmix_kpp, enhance
+    use mod_constants,    only: density_0_r, vcpw, g
+    use mod_param_phys,   only: Ricr, concv
+    use mod_config,       only: use_sw_pene
     use oce_mo_conv,      only: mo_convect
     use mod_tracer,       only: t_tracer
     use oce_tracer_grad,  only: tracer_gradient_elements
     use oce_ale_tracer,   only: diff_tracers_ale
     use mod_param_phys,   only: alpha, theta
     use mod_param_phys,   only: mix_coeff_PP, A_ver, K_ver, Kv0_const
+    use mod_param_phys,   only: visc_sh_limit, diff_sh_limit
     use mod_param_phys,   only: use_instabmix, instabmix_kv, use_momix, use_windmix
     use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3
     implicit none
@@ -109,6 +114,20 @@ program fesom_pressuredump
     real(kind=WP), allocatable :: neutral_slope(:,:,:), slope_tapered(:,:,:), fer_tapfac(:,:)
     ! --- M4b GM diffusivity / streamfunction / bolus velocity (fer_uv/fer_w ride dyn) ---
     real(kind=WP), allocatable :: fer_K(:,:), fer_c(:), fer_scal(:), fer_gamma(:,:,:)
+    ! --- M5a-2 KPP ri_iwmix interior mixing (node viscA + per-tracer diffK) ---
+    real(kind=WP), allocatable :: viscA_ri(:,:), diffK_ri(:,:,:)
+    ! --- M5a-3 KPP boundary-layer depth (prestep dVsq/ustar/Bo + dbsfc + sw_3d + bldepth) ---
+    real(kind=WP), allocatable :: dbsfc_kpp(:,:), dVsq_kpp(:,:), sw3d_kpp(:,:)
+    real(kind=WP), allocatable :: ustar_kpp(:), bo_kpp(:), hbl_kpp(:), bfsfc_kpp(:)
+    real(kind=WP), allocatable :: stable_kpp(:), caseA_kpp(:), hf_kpp(:), wf_kpp(:)
+    real(kind=WP), allocatable :: stress_node_surf(:,:)
+    integer,       allocatable :: kbl_kpp(:)
+    ! --- M5a-4 KPP blmix_kpp + enhance + combine + node->elem viscAE average ---
+    real(kind=WP), allocatable :: blmc_kpp(:,:,:), ghats_kpp(:,:), dkm1_kpp(:,:)
+    real(kind=WP), allocatable :: viscA_fin(:,:), diffK_fin(:,:,:), viscAE_kpp(:,:)
+    real(kind=WP)              :: minmix
+    integer                    :: elem, elnodes(3)
+    real(kind=WP)              :: usurf, vsurf, u_loc, v_loc, sw0
     real(kind=WP), allocatable :: heat_flux(:), water_flux(:), virtual_salt(:), relax_salt(:)
     real(kind=WP), allocatable :: real_salt_flux(:)
     real(kind=WP), allocatable :: t_solved(:,:), s_solved(:,:), del_ttf_t(:,:), del_ttf_s(:,:)
@@ -212,6 +231,8 @@ program fesom_pressuredump
 
     allocate(density(nl-1, mesh%nod2D), hpressure(nl, mesh%nod2D), bvfreq(nl, mesh%nod2D))
     allocate(bvfreq_raw(nl, mesh%nod2D))
+    allocate(dbsfc_kpp(nl, mesh%nod2D))   ! M5a-3: KPP buoyancy-diff-wrt-surface (filled by pressure_bv)
+    dbsfc_kpp = 0.0_WP
 
     ! Pass 1: horizontal N^2 smoothing OFF -> raw bvfreq (+ density_m_rho0, hpressure).
     ! The caller pre-zeros the outputs (pressure_bv leaves below-bottom entries as-is).
@@ -220,10 +241,11 @@ program fesom_pressuredump
     call pressure_bv(temp, salt, density_ref, mesh, density, hpressure, bvfreq)
     bvfreq_raw = bvfreq
 
-    ! Pass 2: horizontal N^2 smoothing ON -> smoothed bvfreq.
+    ! Pass 2: horizontal N^2 smoothing ON -> smoothed bvfreq. dbsfc (M5a-3) is density-only
+    ! (smoothing-independent), filled here for the KPP bldepth gate below.
     N2smth_h = .true.
     bvfreq = 0.0_WP
-    call pressure_bv(temp, salt, density_ref, mesh, density, hpressure, bvfreq)
+    call pressure_bv(temp, salt, density_ref, mesh, density, hpressure, bvfreq, dbsfc=dbsfc_kpp)
 
     ! ============== M4a GM/Redi producers (feed-forward diagnostics) ==============
     ! sw_alpha_beta -> compute_sigma_xy -> compute_neutral_slope, from T/S + the smoothed
@@ -584,6 +606,136 @@ program fesom_pressuredump
         '] ; max|Kv|=', maxval(dyn%work%Kv), ' ; max|Av|=', maxval(dyn%work%Av), &
         ' ; factor>0.1 on ', 100.0_WP*real(nf_big,WP)/real(max(nf,1),WP), '% of node-levels'
 
+    ! ============== M5a-2: KPP ri_iwmix interior mixing ==============================
+    ! KPP's interior coefficients (Richardson-number shear instability + constant internal-
+    ! wave background, oce_ale_mixing_kpp.F90:1008 ri_iwmix), run on the SAME prescribed
+    ! strong-shear uvnode + smoothed bvfreq as PP (isolated producer gate). Force the work_core
+    ! KPP shear-mixing knobs (visc_sh_limit/diff_sh_limit=5e-3; A_ver/K_ver/Kv0_const already
+    ! set above). viscA_ri = node viscosity ; diffK_ri(:,:,1)=T, (:,:,2)=S diffusivity. MUST
+    ! match the FESOM2 oracle src/fesom_pressure_dump.F90.
+    visc_sh_limit = 5.0e-3_WP
+    diff_sh_limit = 5.0e-3_WP
+    allocate(viscA_ri(nl, mesh%nod2D), diffK_ri(nl, mesh%nod2D, 2))
+    viscA_ri = 0.0_WP; diffK_ri = 0.0_WP
+    call ri_iwmix(viscA_ri, diffK_ri, dyn, mesh)
+
+    ! ============== M5a-3: KPP boundary-layer depth (bldepth) ========================
+    ! The KPP driver pre-step (dVsq/ustar/Bo, oce_ale_mixing_kpp.F90:344-411) + bldepth
+    ! (:746, the C-port HIGHEST-RISK routine: bulk-Ri accumulation + sw interpolation +
+    ! ekman/monob limit). Prescribe the surface fluxes (heat/water/wind-stress on nodes) +
+    ! a physical decaying shortwave profile sw_3d ANALYTICALLY (byte-identical formula both
+    ! sides, M3b style) so Bo spans BOTH signs -> bldepth runs the stable AND unstable
+    ! branches. dbsfc is the pressure_bv output (dbsfc_kpp, above). build the wmt/wst lookup
+    ! tables first (oce_mixing_kpp_init, M5a-1) so bldepth's wscale reads them. MUST match the
+    ! FESOM2 oracle src/fesom_pressure_dump.F90.
+    use_sw_pene = .true.
+    call oce_mixing_kpp_init(Ricr, concv)   ! Ricr=0.3, concv=1.6 (work_core; mod_param_phys defaults)
+    allocate(dVsq_kpp(nl, mesh%nod2D), sw3d_kpp(nl, mesh%nod2D))
+    allocate(ustar_kpp(mesh%nod2D), bo_kpp(mesh%nod2D), hbl_kpp(mesh%nod2D))
+    allocate(bfsfc_kpp(mesh%nod2D), stable_kpp(mesh%nod2D), caseA_kpp(mesh%nod2D))
+    allocate(kbl_kpp(mesh%nod2D), hf_kpp(mesh%nod2D), wf_kpp(mesh%nod2D))
+    allocate(stress_node_surf(2, mesh%nod2D))
+    dVsq_kpp = 0.0_WP; sw3d_kpp = 0.0_WP
+
+    ! prescribe surface fluxes (heat_flux/water_flux +up; wind stress on nodes) + the
+    ! in-water shortwave sw_3d (positive, exp-decaying with depth; surface ~2.4e-5 K m/s =
+    ! (1-albw)*0.54*~200 W/m2 / vcpw). heat_flux sign-varying so Bo (= -g*(alpha*hf/vcpw +
+    ! beta*S*wf)) spans both signs. MUST match the FESOM2 oracle.
+    do n = 1, mesh%nod2D
+        lon = mesh%coord_nod2D(1, n); lat = mesh%coord_nod2D(2, n)
+        hf_kpp(n)             =  200.0_WP*cos(lat)*sin(lon)
+        wf_kpp(n)             =  2.0e-6_WP*sin(2.0_WP*lon)*cos(lat)
+        stress_node_surf(1,n) =  0.15_WP*cos(lat)*sin(lon)
+        stress_node_surf(2,n) = -0.10_WP*sin(lat)*cos(2.0_WP*lon)
+        sw0 = 2.4e-5_WP*(0.5_WP + 0.5_WP*cos(lon)*cos(lat))             ! >= 0
+        do nz = 1, nl
+            sw3d_kpp(nz,n) = sw0*exp(real(mesh%zbar_3d_n(nz,n),WP)/20.0_WP)
+        end do
+    end do
+
+    ! prestep: dVsq (velocity shear re surface @ Z) + ustar (friction velocity) + Bo
+    ! (surface turbulent buoyancy forcing). dyn%uvnode is the strong-shear nodal velocity
+    ! prescribed for PP/ri_iwmix above; sw_alpha/sw_beta are the M4a producers; salt the
+    ! prescribed surface salinity. MUST match the FESOM2 oracle src/fesom_pressure_dump.F90.
+    do n = 1, mesh%nod2D
+        nzmin = mesh%ulevels_nod2D(n)
+        nzmax = mesh%nlevels_nod2D(n)
+        dVsq_kpp(nzmin,n) = 0.0_WP
+        usurf = dyn%uvnode(1,nzmin,n)
+        vsurf = dyn%uvnode(2,nzmin,n)
+        do nz = nzmin+1, nzmax-1
+            u_loc = 0.5_WP*( dyn%uvnode(1,nz-1,n) + dyn%uvnode(1,nz,n) )
+            v_loc = 0.5_WP*( dyn%uvnode(2,nz-1,n) + dyn%uvnode(2,nz,n) )
+            dVsq_kpp(nz,n) = ( usurf - u_loc )**2 + ( vsurf - v_loc )**2
+        end do
+        dVsq_kpp(nzmax,n) = dVsq_kpp(nzmax-1,n)
+        ustar_kpp(n) = sqrt( sqrt( stress_node_surf(1,n)**2 + stress_node_surf(2,n)**2 )*density_0_r )
+        bo_kpp(n)    = -g*( sw_alpha(nzmin,n)*hf_kpp(n)/vcpw &
+                          + sw_beta (nzmin,n)*wf_kpp(n)*salt(nzmin,n) )
+    end do
+
+    call bldepth(dVsq_kpp, dbsfc_kpp, ustar_kpp, bo_kpp, sw3d_kpp, sw_alpha, bvfreq, &
+                 hbl_kpp, kbl_kpp, bfsfc_kpp, stable_kpp, caseA_kpp, mesh)
+
+    ! gate-strength diagnostic (NOT dumped): hbl range + how many nodes hit each forcing
+    ! branch (stable=1 vs unstable=0) so both wscale/Vtsq paths are genuinely exercised.
+    nwp = count(stable_kpp >  0.5_WP)
+    nwm = count(stable_kpp <= 0.5_WP)
+    write(*,'(a,es10.3,a,es10.3,a,i0,a,i0)') &
+        'fesom_pressuredump: bldepth: hbl=[', minval(hbl_kpp), ',', maxval(hbl_kpp), &
+        '] m ; stable/unstable nodes = ', nwp, '/', nwm
+
+    ! ============== M5a-4: KPP blmix + enhance + combine + viscAE average ============
+    ! The boundary-layer mixing coefficients (oce_ale_mixing_kpp.F90 blmix_kpp:1228 +
+    ! enhance:1419) + the driver tail (combine + node->elem viscAE average, :451-492).
+    ! blmix reads the ri_iwmix interior viscA_ri/diffK_ri (M5a-2) + the bldepth prestep/
+    ! outputs (M5a-3) — all byte-proven — and fills blmc(3)/dkm1(3)/ghats; enhance blends
+    ! the kbl-1 interface. The combine takes max(interior,blmc) WITHIN the boundary layer
+    ! (into the SEPARATE copies viscA_fin/diffK_fin so the M5a-2 ri_* dumps still echo the
+    ! interior) and zeroes ghats outside it; viscAE = node->elem average with the minmix=3e-3
+    ! surface floor. MUST match the FESOM2 oracle src/fesom_pressure_dump.F90.
+    allocate(blmc_kpp(nl, mesh%nod2D, 3), ghats_kpp(nl-1, mesh%nod2D), dkm1_kpp(mesh%nod2D, 3))
+    allocate(viscA_fin(nl, mesh%nod2D), diffK_fin(nl, mesh%nod2D, 2))
+    allocate(viscAE_kpp(nl, mesh%elem2D))
+    blmc_kpp = 0.0_WP; ghats_kpp = 0.0_WP; dkm1_kpp = 0.0_WP   ! mirror oce_mixing_kpp_init zero
+    viscAE_kpp = 0.0_WP
+
+    call blmix_kpp(viscA_ri, diffK_ri, hbl_kpp, ustar_kpp, bfsfc_kpp, stable_kpp, &
+                   caseA_kpp, kbl_kpp, blmc_kpp, ghats_kpp, dkm1_kpp, mesh)
+    call enhance(viscA_ri, diffK_ri, hbl_kpp, caseA_kpp, kbl_kpp, &
+                 blmc_kpp, ghats_kpp, dkm1_kpp, mesh)
+
+    ! combine: within the boundary layer take max(interior, blmc); outside zero ghats.
+    ! Operate on copies so ri_viscA/ri_diffKt/ri_diffKs (M5a-2) keep echoing the interior.
+    viscA_fin = viscA_ri
+    diffK_fin = diffK_ri
+    do n = 1, mesh%nod2D
+        nzmin = mesh%ulevels_nod2D(n)
+        nzmax = mesh%nlevels_nod2D(n)
+        do nz = nzmin+1, nzmax-1
+            if (nz < kbl_kpp(n)) then
+                viscA_fin(nz,n)   = max(viscA_fin(nz,n),   blmc_kpp(nz,n,1))
+                diffK_fin(nz,n,1) = max(diffK_fin(nz,n,1), blmc_kpp(nz,n,2))
+                diffK_fin(nz,n,2) = max(diffK_fin(nz,n,2), blmc_kpp(nz,n,3))
+            else
+                ghats_kpp(nz,n) = 0.0_WP
+            end if
+        end do
+    end do
+
+    ! node->elem viscAE average (minmix=3e-3 surface floor). 1-rank: no pre-average exchange.
+    minmix = 3.0e-3_WP
+    do elem = 1, mesh%elem2D
+        elnodes = mesh%elem2D_nodes(1:3,elem)
+        nzmin   = mesh%ulevels(elem)
+        nzmax   = mesh%nlevels(elem)
+        do nz = nzmin, nzmax-1
+            viscAE_kpp(nz,elem) = sum(viscA_fin(nz,elnodes))/3.0_WP
+        end do
+        viscAE_kpp(nzmax,elem) = viscAE_kpp(nzmax-1,elem)
+        if (viscAE_kpp(nzmin,elem) < minmix) viscAE_kpp(nzmin,elem) = minmix
+    end do
+
     ! ============== M2.8b mo_convect convective adjustment ===========================
     ! Static-instability adjustment, run AFTER PP in the step (FESOM2 oce_ale.F90:3729 ->
     ! mo_convect): where N^2<0 floor Kv (nodes) / Av (elements) to instabmix_kv (=0.1).
@@ -771,6 +923,37 @@ program fesom_pressuredump
     ! M2.8b mo_convect: the post-adjustment Kv/Av (floored to instabmix_kv where bvfreq<0).
     call wr_r2(u, 'moc_Kv',         real(dyn%work%Kv(1:nl, :),  MP))
     call wr_r2(u, 'moc_Av',         real(dyn%work%Av(1:nl, :),  MP))
+    ! M5a-2 KPP ri_iwmix: node viscosity + per-tracer (T/S) interior diffusivity.
+    call wr_r2(u, 'ri_viscA',       real(viscA_ri(1:nl, :),     MP))
+    call wr_r2(u, 'ri_diffKt',      real(diffK_ri(1:nl, :, 1),  MP))
+    call wr_r2(u, 'ri_diffKs',      real(diffK_ri(1:nl, :, 2),  MP))
+    ! M5a-3 KPP bldepth: prescribed inputs (wind stress + sw_3d), the prestep
+    ! (dVsq/ustar/Bo) + dbsfc (pressure_bv), and the boundary-layer-depth outputs
+    ! (hbl/kbl/bfsfc/stable/caseA). kbl dumped as real (exactly representable).
+    call wr_r2(u, 'kpp_stress',     real(stress_node_surf,      MP))
+    call wr_r2(u, 'kpp_sw3d',       real(sw3d_kpp(1:nl, :),     MP))
+    call wr_r2(u, 'kpp_dVsq',       real(dVsq_kpp(1:nl, :),     MP))
+    call wr_r2(u, 'kpp_dbsfc',      real(dbsfc_kpp(1:nl, :),    MP))
+    call wr_r1(u, 'kpp_ustar',      real(ustar_kpp,             MP))
+    call wr_r1(u, 'kpp_Bo',         real(bo_kpp,                MP))
+    call wr_r1(u, 'kpp_hbl',        real(hbl_kpp,               MP))
+    call wr_r1(u, 'kpp_kbl',        real(kbl_kpp,               MP))
+    call wr_r1(u, 'kpp_bfsfc',      real(bfsfc_kpp,             MP))
+    call wr_r1(u, 'kpp_stable',     real(stable_kpp,            MP))
+    call wr_r1(u, 'kpp_caseA',      real(caseA_kpp,             MP))
+    ! M5a-4 KPP blmix+enhance (BL mixing coeffs blmc(1:3)=mom/T/S + kbl-1 diffs dkm1 +
+    ! nonlocal ghats), then the combine (final node viscA/diffKt/diffKs) + node->elem viscAE.
+    call wr_r2(u, 'kpp_blmc1',      real(blmc_kpp(1:nl, :, 1),  MP))
+    call wr_r2(u, 'kpp_blmc2',      real(blmc_kpp(1:nl, :, 2),  MP))
+    call wr_r2(u, 'kpp_blmc3',      real(blmc_kpp(1:nl, :, 3),  MP))
+    call wr_r1(u, 'kpp_dkm1m',      real(dkm1_kpp(:, 1),        MP))
+    call wr_r1(u, 'kpp_dkm1t',      real(dkm1_kpp(:, 2),        MP))
+    call wr_r1(u, 'kpp_dkm1s',      real(dkm1_kpp(:, 3),        MP))
+    call wr_r2(u, 'kpp_ghats',      real(ghats_kpp(1:nl-1, :),  MP))
+    call wr_r2(u, 'kpp_viscA',      real(viscA_fin(1:nl, :),    MP))
+    call wr_r2(u, 'kpp_diffKt',     real(diffK_fin(1:nl, :, 1), MP))
+    call wr_r2(u, 'kpp_diffKs',     real(diffK_fin(1:nl, :, 2), MP))
+    call wr_r2(u, 'kpp_viscAE',     real(viscAE_kpp(1:nl, :),   MP))
     ! M2.9a tracer solve: prescribed inputs (Ki, surface fluxes, the advection tendency
     ! del_ttf_in) + the gate targets per tracer — del_ttf after diffusion (del_ttf_T/S) and
     ! the solved temperature/salinity (tsol_T/tsol_S). The TDMA consumed the live moc_Kv.

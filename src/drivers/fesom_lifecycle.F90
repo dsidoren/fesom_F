@@ -29,7 +29,7 @@ program fesom_lifecycle
     use mod_precision,      only: WP, MP
     use mod_constants,      only: density_0
     use mod_param_phys,     only: N2smth_h, alpha, theta
-    use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const
+    use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const, mix_scheme_nmb
     use mod_param_phys,     only: use_instabmix, instabmix_kv, use_momix, use_windmix
     use mod_param_phys,     only: Fer_GM, Redi, K_GM_max, K_GM_min, K_GM_bvref, &
                                   K_GM_rampmax, K_GM_rampmin, K_GM_resscalorder, K_GM_cm, &
@@ -38,6 +38,9 @@ program fesom_lifecycle
                                   scaling_GINsea, GMzexp_zref, GMzexp_smin
     use mod_param_phys,     only: Redi_Kmax, Redi_Kmin, Redi_Ktaper, K_hor, &
                                   scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97
+    use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit
+    use mod_config,         only: use_sw_pene
+    use oce_mixing_kpp,     only: oce_mixing_kpp_init
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
     use mod_partitioning,   only: par_init, par_ex
@@ -76,6 +79,10 @@ program fesom_lifecycle
     integer(int32) :: fstep, fnn, fne
     ! M4c/M4d: enable GM bolus (FESOM3_FER_GM) / Redi isopycnal diffusion (FESOM3_REDI).
     logical :: use_fer_gm, use_redi
+    ! M5b: enable KPP vertical mixing (FESOM3_MIX_KPP). stress_node_surf is the KPP surface
+    ! stress on nodes (unforced ⇒ zero); left unallocated for PP ⇒ step_oce sees it absent.
+    logical :: use_kpp
+    real(kind=WP), allocatable :: stress_node_surf(:,:)
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -90,6 +97,8 @@ program fesom_lifecycle
     use_fer_gm = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_REDI', env, length=env_len, status=ios)
     use_redi = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_MIX_KPP', env, length=env_len, status=ios)
+    use_kpp = (ios == 0 .and. env_len > 0)
 
     call par_init(partit)
     if (partit%npes /= 1) then
@@ -243,6 +252,7 @@ program fesom_lifecycle
     ! reduced-M2 module config (= the FESOM2 oracle / CORE2 namelist).
     alpha = 1.0_WP; theta = 1.0_WP
     N2smth_h     = .true.
+    mix_scheme_nmb = 2           ! reduced-M2 mixing = PP (KPP=1 only under FESOM3_MIX_KPP)
     mix_coeff_PP = 0.01_WP
     A_ver        = 1.0e-4_WP
     K_ver        = 1.0e-5_WP
@@ -296,6 +306,41 @@ program fesom_lifecycle
         end if
     end if
 
+    !===========================================================================
+    ! M5b KPP (FESOM3_MIX_KPP set): swap the reduced PP for the production KPP vertical
+    ! mixing. mix_scheme_nmb=1 routes step_oce to oce_mixing_KPP (Av element + Kv_double
+    ! node), then Kv=Kv_double(:,:,1) + mo_convect. UNFORCED ⇒ use_sw_pene=.false. (sw_3d=0,
+    ! ghats unused in the TDMA — those are M5c). KPP config = work_core namelist.oce DOUBLES
+    ! (Ricr=0.3/concv=1.6/visc_sh_limit=diff_sh_limit=5e-3; A_ver=1e-4/K_ver=1e-5/Kv0_const
+    ! already set by the reduced config above). sw_alpha/sw_beta are needed for Bo — allocate
+    ! them here if GM/Redi did not. stress_node_surf is the node surface stress (zero, unforced).
+    if (use_kpp) then
+        mix_scheme_nmb = 1
+        use_sw_pene    = .false.
+        Ricr = 0.3_WP; concv = 1.6_WP
+        visc_sh_limit = 5.0e-3_WP; diff_sh_limit = 5.0e-3_WP
+        if (.not. allocated(dyn%work%sw_alpha)) then
+            allocate(dyn%work%sw_alpha(nl-1, mesh%nod2D), dyn%work%sw_beta(nl-1, mesh%nod2D))
+            dyn%work%sw_alpha = 0.0_WP; dyn%work%sw_beta = 0.0_WP
+        end if
+        allocate(dyn%work%Kv_double(nl, mesh%nod2D, tracers%num_tracers))
+        allocate(dyn%work%viscA_kpp(nl, mesh%nod2D), dyn%work%blmc(nl, mesh%nod2D, 3))
+        allocate(dyn%work%ghats(nl-1, mesh%nod2D), dyn%work%dkm1(mesh%nod2D, 3))
+        allocate(dyn%work%dbsfc(nl, mesh%nod2D), dyn%work%dVsq(nl, mesh%nod2D))
+        allocate(dyn%work%sw_3d(nl, mesh%nod2D))
+        allocate(dyn%work%hbl(mesh%nod2D), dyn%work%bfsfc(mesh%nod2D))
+        allocate(dyn%work%stable(mesh%nod2D), dyn%work%caseA(mesh%nod2D))
+        allocate(dyn%work%ustar(mesh%nod2D), dyn%work%Bo(mesh%nod2D), dyn%work%kbl(mesh%nod2D))
+        dyn%work%Kv_double = 0.0_WP; dyn%work%viscA_kpp = 0.0_WP; dyn%work%blmc = 0.0_WP
+        dyn%work%ghats = 0.0_WP; dyn%work%dkm1 = 0.0_WP; dyn%work%dbsfc = 0.0_WP
+        dyn%work%dVsq = 0.0_WP; dyn%work%sw_3d = 0.0_WP
+        dyn%work%hbl = 0.0_WP; dyn%work%bfsfc = 0.0_WP; dyn%work%stable = 0.0_WP
+        dyn%work%caseA = 0.0_WP; dyn%work%ustar = 0.0_WP; dyn%work%Bo = 0.0_WP; dyn%work%kbl = 0
+        allocate(stress_node_surf(2, mesh%nod2D)); stress_node_surf = 0.0_WP
+        call oce_mixing_kpp_init(Ricr, concv)   ! wmt/wst lookup tables + Vtc/cg (once)
+        write(*,'(a)') 'fesom_lifecycle: KPP vertical mixing ENABLED (work_core KPP; unforced, sw_pene off)'
+    end if
+
     ! SSH stiffness (built ONCE; dt = CORE2 namelist timestep).
     call init_stiff_mat_ale(mesh, dt)
 
@@ -332,7 +377,8 @@ program fesom_lifecycle
         end if
         call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
                       heat_flux, water_flux, virtual_salt, relax_salt, &
-                      real_salt_flux, is_nonlinfs, stress_surf)
+                      real_salt_flux, is_nonlinfs, stress_surf, &
+                      stress_node_surf=stress_node_surf)
         write(*,'(a,i0,a,es12.4,a,es12.4)') 'fesom_lifecycle: step ', n, &
             '  max|eta_n|=', maxval(abs(dyn%eta_n)), '  max|uv|=', maxval(abs(dyn%uv))
     end do

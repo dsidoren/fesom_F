@@ -12,8 +12,16 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   M4a (producers) + M4b (GM diffusivity/streamfunction/bolus-velocity) + M4c (GM bolus into advection) + M4d (Redi
   isopycnal diffusion) + M4e (GM+Redi in the FORCED/fully-native lifecycle) + M4f (multi-rank) all byte-gated
   `max|Δ|=0` vs FESOM2 (CORE2 1-rank AND dist_2/dist_8, both whichEVP). Plan: `docs/plans/2026-06-23-m4-gm-redi.md`.
-  **ACTIVE NEXT = M5 (KPP + production multi-year, paper-parity).** See "Milestone ordering" + the M4 detail in the
-  "ACTIVE NEXT" / "↳ RESUME HERE" sections below.
+  **→ M5 (KPP vertical mixing + sw_pene) IN PROGRESS 2026-06-24.** Scoped + decomposed M5a–M5d
+  (plan: `docs/plans/2026-06-24-m5-kpp.md`). **M5a (isolated KPP module gate, 95 pressure-gate
+  fields) ✅ DONE; M5b (wire KPP into `step_oce` + UNFORCED CORE2 lifecycle) ✅ DONE 2026-06-24:
+  `max|Δ|=0` KPP-alone 195 (3-step) + 325 (5-step) AND KPP+GM+Redi 195** (`tools/run_lifecycle_kpp_gate_core2.sh`).
+  M5a-1 (init + wscale) + M5a-2 (ri_iwmix) + M5a-3 (prestep dVsq/ustar/Bo + dbsfc + bldepth) +
+  M5a-4 (blmix_kpp + enhance + combine + viscAE average) all byte-exact on BOTH pi AND CORE2, all
+  FOUR first try; M5b assembled the real `oce_mixing_kpp_driver` + the `mix_scheme_nmb==1` dispatch
+  (one new physics step beyond M5a: `smooth_blmc` — see the M5 block + LESSONS **L45**).
+  **RESUME at M5c (forced/fully-native lifecycle + sw_pene: the `ghats` nonlocal + `sw_3d` tracer
+  TDMA terms + wire `cal_shortwave_rad`).** See "Milestone ordering" + the "↳ RESUME HERE" section below.
   (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,
@@ -404,15 +412,146 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
       `dump_shim` is the gate). **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi +
       step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`. ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35).
 
-**↳ RESUME HERE (next session): M5 — KPP vertical mixing + production multi-year (paper-parity). M4 (GM/Redi) is
-✅ COMPLETE + COMMITTED (tag `m4`).** The full GM bolus + Redi isopycnal diffusion is byte-exact `max|Δ|=0` vs FESOM2
-end-to-end: 1-rank AND multi-rank (CORE2 dist_2/dist_8), unforced AND forced/fully-native (sea ice + native CORE2
-forcing), GM-only AND GM+Redi, BOTH whichEVP. Gates: `run_lifecycle_gm_gate_core2.sh` (M4c GM-only unforced),
-`run_lifecycle_redi_gate_core2.sh` (M4d GM+Redi unforced), `run_lifecycle_gmredi_native_gate_core2.sh` (M4e
-GM+Redi fully-native 1-rank), `run_lifecycle_gmredi_native_gate_multirank.sh` (M4f GM+Redi fully-native dist_2/8).
-M4 is enabled by env: the FESOM3 `fesom_lifecycle` / `fesom_lifecycle_native` / `fesom_lifecycle_native_mr` drivers
-read `FESOM3_FER_GM` / `FESOM3_REDI`; the oracle runners `run_lifecycle_core2.sh` (unforced) and
-`run_lifecycle_forced_core2.sh` (forced/MR) read `FER_GM=1` / `REDI=1` to KEEP the work_core `Fer_GM`/`Redi=.true.`.
+**↳ RESUME HERE (next session): M5c — forced/fully-native CORE2 lifecycle + sw_pene.** Add the two
+NEW tracer-TDMA terms to `diff_ver_part_impl_ale` (`oce_ale_tracer.F90`): the `ghats` nonlocal
+counter-gradient flux (mix_scheme==1, uses `dyn%work%ghats` + `blmc` + heat_flux/water_flux,
+oracle `:900-945`) + the `sw_3d` shortwave heating (use_sw_pene, tr ID==1, oracle `:991-996`); wire
+`cal_shortwave_rad` (ALREADY byte-proven, M2.10c) into the native runloop to fill `dyn%work%sw_3d`
++ flip `use_sw_pene=.true.`. Gate the FORCED / fully-native lifecycle `max|Δ|=0`, BOTH whichEVP (the
+production gate — exercises ghats + sw_3d heating + the full surface coupling). 195 + 325 records.
+Then M5d (multi-rank — the kernels are optional-`partit` from the start; expect pure wiring + the
+`smooth_nod` exchanges already in place, the M4f lesson). **M5a + M5b ✅ DONE byte-exact (see the M5
+block below): M5b assembled `oce_mixing_kpp_driver` + dispatch and the UNFORCED lifecycle is
+`max|Δ|=0` (KPP-alone AND KPP+GM+Redi). The KPP arrays live in `dyn%work` (allocated only when KPP);
+`Av`/viscAE stays element-based so `impl_vert_visc` is UNCHANGED; `Kv=Kv_double(:,:,1)`.**
+
+### M5 progress (KPP vertical mixing + sw_pene) — scoped + started 2026-06-24. Plan: `docs/plans/2026-06-24-m5-kpp.md`.
+- **Decomposition:** M5a (producers, isolated gate; sub-stepped a1–a4 mirroring the C-port K1–K8) →
+  M5b (wire into step + UNFORCED lifecycle) → M5c (forced/native + sw_pene + ghats) → M5d (multi-rank). Tag `m5`.
+- **KEY STRUCTURAL FINDINGS (from reading the actual `oce_ale_mixing_kpp.F90` + the dispatch + the validated C port):**
+  - `oce_ale.F90:3713` dispatch: `oce_mixing_KPP(Av, Kv_double, ...)` — **`Av` (viscAE) stays element-based** (KPP
+    averages node→elem internally, `minmix=3e-3` floor) ⇒ `impl_vert_visc` UNCHANGED; then `Kv(:,n)=Kv_double(:,n,1)`
+    (T-channel) + `mo_convect` ⇒ the tracer vertical-diffusion TDMA is **UNCHANGED** (same single `Kv` as PP). The
+    S-channel `Kv_double(:,:,2)` is computed-but-dead in CORE2 (only a gated output). So KPP integration = the KPP
+    module itself + `dbsfc` (in pressure_bv) + sw_pene wiring + TWO new tracer terms (ghats nonlocal + sw_3d).
+  - `dbsfc` is filled in `oce_ale_pressure_bv.F90:332-339` (a NEW output of the already-ported pressure_bv) — in
+    FESOM3 a `dyn%work%dbsfc` field; `ghats`/`blmc` are READ by the tracer solve ⇒ live in `dyn%work` (not KPP-locals).
+  - `cal_shortwave_rad` (sw_3d producer) is ALREADY ported + byte-proven (M2.10c); M5 wires it into the lifecycle +
+    adds the TDMA consumer (`oce_ale_tracer.F90:991-996` sw_3d term, `:900-945` ghats term). `ddmix` DEFERRED
+    (`double_diffusion=.false.`). Config DOUBLES: `Ricr=0.3`, `concv=1.6`, `visc_sh_limit`/`diff_sh_limit=5e-3`,
+    `A_ver=1e-4`, `K_ver=1e-5`, `Kv0_const=.true.`.
+- **HARNESS (no oracle rebuild needed):** the oracle `build/lib/libfesom.so` (Jun-23 M4 build) ALREADY carries the
+  `FESOM_KPP_DUMP_DIR` instrumentation (`kpp_dump_*` symbols; env-gated off by default → harmless). `bin/fesom.x`
+  (Apr-23, stale) is a thin stub that loads that `.so` at runtime — the gates use `build/bin/fesom.x`. **NEW
+  `tools/run_kppinit_oracle.sh`** runs CORE2 1-rank with `mix_scheme=KPP` (proven forced-runner setup, no PP
+  downgrade) → emits `kpp_init_rank0.txt` + `kpp_wscale_rank0.txt` **AND all the per-node K3/K5/K6/K7/K8 dumps**
+  (`kpp_dump_s1_{ri_*,prestep,dVsq,dbsfc,blmc_*,diffK*,ghats,viscA,viscAE,dkm1,bldepth}_rank0.txt`) — the M5a-2/3/4
+  reference data is ALREADY GENERATED at `/scratch/a/a270088/kppinit_oracle/kpp_oracle/`. KPP+GM+Redi+linfs runs
+  cleanly in the oracle at 1-rank.
+- **M5a-1 ✅ DONE (byte-exact, first try):** NEW `src/oce/oce_mixing_kpp.F90` (`oce_mixing_kpp_init` builds Vtc/cg/
+  deltaz/deltau + the wmt/wst lookup tables; `wscale`) + NEW driver `src/drivers/fesom_kppdump.F90` (emits the two
+  txt files in the oracle's exact es24.16 format, Ricr=0.3/concv=1.6). FESOM3 vs oracle `kpp_init_rank0.txt`
+  (429949 lines) + `kpp_wscale_rank0.txt` (20302 lines) are **IDENTICAL** (`diff` clean = `max|Δ|=0`; es24.16 =
+  exact double round-trip). Validates the constant arithmetic, the `**1/3`/`1/4`/`1/2` table build (same Intel libm),
+  + the wscale INT()/clamp/interp. NEW-FILE clean rebuild OK; no existing source touched (no regression possible).
+- **M5a-2 ✅ DONE (byte-exact, first try):** `ri_iwmix` (interior Ri-mixing → `viscA`/`diffK` T&S) appended to the
+  CORE2 pressure gate (option (b), the M2-M4 house method — RESOLVED the harness question). It reuses the pressure
+  shim's already-prescribed strong-shear `uvnode` (FESOM3:556 == oracle:476, "Ri factor spans [0,~0.7]") + smoothed
+  `bvfreq`. **`ri_viscA`/`ri_diffKt`/`ri_diffKs` all `max|Δ|=0`; all 70 pre-existing pressure fields still PASS;
+  ctest 13/13** (`tools/run_pressure_gate_core2.sh` now 73 fields). Non-trivial: `ri_viscA` max=5.10e-3 (=visc_sh_limit
+  +A_ver ⇒ frit=1 reached), `ri_diffKt/s` max=5.01e-3 — the full shear-instability shape range exercised. KEY: the L29
+  divide is kept scalar via local POINTERS (`vA/dK` like `oce_mixing_pp`), and `AMAX1`/`AMIN1` kept VERBATIM (REAL
+  intrinsics — Fortran↔Fortran is exact; the C port's 1e-9 drift was from mapping them to fmax). `ri_iwmix` loops
+  OWNED nodes (`nNodO`, the oracle's `myDim_nod2D`); optional-`partit` from the start (M5d-ready). Changed: FESOM3
+  `oce_mixing_kpp.F90` (+ri_iwmix), `mod_param_phys.F90` (+`diff_sh_limit`), `fesom_pressuredump.F90` (call+dump);
+  oracle `oce_ale_mixing_kpp.F90` (`public ri_iwmix`), `fesom_pressure_dump.F90` (call+dump). Both rebuilt; the
+  pressure gate's 70-field no-regression confirms the oracle rebuild didn't shift the dynamical core.
+- **M5a-3 ✅ DONE (byte-exact, first try, 2026-06-24):** the KPP driver prestep (dVsq/ustar/Bo) + `dbsfc`(pressure_bv)
+  + `bldepth` (the C-port HIGHEST-RISK routine: bulk-Ri accumulation + sw interp + ekman/monob limit) appended to BOTH
+  pressure gates. **All 11 new fields `max|Δ|=0` on pi (3140) AND CORE2 (126858): `kpp_stress`/`kpp_sw3d` (inputs) +
+  `kpp_dVsq`/`kpp_dbsfc`/`kpp_ustar`/`kpp_Bo` (prestep+dbsfc) + `kpp_hbl`/`kpp_kbl`/`kpp_bfsfc`/`kpp_stable`/`kpp_caseA`
+  (bldepth outputs).** NON-VACUOUS: hbl spans 0.13→1180 m, BOTH forcing branches fire (57485 stable / 69373 unstable
+  nodes on CORE2). Implementation:
+  - **`bldepth`** ported into `src/oce/oce_mixing_kpp.F90` (explicit-dataflow args, optional-`partit`, owned-node loops;
+    `smooth_hbl=.false.` ⇒ no exchange). All divides are scalar (inner nz-loop EXITs at the Rib crossing + calls
+    `wscale`) ⇒ NO L29 SIMD trap; `SIGN`/`AMIN1` kept VERBATIM. Calls the M5a-1 `wscale`/tables.
+  - **`dbsfc`** added as an OPTIONAL output of `pressure_bv` (`oce_pressure_bv.F90`): a separate `!DIR$ NOVECTOR` loop
+    (scalar divide, matching the oracle's db_max-reduction density loop), guarded by `present(dbsfc)` so the
+    lifecycle/step callers (dbsfc absent) are byte-neutral. The gate driver passes it on the smoothed `pressure_bv`
+    call. Faithful to FESOM2 `oce_ale_pressure_bv.F90:326-339` (`-g*(rho_surf-rho_full)/rho_full`).
+  - **Harness (the M5a-2 method, option (b)):** BOTH shims prescribe surface fluxes (`heat_flux`=200·.../`water_flux`/
+    `stress_node_surf`) + a physical decaying `sw_3d` (exp(zbar/20), surface ~2.4e-5 K m/s) ANALYTICALLY (byte-identical
+    formula, M3b style; NOT `cal_shortwave_rad` — that wiring is M5c) so Bo spans both signs. Compute dVsq/ustar/Bo
+    inline (the oce_mixing_KPP prestep, verbatim both sides), then call `bldepth`. Oracle: `bldepth`+`dVsq`/`ustar`/
+    `bfsfc`/`stable`/`caseA`/`kbl` made PUBLIC; `dbsfc` filled by enabling `mix_scheme_nmb=1` + `oce_mixing_kpp_init`
+    (allocates the KPP arrays) around the smoothed `pressure_bv`; `sw_3d` allocated in-shim (forcing-init is later).
+  - ⚠️ **META-LESSON (uninit-memory gate fragility):** the oracle shim allocated `fer_tapfac` (M4a) WITHOUT init →
+    its below-bottom region was uninitialised garbage that COINCIDENTALLY matched FESOM3's 0.0. My new
+    `oce_mixing_kpp_init` (allocated ~11 arrays before the `fer_tapfac` alloc) shifted the heap → `fer_tapfac`
+    below-bottom became 1.0 on pi (CORE2 still 0.0). FIX: `fer_tapfac = 0.0_WP` after the alloc (matches FESOM3,
+    deterministic). The consumed fields (`slope_tapered`/`neutral_slope`/`sigma_xy`) all stayed `max|Δ|=0` — it was
+    a dump-only below-bottom artifact, not a physics bug. **Lesson: any shim array that's dumped+gated must be
+    explicitly initialised below-bottom (don't rely on fresh-alloc memory); a later allocation can shift the heap.**
+  - **No regression:** pi pressure gate (now incl. fer_tapfac fix) + CORE2 pressure gate (84 fields) + 1-rank step-65
+    + CORE2 lifecycle 195 + ctest 13/13 all `max|Δ|=0`/green. FESOM3 changed: `oce_mixing_kpp.F90` (+bldepth),
+    `oce_pressure_bv.F90` (+dbsfc), `fesom_pressuredump.F90` (M5a-3 block). Oracle (uncommitted): `oce_ale_mixing_kpp.F90`
+    (public bldepth+arrays), `fesom_pressure_dump.F90` (M5a-3 block + fer_tapfac init) + `libfesom.so` rebuilt.
+- **M5a-4 ✅ DONE (byte-exact, first try, 2026-06-24) → M5a COMPLETE (isolated KPP module gate closed).** `blmix_kpp`
+  (BL mixing coeffs `blmc(3)` + `dkm1(3)` + nonlocal `ghats`, eqn 10/11/20: T uses diffK(1)→blmc(2), S diffK(2)→blmc(3),
+  mom diffK→blmc(1)) + `enhance` (kbl-1 interface blend) + the driver tail (combine: within-BL `max(.,blmc)`, outside
+  `ghats=0`; node→elem viscAE average + `minmix=3e-3` surface floor) appended to BOTH pressure gates. **All 11 new
+  fields `max|Δ|=0` on pi (3140) AND CORE2 (126858): `kpp_blmc1/2/3` + `kpp_dkm1m/t/s` + `kpp_ghats` + final
+  `kpp_viscA`/`kpp_diffKt`/`kpp_diffKs` + `kpp_viscAE`** (the pressure gates now total **95 fields** each). Implementation:
+  - **`blmix_kpp` + `enhance`** ported into `src/oce/oce_mixing_kpp.F90` (explicit-dataflow args — `blmc`/`ghats`/`dkm1`
+    passed in, vs the oracle's module arrays — optional-`partit`, owned-node loops; `blmc` pre-zeroed over owned+halo
+    like the oracle). They read the M5a-2 `viscA_ri`/`diffK_ri` (interior) + the M5a-3 `hbl`/`kbl`/`bfsfc`/`stable`/
+    `caseA`/`ustar` — all byte-proven, so blmix consumes them directly. **NO L29 NOVECTOR needed** (first try): every
+    blmix divide (`/dthick`, `/(hbl+epsln)`, `/(wm+epsln)`, `/(ws+epsln)`) is SCALAR per-node — the inner nz-loop EXITs
+    at kbl + calls `wscale`, and enhance's `delta` is one scalar divide; `AMIN1`/`MIN`/`INT`/`ABS`/`SIGN` kept VERBATIM.
+  - **Combine + node→elem viscAE average** done INLINE in BOTH shims (the M5a-3 prestep pattern), operating on SEPARATE
+    copies `viscA_fin`/`diffK_fin` so the M5a-2 `ri_viscA`/`ri_diffKt`/`ri_diffKs` dumps still echo the interior (the
+    combine overwrites viscA/diffK in place in the real driver; the copies isolate the two gate points). `viscAE` is the
+    `pp_Av`-style element field (`SUM(viscA_fin(nz,elnodes))/3`, gid-order byte-exact at 1-rank); `kpp_ghats` is the
+    post-combine nonlocal flux (== post-enhance here: blmix only writes nz<kbl, combine only zeros nz≥kbl which were
+    already 0). Oracle: `blmix_kpp`/`enhance`/`dkm1` made PUBLIC (like `bldepth`); the shim calls them on `viscA_ri`/
+    `diffK_ri` (`blmc`/`ghats`/`dkm1` already allocated+zeroed by the M5a-3 `oce_mixing_kpp_init`).
+  - **No regression:** pi pressure gate (95) + CORE2 pressure gate (95) + ctest 13/13 + step-65 1-rank (65) all
+    `max|Δ|=0`/green; the heap-shift-sensitive `tsol_*` + `fer_tapfac` (L:M5a-3) stayed byte-exact on BOTH meshes.
+    FESOM3 changed: `oce_mixing_kpp.F90` (+blmix_kpp/+enhance), `fesom_pressuredump.F90` (M5a-4 block + 11 dumps).
+    Oracle (uncommitted): `oce_ale_mixing_kpp.F90` (public blmix_kpp/enhance/dkm1), `fesom_pressure_dump.F90` (M5a-4
+    block + 11 dumps) + `libfesom.so` rebuilt.
+- **M5b ✅ DONE (2026-06-24) — KPP wired into `step_oce`; UNFORCED CORE2 lifecycle byte-exact.** `max|Δ|=0` KPP-alone
+  195 (3-step) + 325 (5-step) AND KPP+GM+Redi 195 (`tools/run_lifecycle_kpp_gate_core2.sh [run] [nsteps]`, env
+  `FER_GM=1`/`REDI=1`). NEW `oce_mixing_kpp_driver` (renamed from `oce_mixing_KPP` to dodge the case-insensitive clash
+  with the module name) + KPP `dyn%work` arrays (allocated only when KPP, not serialized) + `mix_scheme_nmb==1` dispatch
+  in `mod_step_oce` (pressure_bv `dbsfc=`; `sw_alpha_beta` fires for `Fer_GM.or.Redi.or.is_kpp`; `Kv=Kv_double(:,:,1)`
+  over `nNodL` then `mo_convect`; `Av`/viscAE element-based → `impl_vert_visc` UNCHANGED). `step_oce` gained an OPTIONAL
+  `stress_node_surf(2,nod)` (KPP ustar; unforced⇒0, passed unallocated for PP⇒seen absent). The reduced-M2 drivers now
+  pin `mix_scheme_nmb=2` (the new dispatch defaults to KPP=1). `FESOM3_MIX_KPP` env in `fesom_lifecycle` (mix_scheme_nmb=1
+  + `use_sw_pene=.false.` + work_core DOUBLES + alloc + `oce_mixing_kpp_init`); oracle `run_lifecycle_core2.sh` `MIX_KPP=1`
+  KEEPS `mix_scheme='KPP'` (NO oracle source change). **ROOT-CAUSE (L45): the ONE step beyond M5a-4 was
+  `smooth_blmc=.true.`** (oracle `:439-449`: 3 area-weighted `smooth_nod` sweeps × the 3 `blmc` channels, BEFORE the
+  combine) — the M5a-4 isolated gate called `blmix`/`enhance`/combine DIRECTLY so never exercised it; omitting it diverged
+  ~1e-3 in Kv at the kbl-1 BL level. Fixed by reusing the M2.1 byte-proven `smooth_nod` (made public in `oce_pressure_bv`;
+  == FESOM2 `gen_support.F90` `smooth_nod3D`). **No regression:** PP step-65 1-rank + dist_2 + PP lifecycle 195 +
+  CORE2/pi pressure (95) + ctest 13/13 all `max|Δ|=0`. *(Historical M5b plan follows.)*
+- **M5b PLAN (done above):** the isolated KPP module is fully byte-proven — now ASSEMBLE the driver + wire it into the step.
+  Build the real `oce_mixing_KPP` driver in `oce_mixing_kpp.F90` (prestep dVsq/ustar/Bo + `ri_iwmix` → `bldepth` →
+  `blmix_kpp` → `enhance` → combine → node→elem viscAE average — all four sub-kernels already byte-proven, so this is
+  assembly, not new physics) taking `viscAE`(elem)+`Kv_double`(node,ntr); add KPP arrays (`Kv_double`/`ghats`/`blmc`/
+  `hbl`/`kbl`/`dbsfc`/`dVsq`/`ustar`/`Bo`/`bfsfc`/`stable`/`caseA`/`dkm1`) to `dyn%work`, allocated only when KPP.
+  Dispatch in `mod_step_oce` (`oce_ale.F90:3711`): after the producers call `oce_mixing_KPP`, then `Kv(:,n)=
+  Kv_double(:,n,1)` (single T-channel Kv → the tracer TDMA is UNCHANGED), then `mo_convect` (already ported). `Av`=
+  viscAE stays element-based → `impl_vert_visc` UNCHANGED. `dbsfc` is already the optional pressure_bv output (M5a-3);
+  wire it through `dyn%work`. Gate the UNFORCED CORE2 lifecycle `max|Δ|=0` (unforced ⇒ zero surface flux + sw ⇒
+  ghats=0, sw_3d=0 ⇒ tests the KPP Kv/Av integration + mo_convect-after-KPP). M5c adds the ghats + sw_3d tracer terms
+  (forced/native); M5d multi-rank (the kernels are optional-`partit` from the start → pure wiring, the M4f lesson).
+
+**M4 (GM/Redi) ✅ COMPLETE + COMMITTED (tag `m4`).** Byte-exact `max|Δ|=0` 1-rank AND multi-rank (CORE2 dist_2/dist_8),
+unforced AND forced/fully-native, GM-only AND GM+Redi, BOTH whichEVP. Gates: `run_lifecycle_gm_gate_core2.sh` (M4c),
+`run_lifecycle_redi_gate_core2.sh` (M4d), `run_lifecycle_gmredi_native_gate_core2.sh` (M4e),
+`run_lifecycle_gmredi_native_gate_multirank.sh` (M4f). M4 enabled by env: FESOM3 drivers read `FESOM3_FER_GM`/
+`FESOM3_REDI`; oracle runners read `FER_GM=1`/`REDI=1` to KEEP work_core `Fer_GM`/`Redi=.true.`.
 
 **M4f KEY FINDING (the M4 capstone):** the M4 routines were ALREADY MULTI-RANK READY — every kernel was transcribed
 (M4a–M4d) with the M2.12/M3 optional-`partit` pattern (owned-loop bounds + the FESOM2 halo exchanges), and
@@ -580,9 +719,11 @@ Regression sanity (re-run any time — e.g. after a rebuild; all `max|Δ|=0`/gre
                                                                  # --clean only when NEW files were added (L19)
 bash tools/run_step_gate.sh                      # 65 records, worst |Δ|=0 (1-rank)
 bash tools/run_step_gate_multirank.sh 2          # 65 records, worst |Δ|=0
-bash tools/run_pressure_gate.sh                  # 57 fields, max|Δ|=0 (1-rank)
-bash tools/run_pressure_gate_core2.sh            # M4a+M4b: 70 fields incl. fer_K/c/gamma/uv/w, max|Δ|=0 (CORE2)
+bash tools/run_pressure_gate.sh                  # pi 1-rank, 95 fields, max|Δ|=0 (incl. M5a-2/3/4 kpp_* + fer_tapfac fix)
+bash tools/run_pressure_gate_core2.sh            # CORE2 95 fields incl. M4a/b fer_* + M5a-2 ri_* + M5a-3/4 kpp_* (bldepth+blmix+enhance+viscAE), max|Δ|=0
 bash tools/run_lifecycle_gate_core2.sh           # GM/Redi-OFF lifecycle 195 records (no-regression baseline)
+bash tools/run_lifecycle_kpp_gate_core2.sh 3     # M5b: KPP-alone unforced lifecycle 195, max|Δ|=0 (CORE2 1-rank)
+FER_GM=1 REDI=1 bash tools/run_lifecycle_kpp_gate_core2.sh 3  # M5b: KPP+GM+Redi 195, max|Δ|=0 (production combo)
 bash tools/run_lifecycle_gm_gate_core2.sh        # M4c: GM bolus lifecycle 195 records, max|Δ|=0 (CORE2 1-rank)
 bash tools/run_lifecycle_redi_gate_core2.sh      # M4d: GM+Redi lifecycle 195 records, max|Δ|=0 (CORE2 1-rank)
 bash tools/run_lifecycle_fullynative_gate_core2.sh        # M3f: GM/Redi-OFF fully-native lifecycle 195 (no-regr)

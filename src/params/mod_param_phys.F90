@@ -66,6 +66,7 @@ module mod_param_phys
 
     ! --- &oce_dyn: vertical mixing scheme ---
     real(kind=WP) :: visc_sh_limit = 5.0e-3_WP     ! oce_modules.F90:76
+    real(kind=WP) :: diff_sh_limit = 5.0e-3_WP     ! oce_modules.F90:77 (KPP shear diff, tracer_phys)
     character(25) :: mix_scheme    = 'KPP'         ! oce_modules.F90:81 'KPP','PP','TKE'
     real(kind=WP) :: Ricr          = 0.3_WP        ! oce_modules.F90:83
     real(kind=WP) :: concv         = 1.6_WP        ! oce_modules.F90:84

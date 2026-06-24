@@ -1933,3 +1933,51 @@ The reusable lessons:
   entered ⇒ arrays unallocated ⇒ `step_oce`'s `Fer_GM`/`Redi`-guards short-circuit); (b) the SHARED oracle runner
   (`run_lifecycle_forced_core2.sh`, used by M3f's gates too) must still sed `Fer_GM`/`Redi` OFF by default. Confirmed by
   re-running the GM/Redi-OFF fully-native gate (1-rank AND dist_2) `max|Δ|=0` + the M4d unforced GM+Redi gate + ctest 13/13.
+
+## L45 — Wiring KPP into the step (M5b): an isolated-kernel gate that calls sub-kernels DIRECTLY skips the driver's own glue steps — the live driver exposed the missing `smooth_blmc` as a ~1e-3 Kv drift
+
+**Context.** M5a byte-proved the whole KPP module (init/wscale/ri_iwmix/bldepth/blmix_kpp/enhance) `max|Δ|=0` on pi AND
+CORE2 — 95 pressure-gate fields, all four sub-steps first try. M5b assembled the real `oce_mixing_kpp_driver` (prestep →
+ri_iwmix → bldepth → blmix → enhance → combine → node→elem viscAE average) + the `mix_scheme_nmb==1` dispatch in
+`step_oce`, and gated the UNFORCED CORE2 lifecycle. The KPP-alone gate diverged at step 1, substep 4 (MIXING) — `Kv`
+`|Δ|=9.6e-4`, "close but not byte-exact," ~12/65 records, localized to specific nodes.
+
+**The hunt (a textbook bisection).** The PP path was byte-exact and every M5a kernel was byte-proven *individually*, so
+deterministic code + identical inputs ⇒ identical output. A divergence therefore means an INPUT differs. Bisecting:
+- Compared `Kv` (post-`mo_convect`, the dumped field) vs `Kv_double` (pre-`mo_convect`): `Kv_double` MATCHED at the probe
+  node, `Kv` didn't → suspected `mo_convect`. But `mo_convect`'s namelist + inputs matched, so that was a red herring.
+- Printed the FULL column: the divergence was a single level — node 1001, **nz=3 = kbl-1**: oracle `diffKt(3)=9.726e-4`,
+  FESOM3 `1e-5`. The `kbl-1` level is exactly what `enhance` writes, so I re-read `enhance` (byte-identical) and worked
+  the algebra BACKWARD: with the dumped `dkm1=0`, `caseA=1`, `diffK=1e-5`, the oracle's 9.7e-4 needs `δ≈4.59`, but the
+  oracle's OWN `hbl=10.498`/`zbar` give `δ≈0.05` → 9.5e-6. **The oracle's final `blmc` was inconsistent with its own
+  `enhance` inputs** ⇒ a step exists BETWEEN enhance and the final dump that I wasn't replicating.
+- That step is `smooth_blmc` (oracle `oce_ale_mixing_kpp.F90:439-449`, default `.true.`): 3 area-weighted `smooth_nod`
+  sweeps × the 3 `blmc` channels, run AFTER enhance, BEFORE the combine. A node's `blmc` becomes a neighbour-smoothed
+  value — which is why node 1001's local 9.5e-6 became 9.7e-4 after smoothing.
+
+**Root cause + fix.** The M5a-4 isolated gate called `blmix_kpp`/`enhance`/combine DIRECTLY (the pressure shim, both
+sides) — it never ran the driver's `smooth_blmc`, so the smoothing was invisible until the live driver. Fix: add the
+`smooth_blmc` block to the driver, reusing the **M2.1 byte-proven** `smooth_nod` (the bvfreq smoother, made `public` in
+`oce_pressure_bv`; it IS FESOM2 `gen_support.F90::smooth_nod3D`). Result: KPP-alone 195+325 + KPP+GM+Redi 195 all
+`max|Δ|=0`, no regression.
+
+**Generalisable.**
+- **An isolated-kernel gate proves the KERNELS, not the DRIVER.** When the gate harness calls sub-kernels directly
+  (`call blmix; call enhance; <inline combine>`), it skips any glue the production driver runs between/around them
+  (`smooth_blmc`, exchanges, in-place-vs-copy, floors). RE-READ the real driver top-to-bottom when assembling it and
+  list EVERY step between the proven calls — don't assume "assembly of proven pieces" is complete.
+- **A new feature's gate may exercise a code path its component gates never hit.** M5a-3/a-4 gated bldepth/blmix with
+  `use_sw_pene=.true.` + nonzero fluxes; the UNFORCED M5b run has `ustar=0`/`bfsfc=0`/`use_sw_pene=.false.` — a different
+  branch set. (Here that wasn't the bug, but it's why "all kernels green" didn't imply "driver green.")
+- **Bisect a "close but not exact" drift to a SINGLE (node, level), then work the local formula BACKWARD.** Solving
+  `enhance` for the δ the oracle's output implies, and finding it contradicted the oracle's own geometry, is what proved
+  the difference was UPSTREAM of enhance (a missing step) rather than a transcription error IN enhance — far faster than
+  re-diffing every kernel.
+- **The oracle's built-in instrumentation is the fastest bisection tool.** `FESOM_KPP_DUMP_DIR`/`FESOM_KPP_DUMP_STEP=1`
+  dumped every KPP intermediate (dVsq/dbsfc/ri_*/bldepth/blmc_*/dkm1/final) gid-keyed es24.16 — comparing per-node-per-
+  level localised the divergence to one cell in minutes vs instrumenting the F3 side blind.
+- **House-keeping traps cleared in passing:** the driver subroutine `oce_mixing_KPP` clashed (case-insensitive) with the
+  module name `oce_mixing_kpp` (ifort #6645) → renamed `oce_mixing_kpp_driver`. And adding a `mix_scheme_nmb==1` dispatch
+  means every reduced-M2 driver must now PIN `mix_scheme_nmb=2` (the o_PARAM default is 1=KPP) or it silently reroutes the
+  PP gates to KPP. Passing an UNALLOCATED allocatable to an optional dummy = "absent" (F2008) is the clean way to make one
+  shared `step_oce` call serve both PP (no `stress_node_surf`) and KPP.

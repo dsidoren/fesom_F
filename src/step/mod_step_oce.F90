@@ -52,9 +52,11 @@ module mod_step_oce
                                   DUMP_SUBSTEP_THICKNESS
     use oce_pressure_bv,    only: pressure_bv, sw_alpha_beta, compute_sigma_xy, compute_neutral_slope
     use oce_fer_gm,         only: init_Redi_GM, fer_solve_Gamma, fer_gamma2vel
-    use mod_param_phys,     only: Fer_GM, Redi
+    use mod_param_phys,     only: Fer_GM, Redi, mix_scheme_nmb
+    use mod_part_bounds,    only: owned_bounds
     use oce_pgf,            only: pressure_force_4_linfs_fullcell
     use oce_ale_mixing_pp,  only: oce_mixing_pp
+    use oce_mixing_kpp,     only: oce_mixing_kpp_driver
     use oce_mo_conv,        only: mo_convect
     use oce_dyn_velrhs,     only: compute_vel_rhs
     use oce_dyn_visc,       only: viscosity_filter
@@ -72,7 +74,7 @@ contains
 
     subroutine step_oce(n, dt, lfirst, dynamics, tracers, mesh, &
                         Ki, heat_flux, water_flux, virtual_salt, relax_salt, &
-                        real_salt_flux, is_nonlinfs, stress_surf, partit)
+                        real_salt_flux, is_nonlinfs, stress_surf, partit, stress_node_surf)
         integer,        intent(in)            :: n        ! step number (dump key)
         real(kind=WP),  intent(in)            :: dt
         logical,        intent(in)            :: lfirst   ! first Euler step (ff=1.0)
@@ -87,6 +89,14 @@ contains
         real(kind=WP),  intent(in) :: stress_surf(2, mesh%elem2D)
         ! M2.12c: optional multi-rank partition (absent => 1-rank verbatim).
         type(t_partit), intent(in), optional :: partit
+        ! M5 KPP: the surface stress on NODES (oce_fluxes_mom output). Required when KPP
+        ! (mix_scheme_nmb==1) -> ustar; absent ⇒ PP path, never read. Unforced ⇒ zero.
+        real(kind=WP),  intent(in), optional :: stress_node_surf(2, mesh%nod2D)
+
+        logical :: is_kpp
+        integer :: node, nNodO, nNodL, nEdgeO, nElemO
+
+        is_kpp = (mix_scheme_nmb == 1)
 
         !_______________________________________________________________________
         ! nodal velocity (the REAL uvnode source, was prescribed at M2.8)
@@ -96,10 +106,20 @@ contains
         ! EOS density, hydrostatic pressure, N^2 (+ horizontal smoothing: the caller
         ! pins N2smth_h=.true.). Writes dyn%work%density_m_rho0/hpressure/bvfreq; the
         ! below-bottom rows keep their setup value (0), as in FESOM2 at n=1.
-        call pressure_bv(tracers%data(1)%values, tracers%data(2)%values, &
-                         dynamics%work%density_ref, mesh, &
-                         dynamics%work%density_m_rho0, dynamics%work%hpressure, &
-                         dynamics%work%bvfreq, partit)
+        ! KPP needs the surface-referenced buoyancy difference dbsfc (pressure_bv optional
+        ! output, M5a-3); the PP path leaves it absent (byte-neutral). partit is positional
+        ! arg 8 so dbsfc is passed by keyword.
+        if (is_kpp) then
+            call pressure_bv(tracers%data(1)%values, tracers%data(2)%values, &
+                             dynamics%work%density_ref, mesh, &
+                             dynamics%work%density_m_rho0, dynamics%work%hpressure, &
+                             dynamics%work%bvfreq, partit, dbsfc=dynamics%work%dbsfc)
+        else
+            call pressure_bv(tracers%data(1)%values, tracers%data(2)%values, &
+                             dynamics%work%density_ref, mesh, &
+                             dynamics%work%density_m_rho0, dynamics%work%hpressure, &
+                             dynamics%work%bvfreq, partit)
+        end if
         call dump_node(DUMP_SUBSTEP_PRESSURE_BV, n, 'density',  dynamics%work%density_m_rho0, mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_PRESSURE_BV, n, 'pressure', dynamics%work%hpressure,      mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_PRESSURE_BV, n, 'bvfreq',   dynamics%work%bvfreq,         mesh%nlevels_nod2D)
@@ -110,12 +130,16 @@ contains
                                              dynamics%work%pgf_x, dynamics%work%pgf_y, partit)
 
         !_______________________________________________________________________
-        ! M4 GM/Redi producers: sw_alpha_beta -> sigma_xy (feeds the GM streamfunction +, for
-        ! Redi, compute_neutral_slope -> slope_tapered/fer_tapfac). FESOM2 oce_ale.F90:3673-3682,
-        ! after PGF, before mixing. Guarded by Fer_GM.or.Redi (GM/Redi-off step unchanged).
-        if (Fer_GM .or. Redi) then
+        ! M4/M5 producers: sw_alpha_beta (EOS expansion coeffs) feeds KPP (Bo), the GM
+        ! streamfunction (via sigma_xy) and, for Redi, compute_neutral_slope. FESOM2
+        ! oce_ale.F90:3673-3682 calls it unconditionally; here it fires for KPP.or.GM.or.Redi
+        ! (the reduced PP/no-GM step leaves sw_alpha untouched). sigma_xy/neutral_slope are
+        ! GM/Redi-only (KPP does not read them) so they stay Fer_GM.or.Redi-guarded.
+        if (Fer_GM .or. Redi .or. is_kpp) then
             call sw_alpha_beta(tracers%data(1)%values, tracers%data(2)%values, mesh, &
                                dynamics%work%sw_alpha, dynamics%work%sw_beta, partit)
+        end if
+        if (Fer_GM .or. Redi) then
             call compute_sigma_xy(tracers%data(1)%values, tracers%data(2)%values, &
                                   dynamics%work%sw_alpha, dynamics%work%sw_beta, mesh, &
                                   dynamics%work%sigma_xy, partit)
@@ -125,11 +149,25 @@ contains
         end if
 
         !_______________________________________________________________________
-        ! vertical mixing: PP Richardson-number Kv/Av + convective adjustment.
-        ! oce_mixing_pp fills only interior levels; surface/bottom keep their setup 0
-        ! (cosmetic — the tracer TDMA / impl_vert_visc consume interior Kv/Av only).
-        call oce_mixing_pp(dynamics, mesh, partit)
-        call mo_convect(dynamics, mesh, partit)
+        ! vertical mixing + convective adjustment. FESOM2 oce_ale.F90:3713-3729 dispatches
+        ! on mix_scheme_nmb. KPP (==1): the boundary-layer scheme writes Av (element momentum
+        ! viscosity) + Kv_double (node T/S diffusivity); Av stays element-based so
+        ! impl_vert_visc_ale is UNCHANGED, and Kv = Kv_double(:,:,1) (T channel) so the tracer
+        ! TDMA is UNCHANGED (the same single Kv as PP). PP (else): Richardson-number Kv/Av.
+        ! Both fill only interior levels; surface/bottom keep their setup 0. mo_convect runs after.
+        if (is_kpp) then
+            if (.not. present(stress_node_surf)) &
+                error stop 'step_oce: KPP (mix_scheme_nmb==1) requires stress_node_surf'
+            call oce_mixing_kpp_driver(dynamics, tracers, stress_node_surf, heat_flux, water_flux, mesh, partit)
+            call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+            do node = 1, nNodL
+                dynamics%work%Kv(:, node) = dynamics%work%Kv_double(:, node, 1)
+            end do
+            call mo_convect(dynamics, mesh, partit)
+        else
+            call oce_mixing_pp(dynamics, mesh, partit)
+            call mo_convect(dynamics, mesh, partit)
+        end if
         call dump_node(DUMP_SUBSTEP_MIXING, n, 'Kv', dynamics%work%Kv, mesh%nlevels_nod2D)
 
         !_______________________________________________________________________

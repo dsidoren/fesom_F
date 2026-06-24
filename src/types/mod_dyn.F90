@@ -56,6 +56,24 @@ module mod_dyn
         real(kind=WP), allocatable, dimension(:,:,:) :: neutral_slope, slope_tapered ! (3, nl-1, nod2D)
         real(kind=WP), allocatable, dimension(:,:)   :: fer_tapfac       ! (nl-1, nod2D) Redi/GM slope taper
         real(kind=WP), allocatable, dimension(:,:)   :: Ki               ! (nl-1, nod2D) Redi isopycnal diffusivity
+        ! M5 KPP vertical mixing (oce_mixing_KPP). Recomputed each step; NOT serialized.
+        ! Allocated only when KPP (mix_scheme_nmb==1); the PP step never touches them. Names
+        ! match FESOM2 o_mixing_KPP_mod module arrays. Kv_double(:,:,1)=T channel (-> Kv),
+        ! (:,:,2)=S channel; viscA_kpp = the node momentum viscosity (FESOM2's local viscA)
+        ! averaged node->elem into Av. dbsfc is filled by pressure_bv; sw_3d by cal_shortwave_rad
+        ! (M5c; zero + unused when use_sw_pene=.false.).
+        real(kind=WP), allocatable, dimension(:,:,:) :: Kv_double        ! (nl, nod2D, num_tracers) T/S diffusivity
+        real(kind=WP), allocatable, dimension(:,:)   :: viscA_kpp        ! (nl, nod2D) node momentum viscosity (-> Av)
+        real(kind=WP), allocatable, dimension(:,:,:) :: blmc             ! (nl, nod2D, 3) BL mixing coeffs (mom/T/S)
+        real(kind=WP), allocatable, dimension(:,:)   :: ghats            ! (nl-1, nod2D) nonlocal counter-gradient flux
+        real(kind=WP), allocatable, dimension(:,:)   :: dkm1             ! (nod2D, 3) kbl-1 diffusivities (mom/T/S)
+        real(kind=WP), allocatable, dimension(:,:)   :: dbsfc            ! (nl, nod2D) buoyancy diff wrt surface (pressure_bv)
+        real(kind=WP), allocatable, dimension(:,:)   :: dVsq             ! (nl, nod2D) surface-referenced velocity shear
+        real(kind=WP), allocatable, dimension(:,:)   :: sw_3d            ! (nl, nod2D) penetrating shortwave (M5c)
+        real(kind=WP), allocatable, dimension(:)     :: hbl, bfsfc       ! (nod2D) OBL depth / surface buoyancy forcing
+        real(kind=WP), allocatable, dimension(:)     :: stable, caseA    ! (nod2D) stable flag / caseA flag
+        real(kind=WP), allocatable, dimension(:)     :: ustar, Bo        ! (nod2D) friction velocity / surface buoyancy flux
+        integer,       allocatable, dimension(:)     :: kbl              ! (nod2D) first level below the OBL
     contains
         procedure :: write_dw => write_t_dyn_work
         procedure :: read_dw  => read_t_dyn_work
