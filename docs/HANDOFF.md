@@ -36,9 +36,25 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   `fesom_lifecycle_native_mr` KPP/sw_pene block (LOCAL-sized) + `cal_shortwave_rad`'s optional
   `partit` (loop owned+halo `nNodL`, since the local mesh's `mesh%nod2D` = the GLOBAL count). NO
   regression (ctest 13/13 + 1-rank production + pi M2.10c forcing-gate `sw_3d` all `max|Δ|=0`).
-  **RESUME at M6 (beyond-paper: zstar/zlevel ALE, TKE, aEVP) — see "Milestone ordering".** The
-  whole paper-parity CORE2 production config (KPP + GM + Redi + sw_pene, linfs) is now byte-exact
-  1-rank AND multi-rank.
+  **→ M6 IN PROGRESS (2026-06-24): M6a = zlevel ALE — the LAST reduced-gate downgrade vs the
+  PRODUCTION config (work_core uses `which_ALE='zlevel'`, NOT zstar — read the actual namelist, not
+  the plan summary). So M6a CLOSES TRUE paper-parity; zstar/TKE/aEVP are the genuine beyond-paper
+  M6b/c/d. Plan: `docs/plans/2026-06-24-m6-zlevel.md` (decomposed M6a-1..4).** **M6a-1 (Shchepetkin
+  full-free-surface PGF, `pressure_force_4_zxxxx_shchepetkin`) ✅ DONE — byte-exact `max|Δ|=0` vs
+  FESOM2 on the CORE2 pressure gate (`pgf_x_shchep`/`pgf_y_shchep`, non-vacuous ~3e-5), no regression
+  (97 fields + pi pressure + step-65 + ctest 13/13). NOTE: at rest (η=0, flat full cells)
+  `dz_dx=Σgradient_sca·Z_3d_n≈0` ⇒ Shchepetkin≈linfs to ~1e-17 (they MUST agree on flat layers); the
+  isolated gate validates the full transcription byte-for-byte, the η≠0 stress test (drho_dz/dz_dx
+  + the L29 bulk-divide) is M6a-2.** ⚠️ **Pre-existing m5 BASELINE BUG fixed en route:** the pressure
+  shim set `use_sw_pene=.true.` (for KPP bldepth) but never restored it before the tracer solve, so
+  the M5c `sw_3d` term in `diff_ver_part_impl_ale` read UNALLOCATED `dyn%work%sw_3d` — Release tolerated
+  it by luck (descriptor→zeros) until the heap shifted, then segfaulted (debug `-check all`:
+  "fetch from allocatable SW_3D when not allocated"). FIX: mirror the oracle (`fesom_pressure_dump.F90:653`)
+  — `use_sw_pene=.false.` before the tracer-solve loop. The M5a-3 META-LESSON in action.
+  **RESUME at M6a-2 (zlevel thickness machinery: init_thickness_ale zlevel + update_stiff_mat_ale +
+  vert_vel_ale zlevel + update_thickness_ale live; UNFORCED zlevel lifecycle gate).**
+  The paper config — KPP + GM + Redi + sw_pene — is byte-exact 1-rank AND multi-rank on the reduced
+  `linfs` surface; M6a swaps linfs→zlevel to finish parity.
   (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,
@@ -429,22 +445,54 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
       `dump_shim` is the gate). **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi +
       step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`. ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35).
 
-**↳ RESUME HERE (next session): M5 ✅ COMPLETE (tag `m5`) → M6 (beyond-paper).** The whole CORE2
-paper-parity production config — KPP vertical mixing + GM bolus + Redi isopycnal diffusion + shortwave
-penetration, on the linfs free surface — is byte-exact `max|Δ|=0` vs FESOM2 v2.7.3, 1-rank AND
-multi-rank (CORE2 dist_2 + dist_8), BOTH whichEVP, over the multi-step fully-native FORCED lifecycle.
-M5a (isolated KPP module, 95 fields) + M5b (KPP in step_oce, unforced lifecycle) + M5c (forced/native
-+ sw_pene) + M5d (multi-rank) ALL DONE. Gates: `run_lifecycle_kpp_gate_core2.sh` (M5b unforced),
-`run_lifecycle_kpp_native_gate_core2.sh` (M5c forced/native, 195+325 both EVP),
-`run_lifecycle_kpp_native_gate_multirank.sh` (M5d, dist_2/8), `run_lifecycle_kppnonlcl_native_gate_core2.sh`
-(the dead-by-default ghats nonlocal flux, byte-verified via `KPP_NONLCL=1`). See LESSONS **L46** (+ L45).
+**↳ RESUME HERE (next session): M6a-2 — zlevel thickness machinery (UNFORCED zlevel lifecycle gate).**
+M5 ✅ COMPLETE (tag `m5`). **M6a-1 (Shchepetkin PGF) ✅ DONE** (see "M6 progress" below). Next: port
+`init_thickness_ale`(zlevel) + `update_stiff_mat_ale` (per-step stiffness rebuild, NEW) + `vert_vel_ale`
+(zlevel: hnode_new from `dhbar_total` + Wvel surface correction + local-zstar fallback) +
+`update_thickness_ale` (LIVE; hnode/zbar_3d_n/Z_3d_n commit + `exchange_elem(helem)`); wire the PGF
+dispatch (which_ale → Shchepetkin) + the per-step stiffness update into `mod_step_oce`. Gate the
+UNFORCED zlevel CORE2 lifecycle `max|Δ|=0` (SSH evolves from dynamics ⇒ hnode evolves; water_flux=0 ⇒
+freshwater terms dormant). New gate `tools/run_lifecycle_zlevel_gate_core2.sh`. ⚠️ env.sh KNEM (L35);
+gate every consumed intermediate (L29); read the ACTUAL `.F90` + `work_core` namelists, not the plan
+summaries. Plan: `docs/plans/2026-06-24-m6-zlevel.md`.
 
-**M6 (beyond-paper, per "Milestone ordering"):** zstar/zlevel ALE (production `which_ALE='zlevel'` — M5
-kept the reduced `linfs`), TKE vertical mixing (the oracle has `work_tke_dump`/`work_zstar_tke` staged),
-aEVP (`whichEVP=2`, deferred in M3). The reduced-gate downgrades that remain are `which_ALE` (linfs vs
-zlevel) — everything else in `work_core` is now native. ⚠️ multi-rank levante needs the `env.sh` KNEM
-flag (L35); gate every consumed intermediate (L29); read the ACTUAL `.F90` + `work_core` namelists, not
-the plan summaries (the M4 `MLD1_ind`/`K_hor` + the M5c `use_kpp_nonlclflx` lessons).
+**M6 REFRAMING (the "read the actual namelist" lesson):** production `work_core` uses
+`which_ALE='zlevel'` (NOT zstar — the plan summary was loose). So **M6a = zlevel CLOSES TRUE
+paper-parity** (M5's gate was on the reduced `linfs` surface). zstar (M6b), TKE (M6c, `work_tke_dump`/
+`work_zstar_tke` staged), aEVP (M6d, `whichEVP=2`) are the genuine beyond-paper targets. The only
+reduced-gate downgrade left between the current byte-exact state and full paper-parity is
+`which_ALE` linfs→zlevel.
+
+### M6 progress (zlevel ALE) — scoped + started 2026-06-24. Plan: `docs/plans/2026-06-24-m6-zlevel.md`.
+- **Decomposition:** M6a-1 (Shchepetkin PGF, isolated gate) → M6a-2 (thickness machinery, unforced
+  lifecycle) → M6a-3 (forced/native + real freshwater flux = paper parity, both whichEVP) → M6a-4
+  (multi-rank). Then beyond-paper M6b zstar / M6c TKE / M6d aEVP.
+- **KEY config findings (from the actual namelists):** `which_ALE='zlevel'`, `which_pgf='shchepetkin'`
+  (DEFAULT, `oce_modules.F90:190`; absent from work_core), `min_hnode=0.5`, `lzstar_lev=4` (defaults),
+  `use_partial_cell/use_cavity/use_floatice=.false.` ⇒ all cavity/floatice/partial-cell branches DEAD.
+  `which_ALE/='linfs' ⇒ use_virt_salt=.false.` (`oce_setup_step.F90:120`) ⇒ real freshwater flux
+  replaces virtual salt (M6a-3). `update_stiff_mat_ale` runs per-step for non-linfs (`oce_ale.F90:3921`).
+- **M6a-1 ✅ DONE (byte-exact, first try, 2026-06-24):** NEW `pressure_force_4_zxxxx_shchepetkin` in
+  `src/oce/oce_pgf.F90` (Shchepetkin & McWilliams density-Jacobian PGF, FESOM2 `oce_ale_pressure_bv.F90:
+  2104-2339; self-contained, NO hpressure). Gated via the CORE2 pressure shim (env `FESOM3_PGF_SHCHEP`/
+  `FESOM_PGF_SHCHEP`, dumps `pgf_x_shchep`/`pgf_y_shchep`): **`max|Δ|=0` vs FESOM2, non-vacuous
+  (~3.1e-5/2.8e-5)**, 97 fields total. NOTE: at rest (η=0, flat full cells) `dz_dx=Σgradient_sca·Z_3d_n
+  ≈0` (Z_3d_n horizontally constant) ⇒ Shchepetkin≈linfs to ~1e-17 — they MUST agree on flat layers;
+  the isolated gate validates the transcription byte-for-byte vs the oracle, but the η≠0 stress test
+  (where the `drho_dz`/`dz_dx` Newton-interp terms + the length-3 array divides actually contribute —
+  the L29 watch) is M6a-2. NO NOVECTOR needed (gate byte-exact as-is). The optional-`partit` owned loop
+  is M6a-4-ready. Changed: `oce_pgf.F90`, `fesom_pressuredump.F90` (+shchep dump + the BASELINE FIX
+  below), `run_pressure_gate_core2.sh`/`run_pressuredump_core2.sh` (env). Oracle (uncommitted):
+  `fesom_pressure_dump.F90` (+shchep dump).
+- **⚠️ PRE-EXISTING m5 BASELINE BUG fixed en route (L47-worthy):** the CORE2/pi pressure shim set
+  `use_sw_pene=.true.` (M5a-3, for KPP bldepth) but NEVER restored it before the M2.9a tracer solve, so
+  the M5c `sw_3d` term in `diff_ver_part_impl_ale` (`if(use_sw_pene .and. id==1)`) read **UNALLOCATED**
+  `dyn%work%sw_3d`. The Release build read it benignly (descriptor→zeros) at m5-commit time, but a heap
+  re-layout (a later run/build) flipped it to unmapped memory → SEGFAULT (debug `-check all`: "Attempt
+  to fetch from allocatable variable SW_3D when it is not allocated", `oce_ale_tracer.F90:665`). FIX:
+  mirror the oracle (`fesom_pressure_dump.F90:653`) — set `use_sw_pene=.false.` right before the
+  tracer-solve loop (the bldepth above already ran; it uses a LOCAL `sw3d_kpp` arg, not the module
+  flag). This is the M5a-3 META-LESSON realized: never rely on fresh-alloc/uninit memory being zero.
 
 ### M5 progress (KPP vertical mixing + sw_pene) — scoped + started 2026-06-24. Plan: `docs/plans/2026-06-24-m5-kpp.md`.
 - **Decomposition:** M5a (producers, isolated gate; sub-stepped a1–a4 mirroring the C-port K1–K8) →
@@ -788,7 +836,7 @@ Regression sanity (re-run any time — e.g. after a rebuild; all `max|Δ|=0`/gre
 bash tools/run_step_gate.sh                      # 65 records, worst |Δ|=0 (1-rank)
 bash tools/run_step_gate_multirank.sh 2          # 65 records, worst |Δ|=0
 bash tools/run_pressure_gate.sh                  # pi 1-rank, 95 fields, max|Δ|=0 (incl. M5a-2/3/4 kpp_* + fer_tapfac fix)
-bash tools/run_pressure_gate_core2.sh            # CORE2 95 fields incl. M4a/b fer_* + M5a-2 ri_* + M5a-3/4 kpp_* (bldepth+blmix+enhance+viscAE), max|Δ|=0
+bash tools/run_pressure_gate_core2.sh            # CORE2 97 fields incl. M4a/b fer_* + M5a-2 ri_* + M5a-3/4 kpp_* + M6a-1 pgf_*_shchep (Shchepetkin zlevel PGF), max|Δ|=0
 bash tools/run_lifecycle_gate_core2.sh           # GM/Redi-OFF lifecycle 195 records (no-regression baseline)
 bash tools/run_lifecycle_kpp_gate_core2.sh 3     # M5b: KPP-alone unforced lifecycle 195, max|Δ|=0 (CORE2 1-rank)
 FER_GM=1 REDI=1 bash tools/run_lifecycle_kpp_gate_core2.sh 3  # M5b: KPP+GM+Redi 195, max|Δ|=0 (production combo)

@@ -18,6 +18,7 @@ source "$F3/env.sh" intel >/dev/null 2>&1
 export FESOM3_MESH_DIR="$COREMESH"
 export FESOM3_STEP_PER_DAY=48
 export FESOM3_PRESSURE_OUT="$RUN/pressure_f3.bin"
+export FESOM3_PGF_SHCHEP=1          # M6a-1: also dump the zlevel Shchepetkin PGF (pgf_*_shchep)
 ulimit -s unlimited
 mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n 1 \
     "$F3/build_intel_dp/bin/fesom_pressuredump" >/dev/null 2>&1

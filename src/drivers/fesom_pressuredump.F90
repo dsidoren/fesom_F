@@ -28,7 +28,7 @@ program fesom_pressuredump
                                 K_GM_resscalorder, K_GM_cm, K_GM_cmin, K_GM_Ktaper, &
                                 scaling_Ferreira, scaling_Rossby, scaling_resolution, &
                                 scaling_FESOM14, scaling_GMzexp, scaling_GINsea, GMzexp_zref, GMzexp_smin
-    use oce_pgf,          only: pressure_force_4_linfs_fullcell
+    use oce_pgf,          only: pressure_force_4_linfs_fullcell, pressure_force_4_zxxxx_shchepetkin
     use oce_dyn_velrhs,   only: compute_vel_rhs
     use oce_dyn_visc,     only: viscosity_filter
     use oce_dyn_ivertvisc, only: impl_vert_visc_ale
@@ -74,6 +74,10 @@ program fesom_pressuredump
     real(kind=WP), allocatable :: temp(:,:), salt(:,:), density_ref(:,:)
     real(kind=WP), allocatable :: density(:,:), hpressure(:,:), bvfreq(:,:)
     real(kind=WP), allocatable :: bvfreq_raw(:,:), pgf_x(:,:), pgf_y(:,:)
+    ! --- M6a-1: Shchepetkin full-free-surface PGF (which_ALE='zlevel', which_pgf='shchepetkin') ---
+    real(kind=WP), allocatable :: pgf_x_shchep(:,:), pgf_y_shchep(:,:)
+    character(len=256) :: env_shchep
+    logical            :: do_shchep
     ! --- M2.3 vel_rhs (Coriolis + AB2 + PGF + SSH gradient) + M2.4 momentum advection ---
     type(t_dyn) :: dyn
     real(kind=WP), allocatable :: uv_in(:,:,:), uv_rhsAB_prev(:,:,:)
@@ -272,6 +276,18 @@ program fesom_pressuredump
     allocate(pgf_x(nl-1, mesh%elem2D), pgf_y(nl-1, mesh%elem2D))
     pgf_x = 0.0_WP; pgf_y = 0.0_WP
     call pressure_force_4_linfs_fullcell(hpressure, mesh, pgf_x, pgf_y)
+
+    ! M6a-1: the full-free-surface (which_ALE='zlevel') Shchepetkin PGF, run on the
+    ! SAME prescribed rest state (eta=0 -> Z_3d_n=initial, so non-vacuous for the
+    ! ALGORITHM regardless of eta). Env-gated (FESOM3_PGF_SHCHEP=1) and dumped under
+    ! separate field names so the proven linfs pgf_x/pgf_y gate is byte-unaffected.
+    call get_environment_variable('FESOM3_PGF_SHCHEP', env_shchep)
+    do_shchep = (len_trim(env_shchep) > 0)
+    allocate(pgf_x_shchep(nl-1, mesh%elem2D), pgf_y_shchep(nl-1, mesh%elem2D))
+    pgf_x_shchep = 0.0_WP; pgf_y_shchep = 0.0_WP
+    if (do_shchep) then
+        call pressure_force_4_zxxxx_shchepetkin(density, mesh, pgf_x_shchep, pgf_y_shchep)
+    end if
 
     ! ============== M2.3 vel_rhs assembly + M2.4 momentum advection ==============
     ! Coriolis + AB2 + PGF + SSH-gradient + momentum advection (momadv_opt=2). Build a
@@ -822,6 +838,15 @@ program fesom_pressuredump
     tracers%data(1)%tra_adv_lim = 'FCT';  tracers%data(1)%i_vert_diff = .true.
     tracers%data(2)%tra_adv_lim = 'FCT';  tracers%data(2)%i_vert_diff = .true.
 
+    ! BASELINE FIX (M6a-1): mirror the oracle (fesom_pressure_dump.F90:653) — restore
+    ! use_sw_pene=.false. BEFORE the tracer solve. The KPP bldepth above needed it .true.
+    ! (line 647), but the M5c diff_ver_part_impl_ale sw_3d term (use_sw_pene .and. id==1)
+    ! reads dyn%work%sw_3d, which this shim never allocates -> it must be OFF here (the
+    ! oracle's tracer solve also runs use_sw_pene=.false.). Without this, the Release build
+    ! read an unallocated allocatable (benign-by-luck at m5 until the heap layout shifted;
+    ! debug -check all flags it deterministically). See the M5a-3 META-LESSON (uninit memory).
+    use_sw_pene = .false.
+
     do tr_num = 1, 2
         tracers%work%del_ttf = del_ttf_in                                  ! prescribed advection tendency
         call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh)  ! M1.1 tr_xy (horiz diff)
@@ -863,6 +888,8 @@ program fesom_pressuredump
     call wr_r2(u, 'fer_tapfac',     real(fer_tapfac,         MP))
     call wr_r2(u, 'pgf_x',          real(pgf_x(1:nl-1, :),   MP))
     call wr_r2(u, 'pgf_y',          real(pgf_y(1:nl-1, :),   MP))
+    call wr_r2(u, 'pgf_x_shchep',   real(pgf_x_shchep(1:nl-1, :), MP))   ! M6a-1
+    call wr_r2(u, 'pgf_y_shchep',   real(pgf_y_shchep(1:nl-1, :), MP))   ! M6a-1
     ! M2.3 vel_rhs + M2.4 momadv: gated coriolis + prescribed inputs (incl. w_e) +
     ! the momadv nodal intermediate (uvnode_rhs) + the full-assembly outputs.
     call wr_r1(u, 'coriolis',       real(mesh%coriolis(1:mesh%elem2D), MP))

@@ -39,6 +39,7 @@ PY
 
 cd "$RUN"
 export FESOM_PRESSURE_DUMP="$OUT"
+export FESOM_PGF_SHCHEP=1          # M6a-1: also dump the zlevel Shchepetkin PGF (pgf_*_shchep)
 ulimit -s unlimited
 echo "run_pressuredump_core2: 1 rank -> $OUT"
 mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n 1 ./fesom.x > "$RUN/run.log" 2>&1 || true

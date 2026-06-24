@@ -2032,3 +2032,30 @@ the KPP module was written optional-`partit` from the start (`oce_mixing_kpp_dri
   — fixed by adding an optional `partit` and looping `nNodL` from `owned_bounds` (absent ⇒ `nNodL=mesh%nod2D`, the 1-rank
   /pi path verbatim). When lifting an OLDER routine to MR, grep it for bare `mesh%nod2D`/`mesh%elem2D` loop bounds — those
   are the global-count landmines; the routines written since M2.12 already use `owned_bounds`/`local_dims`.
+
+## L47 — The Shchepetkin zlevel PGF (M6a-1) byte-matches first try; a latent m5 shim crash (unallocated `sw_3d`) surfaced only when the heap re-laid-out — the M5a-3 META-LESSON realized
+
+**M6a-1 (the full-free-surface Shchepetkin & McWilliams density-Jacobian PGF, `pressure_force_4_zxxxx_shchepetkin`)
+transcribed byte-exact first try** (CORE2 pressure gate, `pgf_x_shchep`/`pgf_y_shchep` `max|Δ|=0`, non-vacuous ~3e-5).
+Two reusable points:
+- **A new algorithm that REDUCES to the proven one in the gate's regime still needs a real byte-gate, but know what it
+  does/doesn't test.** At rest (η=0) with flat full cells, `Z_3d_n(nz,:)` is horizontally constant, so the Shchepetkin
+  surface-slope correction `dz_dx = Σ gradient_sca·Z_3d_n ≈ 0` (sum of a constant times shape-fn derivatives = 0 to ULP)
+  and the scheme collapses to the hydrostatic `drho_dx·helem·g/ρ0` integral = the linfs PGF (the two agreed to ~1e-17).
+  The isolated gate is byte-exact vs the oracle (validates EVERY line incl. the Newton-interp `drho_dz` + the length-3
+  array divides — the L29 watch), but because `drho_dz`'s contribution is `·dz_dx ≈ 0` at rest, a tiny `drho_dz`
+  divergence would be MASKED here. The η≠0 regime (lifecycle, where the surface tilts ⇒ `dz_dx ≠ 0`) is the strong test
+  — defer the divide-stress verification there, and SAY SO in the handoff rather than claiming the rest gate covers it.
+- **A Release build can run for a whole milestone on an unallocated-allocatable read, then segfault later when the heap
+  re-lays-out — exactly the M5a-3 META-LESSON, now with teeth.** The CORE2/pi pressure shim set `use_sw_pene=.true.` (M5a-3,
+  for KPP `bldepth`) but never restored it before the M2.9a tracer solve, so the M5c `sw_3d` term in
+  `diff_ver_part_impl_ale` (`if(use_sw_pene .and. id==1)`) dereferenced UNALLOCATED `dyn%work%sw_3d`. At m5-commit the
+  Release descriptor happened to point at readable zeros (term added 0 ≡ oracle's term-off) so the gate was green; a later
+  run/rebuild shifted the heap so the descriptor pointed at unmapped memory → SIGSEGV (Release backtrace named only
+  `diff_ver_part_impl_ale`; the DEBUG `-check all` pinned it: "Attempt to fetch from allocatable variable SW_3D when it is
+  not allocated", `oce_ale_tracer.F90:665`). FIX: mirror the oracle (`fesom_pressure_dump.F90:653`) — restore
+  `use_sw_pene=.false.` right before the tracer-solve loop (the `bldepth` above already ran and uses a LOCAL `sw3d_kpp`
+  ARG, not the module flag). Generalisable: (i) when a shim flips a global flag for one kernel, restore it before the next
+  kernel that reads it — mirror the oracle's flag lifecycle exactly, don't leave it set; (ii) if a "green" gate suddenly
+  segfaults with NO source change, suspect an uninitialised/unallocated read whose luck ran out on a heap re-layout —
+  reach for the DEBUG `-check all` build first (it converts the silent UB into a named, located error).
