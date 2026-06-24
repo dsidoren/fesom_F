@@ -620,7 +620,8 @@ plan doc `2026-06-18-fesom3-architecture.md`.
 ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35). ⚠️ Gate every consumed intermediate (L29). ⚠️ **Read the
 ACTUAL FESOM2 `.F90` + `work_core` namelists, NOT the plan summaries** (they were wrong on `MLD1_ind` + `K_hor` in M4).
 M3 ✅ COMMITTED (`b591153`, tag `m3`); M4 ✅ COMMITTED (`7a088de`, tag `m4`); the M2 baseline stays at `m2-mvp`.
-**M5a+M5b ✅ COMMITTED (`30760c3`, UNTAGGED — M5c forced/native + sw_pene and M5d multi-rank remain before tag `m5`).**
+**M5a+M5b ✅ COMMITTED (`30760c3`); M5c (forced/native + sw_pene) ✅ COMMITTED (`2fd05b8`) — both UNTAGGED; M5d
+(multi-rank) remains before tag `m5`.**
 
 **Milestone ordering (plan doc `2026-06-18-fesom3-architecture.md`):** M4 = GM/Redi → M5 = KPP + production
 multi-year (paper-parity) → M6 = beyond-paper (zstar/zlevel ALE, TKE, aEVP). mEVP (whichEVP=1) was already
