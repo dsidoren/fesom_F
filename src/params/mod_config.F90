@@ -60,7 +60,13 @@ module mod_config
     namelist /calendar/ include_fleapyear, use_flpyrcheck
 
     ! --- &configuration (subset; gen_modules_config.F90 configuration group) ---
-    logical            :: use_sw_pene = .true.
+    ! use_sw_pene: FESOM2 g_config default is .true., but the FESOM3 byte-gate drivers configure
+    ! physics in-code (they do not read namelist.config), so the in-code default is .false.
+    ! ("unset = off") — a fail-safe: the M5c sw_3d tracer term (diff_ver_part_impl_ale) and the
+    ! KPP bldepth read this flag, and dyn%work%sw_3d is allocated only when sw_pene is enabled, so
+    ! any PP/reduced driver that leaves it unset must see .false. The sw_pene drivers (M5c
+    ! fesom_lifecycle_native, M5a fesom_pressuredump) set it .true. explicitly.
+    logical            :: use_sw_pene = .false.
     logical            :: use_ice     = .false.
     namelist /configuration/ use_sw_pene, use_ice
 

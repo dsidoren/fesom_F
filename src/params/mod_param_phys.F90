@@ -113,6 +113,20 @@ module mod_param_phys
     real(kind=WP) :: windmix_kv    = 1.0e-3_WP     ! oce_modules.F90:157
     integer       :: windmix_nl    = 2             ! oce_modules.F90:158 # near-surface levels
 
+    ! --- M5c: KPP nonlocal counter-gradient flux ---
+    ! (use_sw_pene lives in mod_config — the g_config analog — NOT here; it is read by the KPP
+    !  bldepth and the sw_3d tracer term from the single mod_config source.)
+    ! use_kpp_nonlclflx (oce_modules.F90:168, &tracer_phys): adds the KPP nonlocal counter-gradient
+    !   flux term. ⚠️ DEFAULTS .false. AND is ABSENT from work_core -> the ghats term is DEAD in the
+    !   production CORE2 config (like MLD1_ind/K_hor in M4). The oracle guards it with this flag
+    !   BEFORE the mix_scheme_nmb==1 test (oce_ale_tracer.F90:892). The term is transcribed (faithful
+    !   port) but only fires when explicitly enabled; gated by the KPP_NONLCL=1 variant.
+    logical       :: use_kpp_nonlclflx = .false.   ! oce_modules.F90:168 (&tracer_phys)
+    ! Reference SSS for the KPP nonlocal salinity flux (oce_modules.F90:36-37, work_core
+    ! namelist.tra: ref_sss_local=.true. -> rsss = local surface salinity; ref_sss=34 dead).
+    real(kind=WP) :: ref_sss           = 34.7_WP   ! oce_modules.F90:37
+    logical       :: ref_sss_local     = .false.   ! oce_modules.F90:36
+
 contains
 
     subroutine read_param_phys(nml_path, ierr)

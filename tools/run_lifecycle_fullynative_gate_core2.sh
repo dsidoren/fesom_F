@@ -24,9 +24,14 @@ WHICHEVP="${3:-0}"
 # oracle and the FESOM3 native lifecycle. Default 0 = the proven M3f GM/Redi-off no-regression gate.
 FER_GM="${FER_GM:-0}"
 REDI="${REDI:-0}"
+# M5c: MIX_KPP=1 swaps PP->KPP, SW_PENE=1 turns on shortwave penetration, KPP_NONLCL=1 turns on
+# the ghats nonlocal flux — in BOTH the oracle and the FESOM3 native lifecycle. Defaults 0.
+MIX_KPP="${MIX_KPP:-0}"
+SW_PENE="${SW_PENE:-0}"
+KPP_NONLCL="${KPP_NONLCL:-0}"
 
-echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice; FER_GM=$FER_GM REDI=$REDI)"
-FER_GM="$FER_GM" REDI="$REDI" \
+echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice; FER_GM=$FER_GM REDI=$REDI MIX_KPP=$MIX_KPP SW_PENE=$SW_PENE NONLCL=$KPP_NONLCL)"
+FER_GM="$FER_GM" REDI="$REDI" MIX_KPP="$MIX_KPP" SW_PENE="$SW_PENE" KPP_NONLCL="$KPP_NONLCL" \
     bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" | tail -4
 
 echo "[2/3] FESOM3 FULLY NATIVE lifecycle ($NSTEPS steps, whichEVP=$WHICHEVP) — NO prescribed atmosphere"
@@ -40,6 +45,9 @@ export FESOM3_FLUX_FILE="$RUN/flux_f2.00000"        # native-vs-oracle flux self
 export FESOM3_WHICHEVP="$WHICHEVP"
 if [ "$FER_GM" = 1 ]; then export FESOM3_FER_GM=1; fi   # M4e: GM bolus in the native lifecycle
 if [ "$REDI" = 1 ]; then export FESOM3_REDI=1; fi       # M4e: Redi isopycnal diffusion
+if [ "$MIX_KPP" = 1 ]; then export FESOM3_MIX_KPP=1; fi # M5c: KPP vertical mixing
+if [ "$SW_PENE" = 1 ]; then export FESOM3_SW_PENE=1; fi # M5c: shortwave penetration (sw_3d term)
+if [ "$KPP_NONLCL" = 1 ]; then export FESOM3_KPP_NONLCL=1; fi # M5c: ghats nonlocal flux (gate variant)
 export FESOM_DUMP_FILE="$RUN/lifen_f3" FESOM_DUMP_MAXSTEPS="$NSTEPS" FESOM3_NSTEPS="$NSTEPS"
 ulimit -s unlimited
 mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n 1 \

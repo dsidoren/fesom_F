@@ -32,7 +32,9 @@ module oce_ale_tracer
     use mod_partit,         only: t_partit
     use mod_part_bounds,    only: owned_bounds, is_multirank, local_dims
     use mod_halo,           only: exchange_nod
-    use mod_param_phys,     only: Fer_GM, Redi
+    use mod_param_phys,     only: Fer_GM, Redi, use_kpp_nonlclflx, &
+                                  mix_scheme_nmb, ref_sss, ref_sss_local
+    use mod_config,         only: use_sw_pene
     use oce_tracer_mod,     only: init_tracers_AB
     use oce_tracer_grad,    only: tracer_gradient_elements, tracer_gradient_z
     use oce_adv_tra_driver, only: do_oce_adv_tra
@@ -507,7 +509,7 @@ contains
         real(kind=WP) :: zbar_n(mesh%nl), Z_n(mesh%nl-1)
         integer       :: nz, n, nzmax, nzmin, id
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: m, zinv, dz, zinv1, zinv2, v_adv, Ty, Ty1
+        real(kind=WP) :: m, zinv, dz, zinv1, zinv2, v_adv, Ty, Ty1, rsss
         logical       :: do_wimpl
         real(kind=WP), dimension(:,:), pointer :: trarr, Wvel_i
 
@@ -613,7 +615,57 @@ contains
             nz = nzmax-1
             dz = mesh%hnode_new(nz,n)
             tr(nz) = -a(nz)*trarr(nz-1,n) - (b(nz)-dz)*trarr(nz,n)
-            ! (KPP nonlocal / shortwave penetration / iceberg rhs contributions: deferred)
+            !___________________________________________________________________
+            ! M5c KPP nonlocal counter-gradient flux (FESOM2 oce_ale_tracer.F90:892-987).
+            ! ⚠️ DEAD in the production CORE2 config: use_kpp_nonlclflx is .false. (default,
+            ! absent from work_core) so the oracle never executes this either. Transcribed for
+            ! a faithful + complete KPP port; fires only when use_kpp_nonlclflx=.true. (the
+            ! KPP_NONLCL=1 gate variant). mix_scheme_nmb==1 = fesom1.4 KPP (cvmix ==3 omitted).
+            ! T: blmc(:,:,2) channel, heat_flux/vcpw; S: blmc(:,:,3), rsss*water_flux. No flux
+            ! out of the surface (top) or bottom -> the surface/bulk/bottom 3-way split.
+            if (use_kpp_nonlclflx .and. mix_scheme_nmb == 1) then
+                if (id == 1) then           ! temperature
+                    nz = nzmin
+                    tr(nz) = tr(nz) + ( -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,2), 1.0_WP) &
+                                        *(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) ) * heat_flux(n) / vcpw * dt
+                    do nz = nzmin+1, nzmax-2
+                        tr(nz) = tr(nz) + (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,2), 1.0_WP)*(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) &
+                                            -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,2), 1.0_WP)*(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) &
+                                          ) * heat_flux(n) / vcpw * dt
+                    end do
+                    nz = nzmax-1
+                    tr(nz) = tr(nz) + (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,2), 1.0_WP) &
+                                        *(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) ) * heat_flux(n) / vcpw * dt
+                else if (id == 2) then      ! salinity
+                    rsss = ref_sss
+                    if (ref_sss_local) rsss = trarr(1,n)   ! FESOM2 values(1,n): level 1 (=nzmin, no cavity)
+                    nz = nzmin
+                    tr(nz) = tr(nz) - ( -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,3), 1.0_WP) &
+                                        *(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) ) * rsss * water_flux(n) * dt
+                    do nz = nzmin+1, nzmax-2
+                        tr(nz) = tr(nz) - (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,3), 1.0_WP)*(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) &
+                                            -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,3), 1.0_WP)*(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) &
+                                          ) * rsss * water_flux(n) * dt
+                    end do
+                    nz = nzmax-1
+                    tr(nz) = tr(nz) - (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,3), 1.0_WP) &
+                                        *(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) ) * rsss * water_flux(n) * dt
+                end if
+            end if
+            !___________________________________________________________________
+            ! M5c shortwave penetration (FESOM2 oce_ale_tracer.F90:991-996): the 3D in-water
+            ! shortwave heating into the T column. ACTIVE in the production CORE2 gate
+            ! (use_sw_pene=.true.). sw_3d (dyn%work, K m/s) is filled by cal_shortwave_rad
+            ! (M2.10c) after oce_fluxes each step; zero -> inert when use_sw_pene=.false.
+            ! toy_ocean is always .false. in CORE2 so its guard is dropped. Operator precedence
+            ! is verbatim: sw_3d(nz) - (sw_3d(nz+1) * area(nz+1)/areasvol(nz)).
+            if (use_sw_pene .and. id == 1) then
+                do nz = nzmin, nzmax-1
+                    zinv = 1.0_WP*dt
+                    tr(nz) = tr(nz) + (dynamics%work%sw_3d(nz,n) &
+                             - dynamics%work%sw_3d(nz+1,n) * mesh%area(nz+1,n)/mesh%areasvol(nz,n)) * zinv
+                end do
+            end if
             !___________________________________________________________________
             ! surface boundary flux (heat / virtual-salt / relaxation)
             tr(nzmin) = tr(nzmin) + bc_surface(id, trarr(nzmin,n), dt, heat_flux(n), &

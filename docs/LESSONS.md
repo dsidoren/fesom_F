@@ -1981,3 +1981,42 @@ sides) — it never ran the driver's `smooth_blmc`, so the smoothing was invisib
   means every reduced-M2 driver must now PIN `mix_scheme_nmb=2` (the o_PARAM default is 1=KPP) or it silently reroutes the
   PP gates to KPP. Passing an UNALLOCATED allocatable to an optional dummy = "absent" (F2008) is the clean way to make one
   shared `step_oce` call serve both PP (no `stress_node_surf`) and KPP.
+
+## L46 — Shortwave penetration + the DEAD ghats nonlocal flux (M5c): of the two tracer-TDMA terms the plan named, only `sw_3d` is live in work_core — `ghats` is gated off by `use_kpp_nonlclflx=.false.`; and `use_sw_pene` already existed in the right module
+
+**Context.** M5c's RESUME note (and the M5 plan) listed TWO new terms for `diff_ver_part_impl_ale`: the `sw_3d`
+shortwave heating AND the `ghats` KPP nonlocal counter-gradient flux. Reading the ACTUAL oracle
+(`oce_ale_tracer.F90:892-996`) showed the ghats block is guarded by `if (use_kpp_nonlclflx)` **FIRST**, then
+`mix_scheme_nmb==1` second. `use_kpp_nonlclflx` defaults `.false.` (`oce_modules.F90:168`, `&tracer_phys`), is never
+assigned `.true.` anywhere in the oracle source, and is **ABSENT from every work_core namelist** → the ghats term is
+DEAD in the production CORE2 config (exactly like `MLD1_ind`/`K_hor` in M4). The plan's "mix_scheme==1" was the
+secondary test; the real gate is the namelist flag. So the production M5c work is `sw_3d` alone.
+
+**Result.** Production gate `run_lifecycle_kpp_native_gate_core2.sh` (KPP+sw_pene+GM+Redi, fully-native forced
+lifecycle) `max|Δ|=0` at 195 (3-step) AND 325 (5-step), BOTH whichEVP — FIRST try, no NOVECTOR. `cal_shortwave_rad`
+(M2.10c, byte-proven) wired into the runloop right after `oce_fluxes` (it IS the last line of FESOM2 `oce_fluxes`,
+`ice_oce_coupling.F90:873`); the oracle flux dump (`fesom_module.F90:746`) records `heat_flux` AFTER it, so the
+per-step flux self-check reads `0` for the visible-band-modified `heat_flux` too. The ghats term was still transcribed
+faithfully and gated by a dedicated `KPP_NONLCL=1` variant (`use_kpp_nonlclflx=.true.` injected into the oracle
+`&tracer_phys` + the FESOM3 `FESOM3_KPP_NONLCL` env): `max|Δ|=0` BOTH whichEVP, and NON-VACUOUS (ghats changes T/S
+by up to 7.3e-5 over 3 steps vs ghats-off) — so the otherwise-dead term is byte-verified, not an L39 landmine.
+
+**Generalisable.**
+- **"Read the actual code, not the plan summary" — the FLAG edition.** Before implementing a term the plan names,
+  grep its gating flag's DEFAULT *and* its presence in the live `work_core` namelist. A term guarded by a flag that
+  defaults off and is unset is DEAD — implementing it as "active production work" wastes effort and (worse) ships
+  ungated code. Confirm liveness with `grep -rn "<flag> *= *\.true\." src/` (does anything turn it on?) + `grep -rn
+  "<flag>" work_core/` (does the config set it?).
+- **Before adding a config flag, grep for it — it may already exist in the correct module.** `use_sw_pene` already
+  lived in `mod_config` (the g_config analog — the faithful home, since FESOM2 `use_sw_pene` is `g_config`) and was
+  ALREADY read by the KPP `bldepth` + `fesom_lifecycle` + `fesom_pressuredump`. Adding a SECOND `use_sw_pene` to
+  `mod_param_phys` made two flags; the production gate passed only because both happened to be `.true.`. A duplicate
+  that "works by coincidence" is a latent split-brain bug — one source of truth, in the module that matches the FESOM2
+  origin group.
+- **An in-code default of `.true.` is a footgun when the consumer dereferences a conditionally-allocated array.**
+  `dyn%work%sw_3d` is allocated ONLY when sw_pene is enabled, but the byte-gate drivers configure physics in-code (they
+  do not read `namelist.config`), so a `.true.` default would fire the `sw_3d` term against unallocated memory in every
+  PP/reduced driver. Flip such gate-driver defaults to `.false.` ("unset = off") and let the few feature drivers opt in
+  explicitly — fail-safe beats faithful-to-the-namelist-default here.
+- **Gate the dead code too.** When a faithful port includes a term that's off in production, add a cheap variant that
+  turns it on (both oracle + F3) and prove it byte-exact + non-vacuous, rather than shipping untested transcription.
