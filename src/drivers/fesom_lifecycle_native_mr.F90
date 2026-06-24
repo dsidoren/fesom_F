@@ -56,7 +56,7 @@ program fesom_lifecycle_native_mr
     ! M5d: KPP vertical mixing + shortwave penetration + (gated-off) ghats nonlocal flux at MR.
     use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit, &
                                   use_kpp_nonlclflx, ref_sss, ref_sss_local
-    use mod_config,         only: use_sw_pene
+    use mod_config,         only: use_sw_pene, which_ALE
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
     use oce_shortwave_pene, only: cal_shortwave_rad
     use mod_mesh,           only: t_mesh
@@ -132,6 +132,10 @@ program fesom_lifecycle_native_mr
     do_swpene = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_KPP_NONLCL', env, length=env_len, status=ios)
     do_nonlcl = (ios == 0 .and. env_len > 0)
+    ! M6a-4: ALE vertical coordinate (default linfs). 'zstar' -> full free surface + real
+    ! freshwater flux (use_virt_salt=.false., is_nonlinfs=1; mirror of the 1-rank M6a-3 wiring).
+    call get_environment_variable('FESOM3_WHICH_ALE', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) which_ALE = trim(env)
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
@@ -429,7 +433,7 @@ program fesom_lifecycle_native_mr
     atm%Ce_atm_ice    = 0.00175_WP
     atm%ref_sss       = 34.0_WP
     atm%ref_sss_local = .true.
-    atm%use_virt_salt = .true.
+    atm%use_virt_salt = (trim(which_ALE)=='linfs')   ! M6a-4: zstar -> real freshwater flux
     atm%l_snow        = .true.
     atm%surf_relax_S  = 1.929e-06_WP
 
@@ -496,9 +500,9 @@ program fesom_lifecycle_native_mr
 
     !===========================================================================
     ! ocean-step surface BC arrays. heat_flux/water_flux/virtual_salt/relax_salt/stress_surf
-    ! are produced NATIVELY each step into atm%* / stress_surf; Ki/real_salt_flux/is_nonlinfs
-    ! stay 0 (M4 / linfs). Local sizes.
-    is_nonlinfs = 0.0_WP
+    ! are produced NATIVELY each step into atm%* / stress_surf; Ki/real_salt_flux stay 0 (M4).
+    ! M6a-4: is_nonlinfs=1 for zstar (bc_surface uses real_salt_flux + advective-heat). Local sizes.
+    is_nonlinfs = merge(1.0_WP, 0.0_WP, trim(which_ALE)/='linfs')
     allocate(Ki(nl-1, nNodL), real_salt_flux(nNodL), stress_surf(2, nElemF))
     Ki = 0.0_WP; real_salt_flux = 0.0_WP; stress_surf = 0.0_WP
 
@@ -530,7 +534,7 @@ program fesom_lifecycle_native_mr
         ! M5d: stress_node_surf=atm%stress_node_surf (oce_fluxes_mom) feeds KPP ustar (PP ignores it).
         call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
                       atm%heat_flux, atm%water_flux, atm%virtual_salt, atm%relax_salt, &
-                      real_salt_flux, is_nonlinfs, stress_surf, partit, &
+                      atm%real_salt_flux, is_nonlinfs, stress_surf, partit, &   ! M6a-4: native rsf (zstar)
                       stress_node_surf=atm%stress_node_surf)
         if (partit%mype == 0) &
             write(*,'(a,i0,a,es12.4,a,es12.4,a,es12.4)') 'fesom_lifecycle_native_mr: step ', n, &

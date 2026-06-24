@@ -74,11 +74,20 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   `tools/run_lifecycle_zstar_native_gate_core2.sh` (+ WHICH_ALE env in the forced oracle runner +
   the fullynative gate). No oracle SOURCE change. No regression: linfs native (reduced + production) +
   linfs/zstar unforced + step-65 + ctest 13/13 all `max|Δ|=0`.
-  **RESUME at M6a-4 (multi-rank zstar): the kernels are optional-`partit`-ready (owned loops +
-  `exchange_elem(helem)` + `exchange_nod(Wvel/hnode_new/ssh_rhs/ssh_rhs_old)` + the update_stiff
-  owned-edge loop); wire `fesom_lifecycle_native_mr` (FESOM3_WHICH_ALE) + the MR gate. `dist_N`
-  invariant check first (L33); env.sh KNEM (L35). dist_2 + dist_8, both whichEVP, 195+325. Then tag
-  `m6`; M7 = TKE (own plan, from Fortran, no CVMix); M8 = production months/years runs.**
+  **M6a-4 (multi-rank zstar) ✅ DONE (first try, 2026-06-24) → M6a (zstar ALE) COMPLETE.** The full
+  production zstar config byte-matches FESOM2 `max|Δ|=0` at MULTI-RANK: CORE2 dist_2 + dist_8,
+  reduced (PP) AND production (KPP+GM+Redi+sw_pene), BOTH whichEVP, 3-step. PURE WIRING (the M4f/M5d
+  lesson): the zstar kernels were optional-`partit` from the start (update_stiff_mat_ale owned-edge +
+  vert_vel_ale/update_thickness_ale owned loops + the exchanges in place; `dhe` read at owned el(i)
+  only — M2.12c-2 invariant, no halo extension); the only new work was the `fesom_lifecycle_native_mr`
+  zstar block (FESOM3_WHICH_ALE + use_virt_salt/is_nonlinfs + `atm%real_salt_flux`, mirror of M6a-3) +
+  the MR gate (`run_lifecycle_zstar_native_gate_multirank.sh`). No regression: linfs MR native dist_2 +
+  ctest 13/13. **RESUME at M7 = TKE** (its own plan — port from the FORTRAN oracle with C-port
+  experience: NO CVMix, NO diagnostics-array bloat; `mix_scheme='TKE'`, prognostic `tke`, `work_tke_dump`/
+  `work_linfs_tke` exist; decompose like KPP). Then M8 = production months/years runs (netCDF output +
+  restart write + run-length-in-years + Fortran comparison, ~byte-identical). **Tag `m6` at the M6a
+  commit.** The WHOLE default FESOM config (zstar + KPP + GM + Redi + sw_pene, native ice/forcing) is
+  now byte-exact 1-rank AND multi-rank, both whichEVP.
   (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,
@@ -469,17 +478,16 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
       `dump_shim` is the gate). **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi +
       step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`. ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35).
 
-**↳ RESUME HERE (next session): M6a-4 — multi-rank zstar.** M5 ✅ COMPLETE (tag `m5`). M6a-1
-(Shchepetkin PGF) + M6a-2 (zstar thickness, unforced) + M6a-3 (forced/native zstar + real freshwater
-flux — the FULL PRODUCTION config byte-exact) ✅ DONE (see "M6 progress"). Next: wire zstar into
-`fesom_lifecycle_native_mr` (FESOM3_WHICH_ALE) + a MR gate (`run_lifecycle_zstar_native_gate_multirank.sh`,
-mirror M5d). The kernels are optional-`partit`-ready: `update_stiff_mat_ale`/`vert_vel_ale`/
-`update_thickness_ale` loop owned + the exchanges are in place (`exchange_elem(helem)`,
-`exchange_nod(Wvel/hnode_new/ssh_rhs/ssh_rhs_old)`); `dhe` is read at owned el(i) only (both triangles
-of an owned edge are owned — M2.12c-2 invariant). Run the cheap `dist_N` invariant check before any halo
-extension (L33); env.sh KNEM flag (L35). dist_2 + dist_8, BOTH whichEVP, 195+325. Then tag `m6`;
-M7 = TKE (own plan, from Fortran, no CVMix/diagnostics bloat); M8 = production months/years runs.
-Plan: `docs/plans/2026-06-24-m6-zstar.md`.
+**↳ RESUME HERE (next session): M7 = TKE vertical mixing.** M5 ✅ COMPLETE (tag `m5`). **M6a (zstar
+ALE) ✅ COMPLETE (M6a-1 PGF + M6a-2 thickness + M6a-3 forced/freshwater + M6a-4 multi-rank — all
+byte-exact, see "M6 progress"); tag `m6`.** The whole default FESOM config (zstar + KPP + GM + Redi +
+sw_pene, native ice/forcing) is byte-exact 1-rank AND multi-rank, both whichEVP. Next: **M7 = TKE** —
+write its own plan first, then port `mix_scheme='TKE'` from the **FORTRAN** oracle applying C-port
+experience (NO CVMix, NO diagnostics-array bloat); prognostic `tke` field (the one stateful mixing
+scheme → needs serialization + restart); byte-gate vs FESOM2 TKE (`work_tke_dump`/`work_linfs_tke`
+exist); decompose like KPP (isolated module → step → unforced → forced → multi-rank). Then **M8 =
+production months/years runs** (netCDF output + restart write + run-length-in-years driver + forcing
+rollover; compare to FESOM2 ~byte-identical). Plan: `docs/plans/2026-06-24-m6-zstar.md` (M7/M8 noted).
 
 **DIRECTION (user 2026-06-24):** target = `which_ALE='zstar'` (canonical `config/namelist.config`; the
 `work_core` copy was customized to zlevel — my brief zlevel/paper-parity detour was wrong, corrected).
@@ -542,6 +550,16 @@ diagnostics-array bloat).** **Production runs (months/years, ~byte-identical vs 
     (drives both `oce_fluxes`'s levitating-ice branch AND `obudget`'s `rsf`) + `is_nonlinfs=1.0`
     (bc_surface uses `real_salt_flux` + the `sval*water_flux` advective-heat term). NO oracle SOURCE change.
   No regression: linfs native (reduced + production) + linfs/zstar UNFORCED + step-65 + ctest 13/13 `max|Δ|=0`.
+- **M6a-4 ✅ DONE (first try, 2026-06-24) → M6a COMPLETE.** The production zstar config byte-matches
+  FESOM2 `max|Δ|=0` at MULTI-RANK — CORE2 dist_2 + dist_8, reduced (PP) AND production (KPP+GM+Redi+
+  sw_pene), BOTH whichEVP. PURE WIRING (M4f/M5d): the zstar kernels are optional-`partit` (update_stiff
+  owned-edge loop; vert_vel_ale/update_thickness_ale owned loops; the exchanges — `exchange_elem(helem)`,
+  `exchange_nod(Wvel/hnode_new/ssh_rhs/ssh_rhs_old)` — already in place; `dhe` read at owned el(i) only,
+  no halo extension, the M2.12c-2 owned-edge invariant). Only NEW work: the `fesom_lifecycle_native_mr`
+  zstar block (FESOM3_WHICH_ALE + `atm%use_virt_salt`/`is_nonlinfs` + `atm%real_salt_flux`, LOCAL-sized,
+  mirror of M6a-3) + `WHICH_ALE` thread in `run_lifecycle_fullynative_gate_multirank.sh` +
+  `run_lifecycle_zstar_native_gate_multirank.sh`. No oracle SOURCE change. No regression: linfs MR
+  native dist_2 + ctest 13/13. **Tag `m6`.**
 
 ### M5 progress (KPP vertical mixing + sw_pene) — scoped + started 2026-06-24. Plan: `docs/plans/2026-06-24-m5-kpp.md`.
 - **Decomposition:** M5a (producers, isolated gate; sub-stepped a1–a4 mirroring the C-port K1–K8) →
@@ -889,6 +907,7 @@ bash tools/run_pressure_gate_core2.sh            # CORE2 97 fields incl. M4a/b f
 bash tools/run_lifecycle_gate_core2.sh           # GM/Redi-OFF lifecycle 195 records (no-regression baseline)
 bash tools/run_lifecycle_zstar_gate_core2.sh 3   # M6a-2: zstar ALE unforced lifecycle 195, max|Δ|=0 (CORE2 1-rank)
 bash tools/run_lifecycle_zstar_native_gate_core2.sh 3 0  # M6a-3: forced/native zstar 195, max|Δ|=0 (reduced; add FER_GM=1 REDI=1 MIX_KPP=1 SW_PENE=1 for production)
+FER_GM=1 REDI=1 MIX_KPP=1 SW_PENE=1 bash tools/run_lifecycle_zstar_native_gate_multirank.sh 2 3 0  # M6a-4: PRODUCTION zstar MR dist_2 195, max|Δ|=0 (needs env.sh KNEM, L35)
 bash tools/run_lifecycle_kpp_gate_core2.sh 3     # M5b: KPP-alone unforced lifecycle 195, max|Δ|=0 (CORE2 1-rank)
 FER_GM=1 REDI=1 bash tools/run_lifecycle_kpp_gate_core2.sh 3  # M5b: KPP+GM+Redi 195, max|Δ|=0 (production combo)
 bash tools/run_lifecycle_gm_gate_core2.sh        # M4c: GM bolus lifecycle 195 records, max|Δ|=0 (CORE2 1-rank)
