@@ -39,7 +39,7 @@ program fesom_lifecycle
     use mod_param_phys,     only: Redi_Kmax, Redi_Kmin, Redi_Ktaper, K_hor, &
                                   scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97
     use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit
-    use mod_config,         only: use_sw_pene
+    use mod_config,         only: use_sw_pene, which_ALE
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
@@ -99,6 +99,11 @@ program fesom_lifecycle
     use_redi = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_MIX_KPP', env, length=env_len, status=ios)
     use_kpp = (ios == 0 .and. env_len > 0)
+    ! M6a-2: ALE vertical coordinate (default linfs; 'zstar' -> Shchepetkin PGF + per-step
+    ! stiffness update + the vert_vel_ale/update_thickness_ale stretch). Cold start hbar=0
+    ! => the rest-state hnode/zbar_3d_n/Z_3d_n init above already matches zstar at t=0.
+    call get_environment_variable('FESOM3_WHICH_ALE', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) which_ALE = trim(env)
 
     call par_init(partit)
     if (partit%npes /= 1) then

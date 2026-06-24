@@ -37,6 +37,7 @@ module oce_ale
     use mod_partit,     only: t_partit
     use mod_part_bounds, only: owned_bounds, is_multirank
     use mod_halo,       only: exchange_nod, exchange_elem, exchange_elem_full
+    use mod_config,     only: which_ALE          ! M6 ALE: 'linfs'/'zlevel'/'zstar'
     implicit none
     private
     public :: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
@@ -277,6 +278,7 @@ contains
         integer       :: ed, el(2), enodes(2), n, nz, nzmin, nzmax
         integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2
+        real(kind=WP) :: dd, dd1, dddt          ! M6a-2 zstar surface-stretch scalars
         ! c1 is an array over levels (FESOM2 keeps it an array — a deadlock-avoidance note
         ! under OpenMP; here it just carries the per-level edge flux for the slice scatter).
         real(kind=WP) :: c1(mesh%nl-1), c2(mesh%nl-1)
@@ -363,6 +365,34 @@ contains
                 if (Fer_GM) fer_Wvel(nz, n) = fer_Wvel(nz, n)/mesh%area(nz, n)
             end do
         end do
+
+        !______________________________________________________________________
+        ! M6a-2 zstar free-surface correction (FESOM2 oce_ale.F90:2755-2821): distribute
+        ! the total ssh change (hbar-hbar_old) PROPORTIONALLY over all (full-prism) layers
+        !   dd = (hbar-hbar_old)/H,  H = zbar_3d_n(1) - zbar_3d_n(nzmax)
+        !   Wvel(nz)      -= (zbar_3d_n(nz)-zbar_3d_n(nzmax)) * dd/dt   (W from the bottom-up
+        !                                                                integration of the stretch)
+        !   hnode_new(nz)  = hnode(nz) + (zbar_3d_n(nz)-zbar_3d_n(nz+1)) * dd
+        ! All divides scalar (no L29 trap). nzmax uses nlevels_nod2D_MIN (stretch only over
+        ! the part of the column where area(nz)=area(1), i.e. full prisms not cut by the
+        ! bottom). linfs leaves hnode_new=hnode. (Cavity nzmin>1 DEAD; water_flux term is
+        ! M6a-3 forced — omitted here since unforced water_flux=0.)
+        if (trim(which_ALE)=='zstar') then
+            do n = 1, nNodO
+                nzmin = mesh%ulevels_nod2D(n)
+                nzmax = mesh%nlevels_nod2D_min(n) - 1
+                if (nzmin == 1) then
+                    dd1  = mesh%zbar_3d_n(nzmax, n)
+                    dd   = mesh%zbar_3d_n(nzmin, n) - dd1
+                    dd   = (mesh%hbar(n) - mesh%hbar_old(n)) / dd
+                    dddt = dd/dt
+                    do nz = nzmin, nzmax-1
+                        Wvel(nz, n)          = Wvel(nz, n) - (mesh%zbar_3d_n(nz,n) - dd1)*dddt
+                        mesh%hnode_new(nz,n) = mesh%hnode(nz,n) + (mesh%zbar_3d_n(nz,n) - mesh%zbar_3d_n(nz+1,n))*dd
+                    end do
+                end if
+            end do
+        end if
 
         ! linfs: no zlevel/zstar free-surface correction; hnode_new unchanged (= hnode).
         if (is_multirank(partit)) then
@@ -460,23 +490,52 @@ contains
 
     !===========================================================================
     subroutine update_thickness_ale(mesh, partit)
-        ! FESOM2 oce_ale.F90:1226-1444. Commit the new layer thicknesses at the end of
-        ! the step: hnode=hnode_new and recompute helem / zbar_3d_n / Z_3d_n. For
-        ! which_ale='linfs' (the M2 path) the layer thickness is fixed (dh/dt=0, hnode_new
-        ! stays = hnode), so NEITHER the zlevel NOR the zstar redistribution branch is
-        ! taken — hnode/helem/zbar_3d_n/Z_3d_n are unchanged and the only remaining action
-        ! is exchange_elem(helem) (:1440). The full zlevel/zstar thickness commit (the
-        ! rescue_hnode_old DVD bookkeeping + the per-element helem average) enters with
-        ! non-linfs ALE in a later gate.
-        ! M2.12c-3: optional partit accepted for the step_oce threading; for linfs helem is
-        ! unchanged AND already full-halo-valid (built from nlevels over the full local range
-        ! at setup), so FESOM2's exchange_elem(helem) is value-neutral and is SKIPPED here
-        ! (the L33 "don't add machinery you don't need" rule — no kernel reads a stale helem
-        ! halo that this would fix). It enters with the real zlevel/zstar thickness commit.
-        type(t_mesh), intent(in) :: mesh
-        type(t_partit), intent(in), optional :: partit
-        if (mesh%nod2D < 0 .and. present(partit)) return   ! silence unused-args; linfs = no-op
-        ! linfs: no thickness redistribution; exchange_elem(helem) value-neutral (see above).
+        ! FESOM2 oce_ale.F90:1226-1444. Commit the new layer thicknesses at the end of the
+        ! step: hnode=hnode_new and recompute helem / zbar_3d_n / Z_3d_n.
+        !  - linfs (the M2 path): dh/dt=0, hnode_new=hnode, helem already full-halo-valid
+        !    -> NO redistribution; exchange_elem(helem) is value-neutral and SKIPPED (L33).
+        !  - M6a-2 zstar (FESOM2 :1378-1436): the stretch from vert_vel_ale is committed.
+        !    Node loop (owned+halo: hnode_new was exchange_nod'd in vert_vel_ale) rebuilds
+        !    hnode + the depth levels BOTTOM-UP from the fixed anchor zbar_3d_n(nzmax+1)
+        !    (nzmax=nlevels_nod2D_min-2; bottom region not stretched). Element loop (owned)
+        !    averages hnode -> helem, then exchange_elem(helem). ldiag_DVD off (no
+        !    rescue_hnode_old bookkeeping); cavity off (nzmin>1 dead). zlevel not ported
+        !    (not a target — see docs/plans/2026-06-24-m6-zstar.md).
+        type(t_mesh),   intent(inout), target :: mesh
+        type(t_partit), intent(in), optional  :: partit
+        integer :: n, nz, elem, elnodes(3), nzmin, nzmax
+        integer :: nNodO, nNodL, nEdgeO, nElemO
+
+        if (trim(which_ALE)=='linfs') return   ! no-op (helem unchanged + full-halo-valid)
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        if (trim(which_ALE)=='zstar') then
+            !__________________________________________________________________
+            ! commit layer thickness + depth levels at node (owned+halo)
+            do n = 1, nNodL
+                nzmin = mesh%ulevels_nod2D(n)
+                nzmax = mesh%nlevels_nod2D_min(n) - 2
+                if (nzmin > 1) cycle                       ! cavity (dead)
+                do nz = nzmax, nzmin, -1                   ! bottom-up: zbar_3d_n(nz+1) already updated
+                    mesh%hnode(nz,n)     = mesh%hnode_new(nz,n)
+                    mesh%zbar_3d_n(nz,n) = mesh%zbar_3d_n(nz+1,n) + mesh%hnode_new(nz,n)
+                    mesh%Z_3d_n(nz,n)    = mesh%zbar_3d_n(nz+1,n) + mesh%hnode_new(nz,n)/2.0_WP
+                end do
+            end do
+            !__________________________________________________________________
+            ! mean layer thickness at element (owned)
+            do elem = 1, nElemO
+                nzmin = mesh%ulevels(elem)
+                nzmax = mesh%nlevels(elem) - 1
+                if (nzmin > 1) cycle                       ! cavity (dead)
+                elnodes = mesh%elem2D_nodes(1:3, elem)
+                do nz = nzmin, nzmax-1
+                    mesh%helem(nz,elem) = sum(mesh%hnode(nz,elnodes))/3.0_WP
+                end do
+            end do
+        end if
+
+        if (is_multirank(partit)) call exchange_elem(mesh%helem, partit)   ! FESOM2 :1440
     end subroutine update_thickness_ale
 
 end module oce_ale

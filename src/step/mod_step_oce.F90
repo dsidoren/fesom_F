@@ -54,14 +54,15 @@ module mod_step_oce
     use oce_fer_gm,         only: init_Redi_GM, fer_solve_Gamma, fer_gamma2vel
     use mod_param_phys,     only: Fer_GM, Redi, mix_scheme_nmb
     use mod_part_bounds,    only: owned_bounds
-    use oce_pgf,            only: pressure_force_4_linfs_fullcell
+    use oce_pgf,            only: pressure_force_4_linfs_fullcell, pressure_force_4_zxxxx_shchepetkin
     use oce_ale_mixing_pp,  only: oce_mixing_pp
     use oce_mixing_kpp,     only: oce_mixing_kpp_driver
     use oce_mo_conv,        only: mo_convect
     use oce_dyn_velrhs,     only: compute_vel_rhs
     use oce_dyn_visc,       only: viscosity_filter
     use oce_dyn_ivertvisc,  only: impl_vert_visc_ale
-    use oce_ssh_rhs,        only: compute_ssh_rhs_ale
+    use oce_ssh_rhs,        only: compute_ssh_rhs_ale, update_stiff_mat_ale
+    use mod_config,         only: which_ALE
     use oce_ssh_solve,      only: solve_ssh_ale
     use oce_ale,            only: compute_vel_nodes, update_vel, compute_hbar_ale, &
                                   update_eta_n, vert_vel_ale, update_thickness_ale
@@ -125,9 +126,17 @@ contains
         call dump_node(DUMP_SUBSTEP_PRESSURE_BV, n, 'bvfreq',   dynamics%work%bvfreq,         mesh%nlevels_nod2D)
 
         !_______________________________________________________________________
-        ! hydrostatic pressure gradient force
-        call pressure_force_4_linfs_fullcell(dynamics%work%hpressure, mesh, &
-                                             dynamics%work%pgf_x, dynamics%work%pgf_y, partit)
+        ! hydrostatic pressure gradient force. linfs -> the hpressure-based full-cell PGF;
+        ! non-linfs (zlevel/zstar) -> the self-contained Shchepetkin density-Jacobian PGF
+        ! (which_pgf='shchepetkin', the default; M6a-1). FESOM2 oce_ale.F90:3656-3661.
+        if (trim(which_ALE)=='linfs') then
+            call pressure_force_4_linfs_fullcell(dynamics%work%hpressure, mesh, &
+                                                 dynamics%work%pgf_x, dynamics%work%pgf_y, partit)
+        else
+            dynamics%work%pgf_x = 0.0_WP; dynamics%work%pgf_y = 0.0_WP   ! kernel writes ule..nle only
+            call pressure_force_4_zxxxx_shchepetkin(dynamics%work%density_m_rho0, mesh, &
+                                                 dynamics%work%pgf_x, dynamics%work%pgf_y, partit)
+        end if
 
         !_______________________________________________________________________
         ! M4/M5 producers: sw_alpha_beta (EOS expansion coeffs) feeds KPP (Bo), the GM
@@ -183,7 +192,10 @@ contains
         call impl_vert_visc_ale(dynamics, mesh, dt, dynamics%work%Av, stress_surf, partit)
 
         !_______________________________________________________________________
-        ! free-surface solve
+        ! free-surface solve. For non-linfs ALE (zlevel/zstar) the SSH stiffness 2nd term
+        ! tracks the moving surface: update it by the (lagged) dhe from the previous step's
+        ! compute_hbar_ale BEFORE assembling/solving (FESOM2 oce_ale.F90:3921; step-1 dhe=0).
+        if (trim(which_ALE)/='linfs') call update_stiff_mat_ale(mesh, dt, partit)
         call compute_ssh_rhs_ale(dynamics, mesh, partit)
         call dump_node_2d(DUMP_SUBSTEP_SSH_RHS, n, 'ssh_rhs', dynamics%ssh_rhs)
         call solve_ssh_ale(dynamics, mesh, partit=partit)

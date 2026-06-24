@@ -67,7 +67,7 @@ module oce_ssh_rhs
     use mod_halo,       only: exchange_nod
     implicit none
     private
-    public :: init_stiff_mat_ale, compute_ssh_rhs_ale
+    public :: init_stiff_mat_ale, compute_ssh_rhs_ale, update_stiff_mat_ale
 
 contains
 
@@ -202,6 +202,68 @@ contains
         deallocate(n_pos, n_num)
         end associate
     end subroutine init_stiff_mat_ale
+
+    !===========================================================================
+    subroutine update_stiff_mat_ale(mesh, dt, partit)
+        ! Per-step SSH-stiffness 2nd-term update for non-linfs ALE (zlevel/zstar).
+        ! Transcribed from FESOM2 v2.7.3 oce_ale.F90:1892-2001 (update_stiff_mat_ale),
+        ! called every step (oce_ale.F90:3921, `if(.not. linfs)`) BEFORE compute_ssh_rhs_ale.
+        !
+        ! init_stiff_mat_ale built the stiffness 2nd term over the UNPERTURBED depth
+        ! (zbar_e_bot-zsrf). This ADDS -dhe(elem) per step, where dhe = hbar(n+1/2)-
+        ! hbar(n-1/2) is the element-interpolated SSH change from the previous step's
+        ! compute_hbar_ale (LAGGED; step-1 dhe=0 -> stiffness unchanged step 1). The
+        ! additions ACCUMULATE across steps so the matrix tracks the moving free surface.
+        !
+        ! BYTE-EXACT: structurally identical to init_stiff_mat_ale's stiffness loop (d)
+        ! above — same owned-edge order, same CSR (rowptr_loc/colind_loc, M2.6-proven),
+        ! same gradient_sca/edge_cross_dxdy — only (zbar_e_bot-zsrf) -> -dhe(el(i)). The
+        ! edges(1)=+fy / edges(2)=-fy split == the oracle's j-loop with the j==2 flip.
+        ! M6a-2: optional partit -> owned-edge loop; mutates mesh%ssh_stiff%values.
+        type(t_mesh),   intent(inout), target :: mesh
+        real(kind=WP),  intent(in)            :: dt
+        type(t_partit), intent(in), optional  :: partit
+        integer       :: ed, el(2), elnodes(3), i, n, row, npos(3)
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: factor, fy(3)
+        integer, allocatable :: rev(:)   ! reverse-map local-node -> CSR position (init's n_num reuse)
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        associate(ssh_stiff => mesh%ssh_stiff)
+        allocate(rev(nNodL)); rev = 0
+        factor = g*dt*alpha*theta
+        do ed = 1, nEdgeO
+            el = mesh%edge_tri(:, ed)
+            do i = 1, 2   ! the two triangles sharing edge ed (both OWNED, invariant ii)
+                if (el(i) < 1) cycle   ! boundary edge has only one triangle
+                elnodes = mesh%elem2D_nodes(1:3, el(i))
+                fy(1:3) = -mesh%dhe(el(i)) * &
+                          ( mesh%gradient_sca(1:3,el(i)) * mesh%edge_cross_dxdy(2*i  ,ed)  &
+                           -mesh%gradient_sca(4:6,el(i)) * mesh%edge_cross_dxdy(2*i-1,ed) )
+                if (i==2) fy = -fy
+
+                row = mesh%edges(1, ed)
+                if (row <= nNodO) then
+                    do n = ssh_stiff%rowptr_loc(row), ssh_stiff%rowptr_loc(row+1)-1
+                        rev(ssh_stiff%colind_loc(n)) = n
+                    end do
+                    npos = rev(elnodes)
+                    ssh_stiff%values(npos) = ssh_stiff%values(npos) + fy*factor
+                end if
+
+                row = mesh%edges(2, ed)
+                if (row <= nNodO) then
+                    do n = ssh_stiff%rowptr_loc(row), ssh_stiff%rowptr_loc(row+1)-1
+                        rev(ssh_stiff%colind_loc(n)) = n
+                    end do
+                    npos = rev(elnodes)
+                    ssh_stiff%values(npos) = ssh_stiff%values(npos) - fy*factor
+                end if
+            end do
+        end do
+        deallocate(rev)
+        end associate
+    end subroutine update_stiff_mat_ale
 
     !===========================================================================
     subroutine compute_ssh_rhs_ale(dynamics, mesh, partit)

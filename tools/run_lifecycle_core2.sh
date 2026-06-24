@@ -38,6 +38,9 @@ REDI="${REDI:-0}"
 # instead of the reduced-M2 sed-to-PP. use_sw_pene stays .false. (unforced => sw_3d=0).
 # Default 0 = the proven PP gate.
 MIX_KPP="${MIX_KPP:-0}"
+# M6a-2: WHICH_ALE selects the vertical coordinate (default linfs = the reduced-M2 gate).
+# WHICH_ALE=zstar keeps the production zstar free surface (Shchepetkin PGF + thickness stretch).
+WHICH_ALE="${WHICH_ALE:-linfs}"
 
 source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 
@@ -46,13 +49,13 @@ cp "$F2"/work_core/namelist.* "$RUN"/
 ln -sf "$F2"/build/bin/fesom.x "$RUN"/fesom.x      # loads build/lib64/libfesom.so (output 1-rank fix)
 printf '0 1 1948\n0 1 1948\n' > "$RUN"/fesom.clock # cold start, year 1948 (unforced: year irrelevant)
 
-python3 - "$RUN" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" <<'PY'
+python3 - "$RUN" "$NSTEPS" "$FER_GM" "$REDI" "$MIX_KPP" "$WHICH_ALE" <<'PY'
 import re, sys
-run, nsteps, fer_gm, redi, mix_kpp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+run, nsteps, fer_gm, redi, mix_kpp, which_ale = sys.argv[1:7]
 # namelist.config
 p = run + '/namelist.config'; s = open(p).read()
 s = re.sub(r"ResultPath\s*=\s*'[^']*'", "ResultPath       = './'", s, count=1)
-s = re.sub(r"which_ALE\s*=\s*'zlevel'", "which_ALE          = 'linfs'", s, count=1)
+s = re.sub(r"which_ALE\s*=\s*'zlevel'", f"which_ALE          = '{which_ale}'", s, count=1)
 s = re.sub(r"use_ice\s*=\s*\.true\.",   "use_ice                  = .false.", s, count=1)
 # use_sw_pene OFF: with use_ice=.false. cal_shortwave_rad (inside oce_fluxes) never runs,
 # so sw_3d (forcing_init-allocated) stays UNallocated; the tracer TDMA derefs it under
