@@ -20,9 +20,14 @@ NP="${1:-2}"
 NSTEPS="${2:-3}"
 WHICHEVP="${3:-0}"
 RUN="${4:-/scratch/a/a270088/lifecycle_fullynative_mr${NP}}"
+# M4f: FER_GM=1 / REDI=1 turn ON the work_core GM bolus / Redi isopycnal diffusion in BOTH the
+# oracle and the FESOM3 MR native lifecycle. Default 0 = the proven M3f-4 GM/Redi-off no-regr gate.
+FER_GM="${FER_GM:-0}"
+REDI="${REDI:-0}"
 
-echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, $NP-rank CORE2 dist_$NP, use_ice, whichEVP=$WHICHEVP)"
-bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" "$NP" | tail -4
+echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, $NP-rank CORE2 dist_$NP, use_ice, whichEVP=$WHICHEVP; FER_GM=$FER_GM REDI=$REDI)"
+FER_GM="$FER_GM" REDI="$REDI" \
+    bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" "$NP" | tail -4
 
 echo "[2/3] FESOM3 FULLY NATIVE MR lifecycle ($NSTEPS steps, $NP-rank dist_$NP, whichEVP=$WHICHEVP) — NO prescribed atmosphere"
 source "$F3/env.sh" intel >/dev/null 2>&1
@@ -31,12 +36,14 @@ export FESOM3_FORCING_DIR="/home/a/a270088/port2/fesom2/test/input/global"  # na
 export FESOM3_RUNOFF_FILE="$POOL/CORE2_runoff.nc"   # native runoff (M3f-3b)
 export FESOM3_SSS_FILE="$POOL/PHC2_salx.nc"          # native SSS restoring (M3f-3b)
 export FESOM3_WHICHEVP="$WHICHEVP"
+if [ "$FER_GM" = 1 ]; then export FESOM3_FER_GM=1; fi   # M4f: GM bolus in the MR native lifecycle
+if [ "$REDI" = 1 ]; then export FESOM3_REDI=1; fi       # M4f: Redi isopycnal diffusion
 export FESOM_DUMP_FILE="$RUN/lifen_f3" FESOM_DUMP_MAXSTEPS="$NSTEPS" FESOM3_NSTEPS="$NSTEPS"
 ulimit -s unlimited
 mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n "$NP" \
     "$F3/build_intel_dp/bin/fesom_lifecycle_native_mr" > "$RUN/run_f3.log" 2>&1 || \
     { echo "  FESOM3 run failed"; tail -40 "$RUN/run_f3.log"; exit 1; }
-grep -E 'nod2D|IC\(|native runoff|step [0-9]|done' "$RUN/run_f3.log" || true
+grep -E 'nod2D|IC\(|native runoff|ENABLED|step [0-9]|done' "$RUN/run_f3.log" || true
 
 echo "[3/3] compare per-rank (gid-keyed; 13 NODE substeps x 5 probes x $NSTEPS steps; SW_AB substep 2 ignored)"
 python3 "$F3/tools/dump_diff.py" "$RUN/lifef_f2" "$RUN/lifen_f3" --glob --ignore-substep=2

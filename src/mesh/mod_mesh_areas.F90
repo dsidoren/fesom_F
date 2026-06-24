@@ -6,7 +6,9 @@ module mod_mesh_areas
     ! Provides what M1 (tracer advection) needs: elem_cos, metric_factor, elem_area,
     ! gradient_sca, edge_dxdy, edge_cross_dxdy, area/areasvol(+inv). M2.3 adds
     ! coriolis (f=2*omega*sin(lat_geo) at elements + nodes). gradient_vec (M2 momentum
-    ! advection) and mesh_resolution smoothing (M4 GM) are still deferred.
+    ! advection) is still deferred. M4 (GM/Redi) adds mesh_resolution (scalar cell
+    ! resolution + 3 mass-matrix smoothing sweeps, compute_mesh_resolution) — consumed by
+    ! the GM/Redi K scaling (init_Redi_GM).
     !
     ! BYTE-FAITHFULNESS (M1 geometry byte-gate). FESOM2 splits this work across two
     ! routines whose ORDER of operations the bits depend on:
@@ -33,7 +35,7 @@ module mod_mesh_areas
     ! the area/elem_area halo exchanges (FESOM2 mesh_areas:2220/2322) are NOT needed for
     ! the owned-entry gate and are deferred to M2.12b (where the dynamics consume halos).
     use mod_precision,   only: WP, MP
-    use mod_constants,   only: r_earth, omega
+    use mod_constants,   only: r_earth, omega, pi
     use mod_mesh,        only: t_mesh, MAX_NV
     use mod_partit,      only: t_partit
     use mod_halo,        only: exchange_elem, exchange_elem_full, exchange_nod, allreduce_sum
@@ -100,6 +102,7 @@ contains
             call exchange_nod(mesh%area_inv, partit)
             call exchange_nod(mesh%areasvol_inv, partit)
         end if
+        call compute_mesh_resolution(mesh, nNodO, nNodL, partit)        ! M4 GM: scalar cell resolution
         call compute_edge_geometry(mesh, nEdgeO, center_x, center_y)    ! edge_dxdy, edge_cross_dxdy
         call compute_gradient_sca(mesh, nElemO)                         ! uses SCALED elem_area + elem_cos
         deallocate(center_x, center_y)
@@ -411,5 +414,47 @@ contains
             end if
         end block
     end subroutine compute_node_areas
+
+    subroutine compute_mesh_resolution(mesh, nNodO, nNodL, partit)
+        ! Scalar cell resolution (oce_mesh.F90:2358-2383). Raw resolution
+        ! 2*sqrt(areasvol(ulevel)/pi) on OWNED+HALO nodes, then 3 mass-matrix smoothing
+        ! sweeps: area-weighted neighbour average over nod_in_elem2D, each followed by
+        ! exchange_nod so the next sweep's halo reads are valid (FESOM2:2381). Runs after
+        ! compute_node_areas + its halo exchange (so areasvol is SCALED and halo-valid).
+        ! Consumed by the M4 GM/Redi K scaling (init_Redi_GM, oce_fer_gm.F90:258). Byte-
+        ! neutral to every pre-M4 gate (no consumer yet). The /3.0_WP is the literal divisor
+        ! (FESOM2:2373; -no-prec-div arity caveat, see elem_center — triangles only here).
+        type(t_mesh),   intent(inout) :: mesh
+        integer,        intent(in)    :: nNodO, nNodL
+        type(t_partit), intent(in)    :: partit
+        integer :: n, j, q, elem, nv
+        integer :: elnodes(MAX_NV)
+        real(kind=WP) :: vol, acc
+        real(kind=WP), allocatable :: work_array(:)
+        allocate(mesh%mesh_resolution(nNodL))
+        do n = 1, nNodL
+            mesh%mesh_resolution(n) = sqrt(mesh%areasvol(mesh%ulevels_nod2D(n), n) / pi) * 2.0_WP
+        end do
+        allocate(work_array(nNodO))
+        do q = 1, 3                                     ! apply mass matrix 3x to smooth
+            do n = 1, nNodO
+                vol = 0.0_WP
+                acc = 0.0_WP
+                do j = 1, mesh%nod_in_elem2D_num(n)
+                    elem = mesh%nod_in_elem2D(j, n)
+                    nv   = mesh%elem2D_nnodes(elem)
+                    elnodes(1:nv) = mesh%elem2D_nodes(1:nv, elem)
+                    acc = acc + sum(mesh%mesh_resolution(elnodes(1:nv))) / 3.0_WP * mesh%elem_area(elem)
+                    vol = vol + mesh%elem_area(elem)
+                end do
+                work_array(n) = acc / vol
+            end do
+            do n = 1, nNodO
+                mesh%mesh_resolution(n) = work_array(n)
+            end do
+            if (partit%npes > 1) call exchange_nod(mesh%mesh_resolution, partit)
+        end do
+        deallocate(work_array)
+    end subroutine compute_mesh_resolution
 
 end module mod_mesh_areas

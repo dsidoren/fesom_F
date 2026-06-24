@@ -1883,3 +1883,53 @@ coupled CORE2 ocean step byte-exactly at multi-rank with NO prescribed input. Th
   `nElemF` and append `, partit` to every kernel call. No arithmetic, no new exchange logic in the driver — the kernels
   carry it. First try, `max|Δ|=0`. **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi
   + step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`/green.
+
+## L44 — GM/Redi in the forced/native lifecycle + multi-rank (M4e + M4f): once each kernel is transcribed MR-ready, "turn the feature on in the next driver" is pure WIRING — the integration + multi-rank milestones cost a config block, not new physics
+
+M4e (GM+Redi in the FORCED / fully-native 1-rank lifecycle) and M4f (the same at MULTI-RANK, CORE2 dist_2/dist_8) each
+byte-matched FESOM2 `max|Δ|=0` on the FIRST gate run — 195 (3-step) + 325 (5-step) records, BOTH whichEVP, with NO new
+physics code, NO halo extension, and (M4f) NO `dist_N` invariant check needed. M4 (GM bolus + Redi isopycnal diffusion)
+is now complete end-to-end (1-rank + multi-rank, unforced + forced/fully-native, GM-only + GM+Redi, both EVP; tag `m4`).
+The reusable lessons:
+
+- **The integration milestone (M4e) is a config + allocation block, copied verbatim.** All the GM/Redi *physics* landed
+  in M4a–M4d inside `step_oce`'s `Fer_GM`/`Redi`-guarded chain (producers → `init_Redi_GM`/`fer_solve_Gamma`/
+  `fer_gamma2vel` → the Redi diff terms), reading the module flags + the `dyn%work` GM/Redi arrays. So "enable GM+Redi in
+  the native forced lifecycle" = paste the `FESOM3_FER_GM`/`FESOM3_REDI` env reads + the work_core config + the
+  `dyn%work` array `allocate`/init block from `fesom_lifecycle.F90` into `fesom_lifecycle_native.F90`; `step_oce` (called
+  1-rank, no `partit`) does the rest. The oracle side is symmetric: the forced runner already runs the real GM+Redi
+  `oce_timestep_ale` — it just needed a `FER_GM`/`REDI` env to KEEP work_core `Fer_GM`/`Redi=.true.` instead of the
+  reduced-M2 sed-off (mirror the env already added to the unforced runner). NO oracle source change. The new test value:
+  it is the FIRST GM/Redi exercise on a FORCED (non-zero surface-flux) ocean — the native heat/freshwater/salt budget
+  perturbs the surface T/S → density → bolus/slope, and over multiple steps GM/Redi feeds back into the ice via the
+  evolving surface state ocean2ice reads. That whole coupled loop byte-matched.
+- **The multi-rank milestone (M4f) is the SAME wiring on the MR driver — because each kernel was transcribed MR-ready
+  from the start.** Every M4 routine was written (M4a–M4d) with the M2.12/M3 optional-`partit` pattern (owned-loop bounds
+  + the FESOM2 halo exchanges), and `mod_step_oce::step_oce` already threads its optional `partit` to all of them. The
+  partit-present path therefore EXISTED but had never been exercised until M4f — and it just worked. The ONLY edit was the
+  GM/Redi config + array-allocation block into `fesom_lifecycle_native_mr` at LOCAL sizes (`nNodL`/`nElemF`; `fer_uv`
+  sized `nElemF` to match `dyn%uv`, since the bolus reads it over owned+halo `nElemL`). This is L43's lesson generalised:
+  **if you pay the optional-`partit` tax at transcription time, the multi-rank gate is a driver-wiring task, not a
+  porting task.** (M4f reused L43's `fesom_lifecycle_native_mr` scaffold unchanged — only the GM/Redi block was added.)
+- **The `dist_N` invariant check (L33) was UNNECESSARY here, and recognising that saved a step.** The HANDOFF/plan
+  insisted on running the cheap invariant check before assuming the GM/Redi halos suffice. But the GM/Redi producers use
+  the EXACT mesh operations the M2.12 dynamics already proved invariant: `compute_sigma_xy` accumulates element gradients
+  over `nod_in_elem2D(n)` for owned `n` (owned node ⇒ owned element-neighbourhood, M2.12a) exactly like
+  `momentum_adv_scalar`; the Redi diff terms (`diff_part_hor_redi`/`diff_ver_part_redi_expl`/`diff_ver_part_impl_ale`)
+  loop OWNED edges/nodes exactly like the M2.12c-3 off-path `diff_part_hor_redi`. Reusing a proven invariant ≠ needing to
+  re-verify it. The gate IS the check: a pass on dist_2 AND dist_8 confirms it. (Run the explicit check when a kernel uses
+  a NEW access pattern; skip it when it reuses one already gated MR.)
+- **Two MR idioms the M4 producers lean on, both byte-exact.** (1) *Compute-at-halo instead of exchange:* `sw_alpha_beta`
+  and `tracer_gradient_z` loop owned+halo (`nNodL`) and recompute the per-node function at halo nodes from halo-valid
+  inputs (the tracer `values` are exchanged at the end of each tracer's solve; geometry is valid everywhere) — so the
+  halo outputs are byte-identical to the owner's, with NO exchange. Valid precisely because the function is pure per-node
+  scalar arithmetic. (2) *A rank-3 `exchange_nod` = the oracle's per-component `MPI_BARRIER` aux dance:* `compute_sigma_xy`
+  exchanges `sigma_xy(2,nl-1,nNodL)` with one rank-3 `exchange_nod`; FESOM2 does a 3×`MPI_BARRIER` + per-component
+  `exchange_nod(aux)`. Same owner→halo bytes moved, byte-identical result — the barriers are synchronization, not data.
+- **No-regression for an integration/MR milestone = prove the OFF path is byte-neutral + the SHARED harness edits are
+  byte-neutral.** Since M4e/M4f touched no core-physics source (only the two native drivers + the gate scripts), the
+  kernel/step gates are provably unchanged (the binaries didn't relink). The two real risks: (a) the driver's new
+  GM/Redi block must be skipped when `FESOM3_FER_GM`/`REDI` are unset (it is — `use_fer_gm`/`use_redi` false ⇒ block not
+  entered ⇒ arrays unallocated ⇒ `step_oce`'s `Fer_GM`/`Redi`-guards short-circuit); (b) the SHARED oracle runner
+  (`run_lifecycle_forced_core2.sh`, used by M3f's gates too) must still sed `Fer_GM`/`Redi` OFF by default. Confirmed by
+  re-running the GM/Redi-OFF fully-native gate (1-rank AND dist_2) `max|Δ|=0` + the M4d unforced GM+Redi gate + ctest 13/13.

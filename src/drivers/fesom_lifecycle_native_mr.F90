@@ -44,6 +44,15 @@ program fesom_lifecycle_native_mr
     use mod_param_phys,     only: N2smth_h, alpha, theta
     use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const
     use mod_param_phys,     only: use_instabmix, instabmix_kv, use_momix, use_windmix
+    ! M4f: GM bolus (FESOM3_FER_GM) + Redi isopycnal diffusion (FESOM3_REDI) at MULTI-RANK —
+    ! the work_core GM+Redi config (the M4 routines already thread the optional partit + exchanges).
+    use mod_param_phys,     only: Fer_GM, Redi, K_GM_max, K_GM_min, K_GM_bvref, &
+                                  K_GM_rampmax, K_GM_rampmin, K_GM_resscalorder, K_GM_cm, &
+                                  K_GM_cmin, K_GM_Ktaper, scaling_Ferreira, scaling_Rossby, &
+                                  scaling_resolution, scaling_FESOM14, scaling_GMzexp, &
+                                  scaling_GINsea, GMzexp_zref, GMzexp_smin
+    use mod_param_phys,     only: Redi_Kmax, Redi_Kmin, Redi_Ktaper, K_hor, &
+                                  scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
     use mod_partitioning,   only: par_init, par_ex, set_partition
@@ -82,6 +91,7 @@ program fesom_lifecycle_native_mr
     real(kind=MP) :: zbar_srf, zbar_bot
     real(kind=WP), allocatable :: Ki(:,:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
+    logical :: use_fer_gm, use_redi   ! M4f: GM bolus / Redi isopycnal diffusion toggles
     ! native CORE2 forcing read (the whole atmosphere, over owned+halo).
     character(len=512)  :: forcing_dir, runoff_file, sss_file
     type(t_atm_forcing) :: frc
@@ -104,6 +114,10 @@ program fesom_lifecycle_native_mr
     whichevp = 0
     call get_environment_variable('FESOM3_WHICHEVP', whichevp_str)
     if (len_trim(whichevp_str) > 0) read(whichevp_str, *, iostat=ios) whichevp
+    call get_environment_variable('FESOM3_FER_GM', env, length=env_len, status=ios)
+    use_fer_gm = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_REDI', env, length=env_len, status=ios)
+    use_redi = (ios == 0 .and. env_len > 0)
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
@@ -262,6 +276,51 @@ program fesom_lifecycle_native_mr
     instabmix_kv  = 0.1_WP
     use_momix     = .false.
     use_windmix   = .false.
+
+    !===========================================================================
+    ! M4f GM/Redi (FESOM3_FER_GM / FESOM3_REDI): enable Gent-McWilliams bolus advection
+    ! (+ Redi isopycnal diffusion) at MULTI-RANK. Same work_core config + inits as the 1-rank
+    ! fesom_lifecycle_native (M4e), but the GM/Redi work arrays are LOCAL-sized (nNodL/nElemF)
+    ! like the rest of the MR state. step_oce threads the optional partit to every M4 routine
+    ! (producers + init_Redi_GM/fer_solve_Gamma/fer_gamma2vel + the Redi diff terms), each of
+    ! which already does owned-loop bounds + the FESOM2 halo exchanges (sigma_xy/neutral_slope/
+    ! slope_tapered/fer_c/fer_K/Ki/fer_gamma exchange_nod, fer_uv exchange_elem, fer_w in
+    ! vert_vel_ale). sw_alpha/sw_beta/tr_z are computed over owned+halo (no exchange needed).
+    if (use_fer_gm .or. use_redi) then
+        Fer_GM = .true.        ! Redi rides the GM coupling (Ki = max(fer_scal*Redi_Kmax, K_GM_min))
+        K_GM_max = 1000.0_WP; K_GM_min = 2.0_WP; K_GM_bvref = 1
+        K_GM_rampmax = -1.0_WP; K_GM_rampmin = -1.0_WP; K_GM_resscalorder = 2.0_WP
+        K_GM_cm = 3.0_WP; K_GM_cmin = 0.1_WP; K_GM_Ktaper = .false.
+        scaling_Ferreira = .false.; scaling_Rossby = .false.; scaling_resolution = .true.
+        scaling_FESOM14 = .false.; scaling_GMzexp = .true.; scaling_GINsea = .false.
+        GMzexp_zref = 500.0_WP; GMzexp_smin = 0.6_WP
+        allocate(dyn%fer_uv(2, nl-1, nElemF), dyn%fer_w(nl, nNodL))
+        allocate(dyn%work%sw_alpha(nl-1, nNodL), dyn%work%sw_beta(nl-1, nNodL))
+        allocate(dyn%work%sigma_xy(2, nl-1, nNodL))
+        allocate(dyn%work%fer_K(nl, nNodL), dyn%work%fer_c(nNodL), dyn%work%fer_scal(nNodL))
+        allocate(dyn%work%fer_gamma(2, nl, nNodL))
+        dyn%fer_uv = 0.0_WP; dyn%fer_w = 0.0_WP
+        dyn%work%sw_alpha = 0.0_WP; dyn%work%sw_beta = 0.0_WP; dyn%work%sigma_xy = 0.0_WP
+        dyn%work%fer_K = 500.0_WP; dyn%work%fer_c = 1.0_WP; dyn%work%fer_scal = 0.0_WP
+        dyn%work%fer_gamma = 0.0_WP
+        if (use_redi) then
+            Redi = .true.; Redi_Ktaper = .true.; Redi_Kmax = 0.0_WP; Redi_Kmin = 100.0_WP
+            scaling_ODM95 = .true.; ODM95_Scr = 0.2e-2_WP; ODM95_Sd = 1.0e-3_WP; scaling_LDD97 = .false.
+            K_hor = 0.0_WP
+            allocate(dyn%work%Ki(nl-1, nNodL), dyn%work%fer_tapfac(nl-1, nNodL))
+            allocate(dyn%work%neutral_slope(3, nl-1, nNodL), dyn%work%slope_tapered(3, nl-1, nNodL))
+            allocate(tracers%work%tr_z(nl, nNodL))
+            dyn%work%Ki = 0.0_WP; dyn%work%fer_tapfac = 1.0_WP
+            dyn%work%neutral_slope = 0.0_WP; dyn%work%slope_tapered = 0.0_WP
+            tracers%work%tr_z = 0.0_WP
+            if (partit%mype == 0) write(*,'(a)') &
+                'fesom_lifecycle_native_mr: Fer_GM + Redi ENABLED (work_core GM+Redi config)'
+        else
+            Redi = .false.
+            if (partit%mype == 0) write(*,'(a)') &
+                'fesom_lifecycle_native_mr: Fer_GM ENABLED (work_core GM config; Redi off)'
+        end if
+    end if
 
     ! SSH stiffness (built ONCE; dt = CORE2 namelist timestep).
     call init_stiff_mat_ale(mesh, dt, partit)

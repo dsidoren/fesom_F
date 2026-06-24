@@ -20,9 +20,14 @@ POOL=/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0
 RUN="${1:-/scratch/a/a270088/lifecycle_fullynative_core2}"
 NSTEPS="${2:-3}"
 WHICHEVP="${3:-0}"
+# M4e: FER_GM=1 / REDI=1 turn ON the work_core GM bolus / Redi isopycnal diffusion in BOTH the
+# oracle and the FESOM3 native lifecycle. Default 0 = the proven M3f GM/Redi-off no-regression gate.
+FER_GM="${FER_GM:-0}"
+REDI="${REDI:-0}"
 
-echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice)"
-bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" | tail -4
+echo "[1/3] FESOM2 oracle FORCED lifecycle ($NSTEPS steps, 1-rank CORE2, use_ice; FER_GM=$FER_GM REDI=$REDI)"
+FER_GM="$FER_GM" REDI="$REDI" \
+    bash "$F3/tools/run_lifecycle_forced_core2.sh" "$RUN" "$RUN/lifef_f2" "$RUN/flux_f2" "$NSTEPS" "$RUN/atmflux_f2" "$WHICHEVP" | tail -4
 
 echo "[2/3] FESOM3 FULLY NATIVE lifecycle ($NSTEPS steps, whichEVP=$WHICHEVP) — NO prescribed atmosphere"
 source "$F3/env.sh" intel >/dev/null 2>&1
@@ -33,10 +38,12 @@ export FESOM3_RUNOFF_FILE="$POOL/CORE2_runoff.nc"   # native runoff (M3f-3b)
 export FESOM3_SSS_FILE="$POOL/PHC2_salx.nc"          # native SSS restoring (M3f-3b)
 export FESOM3_FLUX_FILE="$RUN/flux_f2.00000"        # native-vs-oracle flux self-check
 export FESOM3_WHICHEVP="$WHICHEVP"
+if [ "$FER_GM" = 1 ]; then export FESOM3_FER_GM=1; fi   # M4e: GM bolus in the native lifecycle
+if [ "$REDI" = 1 ]; then export FESOM3_REDI=1; fi       # M4e: Redi isopycnal diffusion
 export FESOM_DUMP_FILE="$RUN/lifen_f3" FESOM_DUMP_MAXSTEPS="$NSTEPS" FESOM3_NSTEPS="$NSTEPS"
 ulimit -s unlimited
 mpirun --mca pml ob1 --mca btl self,vader --oversubscribe -n 1 \
-    "$F3/build_intel_dp/bin/fesom_lifecycle_native" 2>&1 | grep -E 'nod2D|NATIVE|native runoff|selfcheck|step [0-9]|done'
+    "$F3/build_intel_dp/bin/fesom_lifecycle_native" 2>&1 | grep -E 'nod2D|NATIVE|native runoff|ENABLED|selfcheck|step [0-9]|done'
 
 echo "[3/3] compare (13 NODE substeps x 5 probes x $NSTEPS steps; SW_AB substep 2 ignored)"
 python3 "$F3/tools/dump_diff.py" "$RUN/lifef_f2.00000" "$RUN/lifen_f3.00000" --ignore-substep=2

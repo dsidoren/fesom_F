@@ -16,9 +16,36 @@ module oce_tracer_grad
     use mod_part_bounds,  only: owned_bounds
     implicit none
     private
-    public :: tracer_gradient_elements
+    public :: tracer_gradient_elements, tracer_gradient_z
 
 contains
+
+    subroutine tracer_gradient_z(ttf, tr_z, mesh, partit)
+        ! Vertical tracer gradient tr_z(nz,n) = (ttf(nz-1,n)-ttf(nz,n))/dz, dz the mean of the
+        ! two adjacent layer thicknesses (FESOM2 oce_tracer_mod.F90:211-251). Feeds the Redi
+        ! K13/K23 isopycnal terms in diff_part_hor_redi (M4d). Loop owned+halo (nNodL) so tr_z
+        ! is halo-valid (FESOM2 loops myDim+eDim then exchanges; here the owned+halo loop reads
+        ! the already-valid ttf halo). tr_z=0 at the top/bottom interface.
+        type(t_mesh),  intent(in)  :: mesh
+        real(kind=WP), intent(in)  :: ttf(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(out) :: tr_z(mesh%nl, mesh%nod2D)
+        type(t_partit), intent(in), optional :: partit
+        integer :: n, nz, nzmin, nzmax
+        integer :: nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: dz
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do n = 1, nNodL
+            nzmax = mesh%nlevels_nod2D(n)
+            nzmin = mesh%ulevels_nod2D(n)
+            do nz = nzmin+1, nzmax-1
+                dz = 0.5_WP*(mesh%hnode(nz-1,n)+mesh%hnode(nz,n))
+                tr_z(nz, n) = (ttf(nz-1,n)-ttf(nz,n))/dz
+            end do
+            tr_z(nzmin, n) = 0.0_WP
+            tr_z(nzmax, n) = 0.0_WP
+        end do
+    end subroutine tracer_gradient_z
 
     subroutine tracer_gradient_elements(ttf, tr_xy, mesh, partit)
         ! computes elemental gradient of tracer  (oce_tracer_mod.F90:149-190).

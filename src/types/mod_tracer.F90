@@ -39,6 +39,9 @@ module mod_tracer
         integer,       allocatable, dimension(:)   :: nboundary_lay
         integer,       allocatable, dimension(:,:) :: edge_up_dn_tri
         real(kind=MP), allocatable, dimension(:,:,:) :: edge_up_dn_grad
+        ! M4d Redi: vertical tracer gradient (tracer_gradient_z), recomputed per tracer; NOT
+        ! serialized (allocated only when Redi). Feeds diff_part_hor_redi's K13/K23 slope terms.
+        real(kind=WP), allocatable, dimension(:,:) :: tr_z              ! (nl, nod2D)
     contains
         procedure :: write_tw => write_t_tracer_work
         procedure :: read_tw  => read_t_tracer_work

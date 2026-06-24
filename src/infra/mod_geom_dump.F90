@@ -54,6 +54,7 @@ contains
         call wr_r2(u, 'areasvol',          mesh%areasvol(1:nl, 1:nn))
         call wr_r2(u, 'area_inv',          mesh%area_inv(1:nl, 1:nn))
         call wr_r2(u, 'areasvol_inv',      mesh%areasvol_inv(1:nl, 1:nn))
+        call wr_r1(u, 'mesh_resolution',   mesh%mesh_resolution(1:nn))    ! M4 GM: scalar cell resolution
         call wr_i2(u, 'edges',             mesh%edges(1:2, 1:n2))
         call wr_i2(u, 'edge_tri',          mesh%edge_tri(1:2, 1:n2))
         call wr_i1(u, 'nlevels',           mesh%nlevels(1:ne))

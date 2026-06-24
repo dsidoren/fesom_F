@@ -38,15 +38,18 @@ module oce_pressure_bv
     ! dump's below-bottom region is a deterministic 0 on both sides of the gate.
     use mod_precision,   only: WP
     use mod_mesh,        only: t_mesh
-    use mod_constants,   only: density_0, g
+    use mod_constants,   only: density_0, g, pi
     use mod_config,      only: which_ALE
-    use mod_param_phys,  only: state_equation, N2smth_h, N2smth_v, N2smth_hidx
+    use mod_param_phys,  only: state_equation, N2smth_h, N2smth_v, N2smth_hidx, &
+                               scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97, &
+                               LDD97_c, LDD97_rmin, LDD97_rmax, Fer_GM, Redi, Redi_Ktaper
     use mod_partit,      only: t_partit
     use mod_part_bounds, only: owned_bounds, is_multirank
     use mod_halo,        only: exchange_nod
     implicit none
     private
     public :: pressure_bv, densityJM_components, insitu2pot
+    public :: sw_alpha_beta, compute_sigma_xy, compute_neutral_slope
 
 contains
 
@@ -393,5 +396,175 @@ contains
               +(-4.2393e-8_WP*t+1.8932e-6_WP)*ds                          &
               +((6.6228e-10_WP*t-6.836e-8_WP)*t+8.5258e-6_WP)*t+3.5803e-5_WP
     end function atg
+
+    !===========================================================================
+    subroutine sw_alpha_beta(temp, salt, mesh, sw_alpha, sw_beta, partit)
+        ! Thermal expansion (sw_alpha) + saline contraction (sw_beta) coefficients,
+        ! McDougall 1987 (FESOM2 oce_ale_pressure_bv.F90:2751). All-scalar per node/level
+        ! -> NO SIMD-divide trap. t1 = T*1.00024 (ITS-90->IPTS-68), p1 = |Z_3d_n| [db],
+        ! s35 = S-35. Per-node EOS -> loop owned+halo (nNodL), no exchange (FESOM3 idiom,
+        ! same as pressure_bv). M4 GM/Redi producer; outputs feed compute_sigma_xy.
+        type(t_mesh),  intent(in)    :: mesh
+        real(kind=WP), intent(in)    :: temp(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(in)    :: salt(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(inout) :: sw_alpha(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(inout) :: sw_beta(mesh%nl-1, mesh%nod2D)
+        type(t_partit), intent(in), optional :: partit
+        integer       :: n, nz, nzmin, nzmax, nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: t1, t1_2, t1_3, t1_4, p1, p1_2, p1_3, s1, s35, s35_2, a_over_b
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do n = 1, nNodL
+            nzmin = mesh%ulevels_nod2D(n)
+            nzmax = mesh%nlevels_nod2D(n)
+            do nz = nzmin, nzmax-1
+                t1 = temp(nz,n)*1.00024_WP
+                s1 = salt(nz,n)
+                p1 = abs(mesh%Z_3d_n(nz,n))
+                t1_2 = t1*t1; t1_3 = t1_2*t1; t1_4 = t1_3*t1
+                p1_2 = p1*p1; p1_3 = p1_2*p1
+                s35  = s1-35.0_WP; s35_2 = s35*s35
+                sw_beta(nz,n) = 0.785567e-3_WP - 0.301985e-5_WP*t1 &
+                     + 0.555579e-7_WP*t1_2 - 0.415613e-9_WP*t1_3 &
+                     + s35*(-0.356603e-6_WP + 0.788212e-8_WP*t1 &
+                     + 0.408195e-10_WP*p1 - 0.602281e-15_WP*p1_2) &
+                     + s35_2*(0.515032e-8_WP) &
+                     + p1*(-0.121555e-7_WP + 0.192867e-9_WP*t1 - 0.213127e-11_WP*t1_2) &
+                     + p1_2*(0.176621e-12_WP - 0.175379e-14_WP*t1) &
+                     + p1_3*(0.121551e-17_WP)
+                a_over_b = 0.665157e-1_WP + 0.170907e-1_WP*t1 &
+                     - 0.203814e-3_WP*t1_2 + 0.298357e-5_WP*t1_3 &
+                     - 0.255019e-7_WP*t1_4 &
+                     + s35*(0.378110e-2_WP - 0.846960e-4_WP*t1 &
+                     - 0.164759e-6_WP*p1 - 0.251520e-11_WP*p1_2) &
+                     + s35_2*(-0.678662e-5_WP) &
+                     + p1*(0.380374e-4_WP - 0.933746e-6_WP*t1 + 0.791325e-8_WP*t1_2) &
+                     + p1_2*t1_2*(0.512857e-12_WP) &
+                     - p1_3*(0.302285e-13_WP)
+                sw_alpha(nz,n) = a_over_b*sw_beta(nz,n)
+            end do
+        end do
+    end subroutine sw_alpha_beta
+
+    !===========================================================================
+    subroutine compute_sigma_xy(temp, salt, sw_alpha, sw_beta, mesh, sigma_xy, partit)
+        ! Density gradient sigma_xy (FESOM2 oce_ale_pressure_bv.F90:2851). Per owned node:
+        ! accumulate element T/S gradients (gradient_sca) x elem_area over nod_in_elem2D,
+        ! then sigma_xy(1/2) = (-sw_alpha*Tgrad + sw_beta*Sgrad)/vol*density_0. The /vol is
+        ! an array divide -> SIMD-divide trap (L29): gate then NOVECTOR if codegen vectorizes.
+        ! The owned-node element neighbourhood is complete (M2.12a invariant) -> loop owned +
+        ! exchange (oracle uses the 3x MPI_BARRIER aux dance; the rank-3 exchange_nod is the
+        ! byte-equivalent owner->halo broadcast).
+        type(t_mesh),  intent(in)    :: mesh
+        real(kind=WP), intent(in)    :: temp(mesh%nl-1, mesh%nod2D), salt(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(in)    :: sw_alpha(mesh%nl-1, mesh%nod2D), sw_beta(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(inout) :: sigma_xy(2, mesh%nl-1, mesh%nod2D)
+        type(t_partit), intent(in), optional :: partit
+        integer       :: n, nz, k, el, nln, uln, nle, ule, nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: tx(mesh%nl-1), ty(mesh%nl-1), sx(mesh%nl-1), sy(mesh%nl-1), vol(mesh%nl-1)
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do n = 1, nNodO
+            nln = mesh%nlevels_nod2D(n)-1
+            uln = mesh%ulevels_nod2D(n)
+            vol(uln:nln) = 0.0_WP
+            tx(uln:nln) = 0.0_WP; ty(uln:nln) = 0.0_WP
+            sx(uln:nln) = 0.0_WP; sy(uln:nln) = 0.0_WP
+            do k = 1, mesh%nod_in_elem2D_num(n)
+                el  = mesh%nod_in_elem2D(k, n)
+                nle = mesh%nlevels(el)-1
+                ule = mesh%ulevels(el)
+                do nz = ule, nle
+                    vol(nz) = vol(nz) + mesh%elem_area(el)
+                    tx(nz) = tx(nz) + (mesh%gradient_sca(1,el)*temp(nz,mesh%elem2D_nodes(1,el)) &
+                                     + mesh%gradient_sca(2,el)*temp(nz,mesh%elem2D_nodes(2,el)) &
+                                     + mesh%gradient_sca(3,el)*temp(nz,mesh%elem2D_nodes(3,el)))*mesh%elem_area(el)
+                    ty(nz) = ty(nz) + (mesh%gradient_sca(4,el)*temp(nz,mesh%elem2D_nodes(1,el)) &
+                                     + mesh%gradient_sca(5,el)*temp(nz,mesh%elem2D_nodes(2,el)) &
+                                     + mesh%gradient_sca(6,el)*temp(nz,mesh%elem2D_nodes(3,el)))*mesh%elem_area(el)
+                    sx(nz) = sx(nz) + (mesh%gradient_sca(1,el)*salt(nz,mesh%elem2D_nodes(1,el)) &
+                                     + mesh%gradient_sca(2,el)*salt(nz,mesh%elem2D_nodes(2,el)) &
+                                     + mesh%gradient_sca(3,el)*salt(nz,mesh%elem2D_nodes(3,el)))*mesh%elem_area(el)
+                    sy(nz) = sy(nz) + (mesh%gradient_sca(4,el)*salt(nz,mesh%elem2D_nodes(1,el)) &
+                                     + mesh%gradient_sca(5,el)*salt(nz,mesh%elem2D_nodes(2,el)) &
+                                     + mesh%gradient_sca(6,el)*salt(nz,mesh%elem2D_nodes(3,el)))*mesh%elem_area(el)
+                end do
+            end do
+            sigma_xy(1,uln:nln,n) = (-sw_alpha(uln:nln,n)*tx(uln:nln)+sw_beta(uln:nln,n)*sx(uln:nln))/vol(uln:nln)*density_0
+            sigma_xy(2,uln:nln,n) = (-sw_alpha(uln:nln,n)*ty(uln:nln)+sw_beta(uln:nln,n)*sy(uln:nln))/vol(uln:nln)*density_0
+        end do
+        if (present(partit)) then
+            if (is_multirank(partit)) call exchange_nod(sigma_xy, partit)
+        end if
+    end subroutine compute_sigma_xy
+
+    !===========================================================================
+    subroutine compute_neutral_slope(sigma_xy, bvfreq, mesh, neutral_slope, slope_tapered, fer_tapfac, partit)
+        ! Neutral slope + ODM95/LDD97 tapering (FESOM2 oce_ale_pressure_bv.F90:2949).
+        ! ro_z_inv = 2*g/density_0/max(bvfreq(nz)+bvfreq(nz+1), eps^2) -> variable-divisor
+        ! SIMD trap. ODM95 c1 = 0.5*(1+tanh((Scr-|S|)/Sd)), 0 if N2<=0; LDD97 c2 (off at
+        ! scaling_LDD97=.false. -> c2=1). work_core (Fer_GM.and.Redi.and.Redi_Ktaper) branch:
+        ! fer_tapfac = c1*c2, slope_tapered = ns*sqrt(c1*c2); else slope_tapered = ns*c1*c2.
+        type(t_mesh),  intent(in)    :: mesh
+        real(kind=WP), intent(in)    :: sigma_xy(2, mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(in)    :: bvfreq(mesh%nl, mesh%nod2D)
+        real(kind=WP), intent(inout) :: neutral_slope(3, mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(inout) :: slope_tapered(3, mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(inout) :: fer_tapfac(mesh%nl-1, mesh%nod2D)
+        type(t_partit), intent(in), optional :: partit
+        integer       :: n, nz, nl1, ul1, nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: ro_z_inv, eps, f_min, dep_scale, rssby
+        real(kind=WP) :: c1(mesh%nl-1), c2(mesh%nl-1)
+        eps   = 5.0e-6_WP
+        f_min = 1.0e-6_WP
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do n = 1, nNodO
+            slope_tapered(:, :, n) = 0.0_WP
+            nl1 = mesh%nlevels_nod2D(n)-1
+            ul1 = mesh%ulevels_nod2D(n)
+            do nz = ul1, nl1
+                ! N2 = -g*drho/dz; the minus is hidden in the buoyancy definition
+                ro_z_inv = 2.0_WP*g/density_0/max(bvfreq(nz,n)+bvfreq(nz+1,n), eps**2)
+                neutral_slope(1,nz,n) = sigma_xy(1,nz,n)*ro_z_inv
+                neutral_slope(2,nz,n) = sigma_xy(2,nz,n)*ro_z_inv
+                neutral_slope(3,nz,n) = sqrt(neutral_slope(1,nz,n)**2+neutral_slope(2,nz,n)**2)
+            end do
+            ! ODM95 (Danabasoglu & McWilliams 1995) tanh slope tapering
+            c1 = 1.0_WP
+            if (scaling_ODM95) then
+                do nz = ul1, nl1
+                    c1(nz) = 0.5_WP*(1.0_WP + tanh((ODM95_Scr - neutral_slope(3,nz,n))/ODM95_Sd))
+                    if ((bvfreq(nz,n) <= 0.0_WP) .or. (bvfreq(nz+1,n) <= 0.0_WP)) c1(nz) = 0.0_WP
+                end do
+            end if
+            ! LDD97 (Large et al. 1997) surface Rossby-radius taper (off in work_core)
+            c2 = 1.0_WP
+            if (scaling_LDD97) then
+                rssby = LDD97_c/max(abs(mesh%coriolis_node(n)), f_min)
+                rssby = min(LDD97_rmax, max(LDD97_rmin, rssby))
+                do nz = ul1, nl1
+                    dep_scale = rssby*neutral_slope(3,nz,n)
+                    if (abs(mesh%Z_3d_n(nz,n)) < dep_scale) then
+                        c2(nz) = 0.5_WP*(1.0_WP + sin(pi*abs(mesh%Z_3d_n(nz,n))/dep_scale - pi/2.0_WP))
+                    end if
+                end do
+            end if
+            ! taper slope with c1*c2; Redi_Ktaper splits sqrt between slope and Ki
+            if (Fer_GM .and. Redi .and. Redi_Ktaper) then
+                do nz = ul1, nl1
+                    fer_tapfac(nz, n) = c1(nz) * c2(nz)
+                    slope_tapered(:, nz, n) = neutral_slope(:, nz, n) * sqrt(c1(nz) * c2(nz))
+                end do
+            else
+                do nz = ul1, nl1
+                    slope_tapered(:, nz, n) = neutral_slope(:, nz, n) * c1(nz) * c2(nz)
+                end do
+            end if
+        end do
+        if (present(partit)) then
+            if (is_multirank(partit)) then
+                call exchange_nod(neutral_slope, partit)
+                call exchange_nod(slope_tapered, partit)
+            end if
+        end if
+    end subroutine compute_neutral_slope
 
 end module oce_pressure_bv

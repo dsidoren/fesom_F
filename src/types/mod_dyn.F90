@@ -43,6 +43,19 @@ module mod_dyn
         ! names Kv/Av; recomputed each step from N^2 + uvnode shear, NOT serialized.
         real(kind=WP), allocatable, dimension(:,:)   :: Kv              ! (nl,  nod2D) vertical diffusivity (tracers)
         real(kind=WP), allocatable, dimension(:,:)   :: Av              ! (nl,  elem2D) vertical viscosity (momentum)
+        ! M4 GM/Redi aux fields (recomputed each step from T/S; NOT serialized). FESOM2
+        ! o_ARRAYS names. Allocated only when Fer_GM/Redi is on (the GM-off step never
+        ! touches them). sw_alpha/sw_beta -> sigma_xy; init_Redi_GM -> fer_K/fer_c/fer_scal;
+        ! fer_solve_Gamma -> fer_gamma. fer_uv/fer_w (the bolus velocities) ride t_dyn.
+        real(kind=WP), allocatable, dimension(:,:)   :: sw_alpha, sw_beta ! (nl-1, nod2D) EOS expansion coeffs
+        real(kind=WP), allocatable, dimension(:,:,:) :: sigma_xy         ! (2, nl-1, nod2D) density gradient
+        real(kind=WP), allocatable, dimension(:,:)   :: fer_K            ! (nl,  nod2D) GM diffusivity
+        real(kind=WP), allocatable, dimension(:)     :: fer_c, fer_scal  ! (nod2D) gravity-wave c^2 / scaling
+        real(kind=WP), allocatable, dimension(:,:,:) :: fer_gamma        ! (2, nl, nod2D) GM streamfunction
+        ! M4d Redi: compute_neutral_slope outputs + the Redi diffusivity (init_Redi_GM).
+        real(kind=WP), allocatable, dimension(:,:,:) :: neutral_slope, slope_tapered ! (3, nl-1, nod2D)
+        real(kind=WP), allocatable, dimension(:,:)   :: fer_tapfac       ! (nl-1, nod2D) Redi/GM slope taper
+        real(kind=WP), allocatable, dimension(:,:)   :: Ki               ! (nl-1, nod2D) Redi isopycnal diffusivity
     contains
         procedure :: write_dw => write_t_dyn_work
         procedure :: read_dw  => read_t_dyn_work

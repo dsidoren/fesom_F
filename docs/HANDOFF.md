@@ -6,8 +6,15 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
 ## Where we are
 
 - **Milestone:** M2 (minimal ocean dynamical core) — **multi-rank MVP byte-match ACHIEVED (tag `m2-mvp`).**
-  **→ M3 (sea ice EVP) ✅ COMPLETE 2026-06-23 (all M3a–M3f DONE, `max|Δ|=0` 1-rank AND multi-rank) — ready to commit +
-  tag `m3`. Scoped 2026-06-22 into M3a–M3f. M3a (ice foundation + cold-start IC + FCT mass
+  **→ M3 (sea ice EVP) ✅ COMPLETE 2026-06-23 (all M3a–M3f DONE, `max|Δ|=0` 1-rank AND multi-rank) — ✅ COMMITTED
+  (`b591153`, tag `m3`).**
+  **→ M4 (GM/Redi) ✅ COMPLETE 2026-06-24 (all M4a–M4f DONE, `max|Δ|=0` 1-rank AND multi-rank) — ✅ COMMITTED (tag `m4`).**
+  M4a (producers) + M4b (GM diffusivity/streamfunction/bolus-velocity) + M4c (GM bolus into advection) + M4d (Redi
+  isopycnal diffusion) + M4e (GM+Redi in the FORCED/fully-native lifecycle) + M4f (multi-rank) all byte-gated
+  `max|Δ|=0` vs FESOM2 (CORE2 1-rank AND dist_2/dist_8, both whichEVP). Plan: `docs/plans/2026-06-23-m4-gm-redi.md`.
+  **ACTIVE NEXT = M5 (KPP + production multi-year, paper-parity).** See "Milestone ordering" + the M4 detail in the
+  "ACTIVE NEXT" / "↳ RESUME HERE" sections below.
+  (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,
   `tools/run_evp_gate_core2.sh`). M3c (ice FCT advection) ✅ DONE 2026-06-22 (`max|Δ|=0`, 6 fields = `rhs_a/m/ms` +
@@ -397,21 +404,153 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
       `dump_shim` is the gate). **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi +
       step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`. ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35).
 
-**↳ RESUME HERE (next session): M3 is ✅ COMPLETE — commit + tag `m3`, then start M4.** ALL of M3a–M3f are DONE:
-the native sea-ice EVP (+mEVP) + advection + thermo + air-sea budget AND the WHOLE atmosphere (NCAR read + bulk + 2
-stresses + runoff + Ssurf, 16/16 arrays) drive the multi-step coupled CORE2 lifecycle byte-exactly with NO prescribed
-input, at **1-rank AND multi-rank (dist_2 + dist_8), BOTH whichEVP, 195 + 325 records, `max|Δ|=0`** (M3f-4 done, L43).
-The M3-work is UNCOMMITTED (whole `src/ice/`, the M3 drivers + tools, and the M3f-4 changes to `mod_mesh_areas.F90`
-[ocean_area allreduce] + `mod_forcing_bulk.F90` [partit→nNodL] + the new `fesom_lifecycle_native_mr` driver +
-`run_lifecycle_fullynative_gate_multirank.sh` + the `[np]` arg on `run_lifecycle_forced_core2.sh`); commit it all and
-tag `m3` (the M2 baseline stays at tag `m2-mvp`). The MR gate is `tools/run_lifecycle_fullynative_gate_multirank.sh
-[np] [nsteps] [whichEVP]`; the 1-rank gate is `tools/run_lifecycle_fullynative_gate_core2.sh`. ⚠️ multi-rank levante
-needs the `env.sh` KNEM flag (L35). **M4 (next milestone): the deferred physics** — `use_wsplit`/`adv_tra_vert_impl`
-(implicit vertical advection w-split, currently `error stop`), `zlevel`/`zstar` ALE (non-linfs free surface), GM/Redi
-(`Fer_GM`/`Redi`), KPP mixing, `use_sw_pene`/`sw_3d` shortwave penetration + the `dens_flux` MOC diagnostic, the JRA55
-(gregorian) forcing variant + the SSS/chl climatology readers' full time-interp, ice restart binary I/O (M3 is
-cold-start), and `aEVP` (whichEVP=2). Scope M4 against the shipped CORE2 KPP/GM namelist (vs the reduced-M2 config).
-The PRIOR resume target follows.
+**↳ RESUME HERE (next session): M5 — KPP vertical mixing + production multi-year (paper-parity). M4 (GM/Redi) is
+✅ COMPLETE + COMMITTED (tag `m4`).** The full GM bolus + Redi isopycnal diffusion is byte-exact `max|Δ|=0` vs FESOM2
+end-to-end: 1-rank AND multi-rank (CORE2 dist_2/dist_8), unforced AND forced/fully-native (sea ice + native CORE2
+forcing), GM-only AND GM+Redi, BOTH whichEVP. Gates: `run_lifecycle_gm_gate_core2.sh` (M4c GM-only unforced),
+`run_lifecycle_redi_gate_core2.sh` (M4d GM+Redi unforced), `run_lifecycle_gmredi_native_gate_core2.sh` (M4e
+GM+Redi fully-native 1-rank), `run_lifecycle_gmredi_native_gate_multirank.sh` (M4f GM+Redi fully-native dist_2/8).
+M4 is enabled by env: the FESOM3 `fesom_lifecycle` / `fesom_lifecycle_native` / `fesom_lifecycle_native_mr` drivers
+read `FESOM3_FER_GM` / `FESOM3_REDI`; the oracle runners `run_lifecycle_core2.sh` (unforced) and
+`run_lifecycle_forced_core2.sh` (forced/MR) read `FER_GM=1` / `REDI=1` to KEEP the work_core `Fer_GM`/`Redi=.true.`.
+
+**M4f KEY FINDING (the M4 capstone):** the M4 routines were ALREADY MULTI-RANK READY — every kernel was transcribed
+(M4a–M4d) with the M2.12/M3 optional-`partit` pattern (owned-loop bounds + the FESOM2 halo exchanges), and
+`mod_step_oce::step_oce` already threads the optional `partit` to all of them. So M4f was a pure WIRING task (the
+GM/Redi config + LOCAL-sized array allocation into `fesom_lifecycle_native_mr` + the gate env) — the partit-present
+path that M4a–M4d wrote but never gated just worked, FIRST try, NO halo extension, NO `dist_N` invariant check needed
+(the GM/Redi producers reuse the SAME mesh ops — `nod_in_elem2D`+`gradient_sca` over owned elements, owned-edge loops —
+the M2.12 dynamics already proved invariant). `sw_alpha_beta`/`tracer_gradient_z` compute over owned+halo (no exchange);
+`compute_sigma_xy`/`compute_neutral_slope`/`init_Redi_GM`/`fer_solve_Gamma`/`fer_gamma2vel`/`vert_vel_ale` exchange
+their outputs; the Redi diff terms loop owned edges/nodes reading exchanged/halo-valid inputs.
+
+**M5 = KPP vertical mixing (the real production CORE2 config: `mix_scheme='KPP'` instead of the reduced-M2 PP).**
+The production `work_core` runs KPP + Fer_GM + Redi + sw_pene + `which_ALE='zlevel'`. M4 added GM+Redi; M5 swaps PP→KPP
+and turns on `use_sw_pene` (the shortwave penetration term in the tracer TDMA, currently `.false.` to dodge the
+unallocated `sw_3d`). Mirror the M4 method: port `oce_ale_mixing_kpp.F90` (the KPP boundary-layer + interior scheme),
+gate `max|Δ|=0` vs FESOM2 with `mix_scheme='KPP'`, then the forced/fully-native lifecycle, then multi-rank. The oracle
+has work-dirs staged for the future targets (`work_zstar_kpp`/`work_tke_dump`). See "Milestone ordering" below + the
+plan doc `2026-06-18-fesom3-architecture.md`.
+
+⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35). ⚠️ Gate every consumed intermediate (L29). ⚠️ **Read the
+ACTUAL FESOM2 `.F90` + `work_core` namelists, NOT the plan summaries** (they were wrong on `MLD1_ind` + `K_hor` in M4).
+M3 ✅ COMMITTED (`b591153`, tag `m3`); M4 ✅ COMMITTED (tag `m4`); the M2 baseline stays at `m2-mvp`.
+
+**Milestone ordering (plan doc `2026-06-18-fesom3-architecture.md`):** M4 = GM/Redi → M5 = KPP + production
+multi-year (paper-parity) → M6 = beyond-paper (zstar/zlevel ALE, TKE, aEVP). mEVP (whichEVP=1) was already
+delivered in M3. **The real production CORE2 config (`work_core`) runs KPP + Fer_GM + Redi + sw_pene + which_ALE='zlevel'**
+— the reduced-M2 gate sed-downgrades ALL of these (linfs/PP/no-GM/no-Redi/no-sw_pene, `run_lifecycle_forced_core2.sh:44-53`);
+the oracle has work-dirs staged for the future targets (`work_zstar_dump`/`work_zstar_kpp`/`work_zstar_tke`/`work_tke_dump`).
+
+**M4 = GM/Redi (turn ON `Fer_GM`+`Redi` over the existing PP+linfs core; gate `max|Δ|=0` vs FESOM2 with the matching
+config).** Decomposed M4a–M4f (full detail + oracle map + SIMD-divide watch-list in the plan file):
+- **M4a ✅ DONE** — producers (`mesh_resolution` compute, `sw_alpha_beta`, `compute_sigma_xy`,
+  `compute_neutral_slope`→`slope_tapered`/`fer_tapfac`); feed-forward, the safest first gate. (`MLD1_ind` turned out
+  DEAD under work_core — see M4b.)
+- **M4b ✅ DONE** — GM diffusivity + streamfunction + bolus velocity (new `oce_fer_gm.F90`: `init_Redi_GM`,
+  `fer_solve_Gamma` TDMA, `fer_gamma2vel`; `fer_w` in `vert_vel_ale`). `Fer_GM=T`, `Redi=F`. 70-field pressure gate
+  `max|Δ|=0`, first try.
+- **M4c ✅ DONE** — GM bolus into tracer advection (add/subtract `fer_uv`/`fer_w` in `solve_tracers_ale` + GM chain
+  wired into `step_oce`); unforced lifecycle gate `max|Δ|=0` (195+325 records). `Fer_GM=T`, `Redi=F`.
+- **M4d ✅ DONE** — Redi isopycnal diffusion (`Ki` real field; K13/K23 in `diff_part_hor_redi`, NEW
+  `diff_ver_part_redi_expl` K31/K32, K33 in `diff_ver_part_impl_ale`). Gated `Fer_GM=T, Redi=T` (the plan's `Fer_GM=F`
+  is vacuous — work_core `K_hor=0`); unforced lifecycle `max|Δ|=0` (195+325). Merges with M4e-unforced.
+- **M4e ✅ DONE** — both on in the FORCED / fully-native lifecycle (production tracer physics, + ice + native forcing).
+  `Fer_GM=T`, `Redi=T`. Byte-exact 195+325 records, BOTH whichEVP (`tools/run_lifecycle_gmredi_native_gate_core2.sh`).
+- **M4f ✅ DONE** — multi-rank (the M4 routines were ALREADY MR-ready; pure wiring + gating). CORE2 dist_2/dist_8,
+  195+325 records, BOTH whichEVP, `max|Δ|=0` (`tools/run_lifecycle_gmredi_native_gate_multirank.sh`). Tag `m4`.
+
+**M4 ✅ COMPLETE + COMMITTED (tag `m4`). M4a producers + M4b GM diffusivity/streamfunction/bolus-velocity + M4c
+GM-bolus-into-advection + M4d Redi isopycnal diffusion + M4e GM+Redi in the FORCED/fully-native lifecycle + M4f
+multi-rank ✅ DONE + byte-gated 2026-06-23/24 (`max|Δ|=0`, CORE2 1-rank AND dist_2/dist_8). ACTIVE NEXT = M5 (KPP).**
+- **M4a** — `mesh_resolution` (`mod_mesh_areas.F90::compute_mesh_resolution`, rides the geom gate → 20 fields) +
+  `sw_alpha_beta`/`compute_sigma_xy`/`compute_neutral_slope` (`oce_pressure_bv.F90`): the 6 fields
+  `sw_alpha`/`sw_beta`/`sigma_xy`/`neutral_slope`/`slope_tapered`/`fer_tapfac` appended to the CORE2 pressure gate.
+  Both harnesses force the `work_core` taper config around the producer calls (`Fer_GM=Redi=Redi_Ktaper=.true.`,
+  `ODM95_Scr=0.2e-2` — the work_core override, not the 1e-2 default), then restore; the oracle snapshots
+  `slope_tapered` before the shim zeros it at `:483`.
+- **M4b** — new `src/oce/oce_fer_gm.F90` (`init_Redi_GM` + `fer_solve_Gamma` TDMA + `fer_gamma2vel`, explicit-dataflow
+  + optional-`partit`) + `fer_w` added to `vert_vel_ale` (`oce_ale.F90`, `if(Fer_GM)`-guarded → byte-neutral at
+  `Fer_GM=.false.`). The 6 fields `fer_K`/`fer_c`/`fer_scal`/`fer_gamma`/`fer_uv`/`fer_w` appended to the CORE2
+  pressure gate → **70 PASS / 0 FAIL** (FIRST try, NO NOVECTOR needed). FESOM3 `fesom_pressuredump` + oracle
+  `fesom_pressure_dump` each force `Fer_GM=T, Redi=F` + work_core GM config (`K_GM_max=1000`/`min=2`/`cm=3`/`cmin=0.1`/
+  `resscalorder=2`/`rampmax=rampmin=-1`/`Ktaper=F`/`scaling_resolution=T`/`scaling_GMzexp=T`/`zref=500`/`smin=0.6`)
+  around the GM calls + the existing `vert_vel_ale` (so it fills `fer_w`), then restore; fer arrays init'd to the
+  FESOM2 `oce_setup_step.F90:962-967` values (`fer_K=500`/`fer_c=1`/`fer_scal=0`/`fer_gamma=0`, `fer_uv/fer_w=0`) so
+  below-bottom byte-matches. **KEY: `MLD1_ind` is DEAD under work_core** (read ONLY in `init_Redi_GM`'s
+  `scaling_Ferreira` branch; work_core uses `scaling_GMzexp` → GMzexp `exp(-|zbar_3d_n|/zref)`, needs no MLD1_ind/
+  bvref) → NOT implemented (L33, the plan's "fold into M4b" assumed Ferreira); `fer_tapfac`/`neutral_slope` likewise
+  unconsumed by GM (`K_GM_Ktaper=F`, `scaling_FESOM14=F`). Only the work_core GM path is ported — `init_Redi_GM`
+  `error stop`s on `scaling_Ferreira/Rossby/GINsea/FESOM14/K_GM_Ktaper/Redi` (the **Redi Ki path is M4d**, which
+  removes Redi from the guard + passes a `Ki` arg). `zbar_n_bot(n)` (absent in FESOM3's mesh) ==
+  `mesh%zbar_3d_n(nlevels_nod2D(n),n)` (FESOM2 `oce_ale.F90:550`); `fer_solve_Gamma` mirrors the oracle's
+  `tr => fer_gamma(:,:,n)` POINTER (dodges the L29 SIMD-divide trap). No regression (pressure 70 + step-65 1-rank +
+  step-65 MR dist_2 + ctest 13/13 `max|Δ|=0`).
+- **M4c** — GM bolus wired INTO the step + lifecycle (`mod_step_oce`: producers `sw_alpha_beta`→`compute_sigma_xy`
+  after PGF, then `init_Redi_GM`→`fer_solve_Gamma`→`fer_gamma2vel` after `update_eta_n` before `vert_vel_ale`; bolus
+  add/subtract in `solve_tracers_ale` — once around the tracer loop over owned+halo, `uv += fer_uv`/`w_e += fer_w`/
+  `w += fer_w` before advection, subtracted before the salinity clamp; all `if(Fer_GM)`). GM aux fields added to
+  `t_dyn_work` (non-serialized; allocated only when `Fer_GM`). The UNFORCED CORE2 lifecycle with GM ON is **`max|Δ|=0`
+  — 195 records (3-step) AND 325 records (5-step)** (`tools/run_lifecycle_gm_gate_core2.sh`, FIRST try). Gate: the
+  oracle base namelist IS work_core (GM params already correct) so `run_lifecycle_core2.sh` gained `FER_GM=1` to KEEP
+  `Fer_GM=.true.` (Redi sed off); FESOM3 `fesom_lifecycle` gained `FESOM3_FER_GM` (sets `Fer_GM` + work_core GM config
+  + allocates/inits the GM arrays). NO oracle source change. `compute_neutral_slope` SKIPPED (Redi/Ktaper-only,
+  unconsumed at M4c → M4d). `fer_w` into BOTH `w` and `w_e` (faithful; `w_e` unused at `use_wsplit=.false.`). No
+  regression: GM-OFF lifecycle 195 `|Δ|=0` (the `Fer_GM`-guarded edits are byte-neutral), step-65 1-rank `|Δ|=0`,
+  ctest 13/13.
+- **M4d** — Redi isopycnal diffusion, gated `Fer_GM=T + Redi=T` (production GM+Redi) UNFORCED lifecycle: **`max|Δ|=0`,
+  195 (3-step) + 325 (5-step) records** (`tools/run_lifecycle_redi_gate_core2.sh`, FIRST try, NO NOVECTOR). **KEY (from
+  the actual Fortran): the plan's "Fer_GM=F, Redi=T" isolating config is VACUOUS** — work_core `namelist.tra` sets
+  `K_hor=0` so `init_Redi_GM` F1 `Ki(nzmin)=K_hor**(..)=0`; the only non-zero `Ki` is the `if(Redi.and.Fer_GM)` coupling
+  `Ki=max(fer_scal*Redi_Kmax,K_GM_min)` (needs Fer_GM=T). So M4d gates BOTH on (merges plan M4d+M4e-unforced); M4c
+  already pinned GM-only so a pass isolates the Redi terms. Implemented: `init_Redi_GM` Redi path (Redi removed from the
+  guard; `Redi_Kmax<=0` sync; F1/coupling/F2 Ki + `Redi_Ktaper` sqrt-split; `Ki`/`fer_tapfac` optional args);
+  `compute_neutral_slope` into `step_oce` (`if(Fer_GM.or.Redi)`); `diff_part_hor_redi` K13/K23 (`Tz`/`SxTz`/`SyTz`,
+  `replace_all` across the 5 level-ranges); NEW `diff_ver_part_redi_expl` K31/K32; `diff_ver_part_impl_ale` K33
+  (`slope_tapered(3)^2*Ki` augments `Kv` in the tridiag); `tracer_gradient_z`→`tr_z` (new `t_tracer_work` field).
+  Redi aux (`Ki`/`neutral_slope`/`slope_tapered`/`fer_tapfac`) in `t_dyn_work`, allocated only when Redi; ALL Redi reads
+  `if(Redi)`-guarded so the off configs (arrays unallocated) are byte-neutral (`-(Kv+0)*..==-Kv*..` by IEEE +0). Gate:
+  `run_lifecycle_core2.sh` `REDI=1` keeps work_core `Redi=.true.`; `fesom_lifecycle` `FESOM3_REDI` enables it. NO oracle
+  source change; Redi non-vacuous (max|uv| differs from GM-only). No regression: M4c GM-only 195 `|Δ|=0`, GM-OFF 195
+  `|Δ|=0`, step-65 `|Δ|=0`, ctest 13/13.
+- **M4e** — GM+Redi in the FORCED / fully-native lifecycle (production tracer physics + ice + native forcing): **`max|Δ|=0`,
+  195 (3-step) + 325 (5-step) records, BOTH whichEVP=0 (std EVP) AND whichEVP=1 (mEVP)**
+  (`tools/run_lifecycle_gmredi_native_gate_core2.sh`, FIRST try, 2026-06-24). **Pure WIRING — NO new physics code.** The
+  M4a–M4d kernels (`step_oce`'s `Fer_GM`/`Redi`-guarded chain) are unchanged; M4e just enables them in the native run:
+  (1) FESOM3 `fesom_lifecycle_native.F90` got the `FESOM3_FER_GM`/`FESOM3_REDI` env reads + work_core GM+Redi config +
+  `dyn%work` GM/Redi array allocation block, COPIED VERBATIM from `fesom_lifecycle.F90`; `step_oce` (1-rank, no `partit`)
+  reads the module flags + consumes the `dyn%work`/`fer_uv`/`tr_z` arrays → the GM+Redi chain runs on the FORCED state
+  with no further change (first GM/Redi exercise on a non-zero-flux ocean). (2) Oracle `run_lifecycle_forced_core2.sh`
+  gained `FER_GM`/`REDI` env (mirror `run_lifecycle_core2.sh`) — `=1` KEEPS work_core `Fer_GM`/`Redi=.true.`; NO oracle
+  source change. (3) `run_lifecycle_fullynative_gate_core2.sh` gained `FER_GM`/`REDI` env (passes to oracle + exports
+  `FESOM3_FER_GM`/`FESOM3_REDI`); thin wrapper `run_lifecycle_gmredi_native_gate_core2.sh` (FER_GM=1 REDI=1). The native
+  forcing + flux self-checks print `max|Δ|=0` at every step under GM+Redi. No regression: M3f GM/Redi-OFF fully-native
+  195 `|Δ|=0` (the shared-oracle-runner + gate-script edits are byte-neutral OFF), M4d unforced GM+Redi 195 `|Δ|=0`,
+  ctest 13/13. Build incremental (only `fesom_lifecycle_native` relinked — no core-physics/new-file change).
+- **M4f** — multi-rank GM+Redi (production tracer physics at MULTI-RANK): **`max|Δ|=0`, CORE2 dist_2 AND dist_8,
+  195 (3-step) + 325 (5-step) records, BOTH whichEVP** (`tools/run_lifecycle_gmredi_native_gate_multirank.sh`,
+  FIRST try, 2026-06-24). **Pure WIRING — NO new physics, NO halo extension, NO `dist_N` invariant check needed.** The
+  M4 routines were ALREADY MR-ready (transcribed M4a–M4d with the M2.12/M3 optional-`partit` pattern; `step_oce` threads
+  `partit` to all of them — the partit-present path was written but never gated). The exchanges already in place:
+  `compute_sigma_xy`→`exchange_nod(sigma_xy)` (the rank-3 superset of the oracle's 3×`MPI_BARRIER` per-component dance =
+  same bytes), `compute_neutral_slope`→`exchange_nod(neutral_slope/slope_tapered)`, `init_Redi_GM`→`exchange_nod(fer_c/
+  fer_K/Ki)`, `fer_solve_Gamma`→`exchange_nod(fer_gamma)`, `fer_gamma2vel`→`exchange_elem(fer_uv)`, `vert_vel_ale`→
+  `exchange_nod(fer_w)`. `sw_alpha_beta`+`tracer_gradient_z` compute owned+halo (no exchange — the compute-at-halo idiom).
+  The Redi diff terms loop OWNED edges/nodes reading exchanged `slope_tapered`/`Ki` + halo-valid `tr_z` (reusing the
+  M2.12c-3 owned-edge invariant). Only edit: the GM/Redi config + LOCAL-sized (nNodL/nElemF) array allocation block into
+  `fesom_lifecycle_native_mr.F90` (`fer_uv` sized nElemF like `dyn%uv`) + the gate env. No regression: GM/Redi-OFF MR
+  fully-native dist_2 195 `|Δ|=0`, ctest 13/13.
+**M4 ✅ COMMITTED (tag `m4`, M4a–M4f together).** FESOM3 changed: `oce_fer_gm.F90` (NEW)/`oce_ale.F90`/
+`oce_ale_tracer.F90`/`oce_pressure_bv.F90`/`oce_tracer_grad.F90`/`mod_dyn.F90`/`mod_tracer.F90`/`mod_step_oce.F90`/
+`mod_mesh_areas.F90`/`mod_geom_dump.F90`/`fesom_pressuredump.F90`/`fesom_lifecycle.F90`/`fesom_lifecycle_native.F90`/
+`fesom_lifecycle_native_mr.F90` + `tools/run_lifecycle_core2.sh`/`run_lifecycle_gm_gate_core2.sh`/
+`run_lifecycle_redi_gate_core2.sh`/`run_lifecycle_forced_core2.sh`/`run_lifecycle_fullynative_gate_core2.sh`/
+`run_lifecycle_fullynative_gate_multirank.sh`/`run_lifecycle_gmredi_native_gate_core2.sh` (NEW)/
+`run_lifecycle_gmredi_native_gate_multirank.sh` (NEW). Oracle (UNCOMMITTED working-tree, by design):
+`fesom_pressure_dump.F90`/`fesom_geom_dump.F90` + `libfesom.so` rebuilt.
+**NEXT: M5 — KPP vertical mixing + production multi-year (paper-parity).** Plan:
+`docs/plans/2026-06-23-m4-gm-redi.md` (M4 log) + `2026-06-18-fesom3-architecture.md` (milestone ordering). The PRIOR
+resume target follows.
 
 **↳ (prior) M3f — whole ice step + forced lifecycle (NATIVE fluxes) + multi-rank, tag `m3`.**
 M3a + M3b + M3c + M3d + M3e are ALL DONE — the ice foundation, the EVP dynamics (ocean2ice + standard EVP + mEVP), the
@@ -435,17 +574,23 @@ forcing read (NCAR bulk → `stress_atmoce_x/y` + `Ch/Ce_atm_oce_arr` + prec/run
 — the M2.10 forcing read is proven, but the bulk-formula `stress_atmoce` assembly (`gen_bulk`/`fesom_forcing_dump.F90`
 path) is NOT yet ported (M3f scope). ⚠️ **Any multi-rank run on levante needs the env.sh MPI flag** (sourcing `env.sh`).
 
-Regression sanity (re-run any time — e.g. after a rebuild; all `max|Δ|=0`/green as of 2026-06-23):
+Regression sanity (re-run any time — e.g. after a rebuild; all `max|Δ|=0`/green as of 2026-06-24):
 ```bash
-./configure.sh --compiler intel --precision dp --clean --build   # clean rebuild (L19) if NEW files were added
-bash tools/run_step_gate_multirank.sh 2          # 65 records, worst |Δ|=0
-bash tools/run_step_gate_multirank.sh 8          # 65 records, worst |Δ|=0
+./configure.sh --compiler intel --precision dp --build           # incremental (edits-only M4b–M4e);
+                                                                 # --clean only when NEW files were added (L19)
 bash tools/run_step_gate.sh                      # 65 records, worst |Δ|=0 (1-rank)
-bash tools/run_stepdyn_gate_multirank.sh 2       # 30 records (c-1/c-2), worst |Δ|=0
-bash tools/run_advhor_gate_multirank.sh 8        # all ranks max|Δ|=0
+bash tools/run_step_gate_multirank.sh 2          # 65 records, worst |Δ|=0
 bash tools/run_pressure_gate.sh                  # 57 fields, max|Δ|=0 (1-rank)
+bash tools/run_pressure_gate_core2.sh            # M4a+M4b: 70 fields incl. fer_K/c/gamma/uv/w, max|Δ|=0 (CORE2)
+bash tools/run_lifecycle_gate_core2.sh           # GM/Redi-OFF lifecycle 195 records (no-regression baseline)
+bash tools/run_lifecycle_gm_gate_core2.sh        # M4c: GM bolus lifecycle 195 records, max|Δ|=0 (CORE2 1-rank)
+bash tools/run_lifecycle_redi_gate_core2.sh      # M4d: GM+Redi lifecycle 195 records, max|Δ|=0 (CORE2 1-rank)
+bash tools/run_lifecycle_fullynative_gate_core2.sh        # M3f: GM/Redi-OFF fully-native lifecycle 195 (no-regr)
+bash tools/run_lifecycle_gmredi_native_gate_core2.sh 3 0  # M4e: GM+Redi fully-native lifecycle 195, max|Δ|=0 (whichEVP 0)
+bash tools/run_lifecycle_gmredi_native_gate_core2.sh 3 1  # M4e: ... whichEVP 1 (mEVP)
+bash tools/run_lifecycle_gmredi_native_gate_multirank.sh 2 3 0  # M4f: GM+Redi MR fully-native dist_2 195, max|Δ|=0
+bash tools/run_lifecycle_gmredi_native_gate_multirank.sh 8 3 1  # M4f: ... dist_8 whichEVP 1 (needs env.sh KNEM flag, L35)
 bash tools/run_icefct_gate_core2.sh              # M3c: 6 fields × whichEVP 0/1, max|Δ|=0 (CORE2 1-rank)
-bash tools/run_icethermo_gate_core2.sh           # M3d: 6 fields × whichEVP 0/1, max|Δ|=0 (CORE2 1-rank)
 bash tools/run_iceflux_gate_core2.sh             # M3e: 5 fields × whichEVP 0/1, max|Δ|=0 (CORE2 1-rank)
 cd build_intel_dp && ctest                       # 13/13
 ```

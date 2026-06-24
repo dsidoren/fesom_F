@@ -678,7 +678,8 @@ production dt=1800; tag.
   × both whichEVP (`tools/run_lifecycle_fullynative_gate_core2.sh`). Active = M3f-4 (multi-rank), tag `m3`.** Watch:
   `bc_index_nod2D` multi-rank-safe; ice_dt synced to ocean dt; NaN-vs-0 ice masking in diagnostics. Standard EVP
   only (`whichEVP=0`; NO icepack/meltponds/cavity/oasis-yac).
-- **M4 — GM/Redi.** sigma_xy/neutral_slope → Γ solve (TDMA) → bolus velocities (**`fer_w` from
+- **M4 — GM/Redi.** Detailed byte-gated M4a–M4f decomposition: [`plans/2026-06-23-m4-gm-redi.md`](2026-06-23-m4-gm-redi.md).
+  sigma_xy/neutral_slope → Γ solve (TDMA) → bolus velocities (**`fer_w` from
   `div(fer_uv·h)`; never per-cell clamp**) → rotated Redi diffusion; master off-switch byte-matches
   pre-GM model. Producers: `sw_alpha_beta`. Active: `K_GM_max=1000`, ODM95 tapering.
 - **M5 — KPP + production multi-year (= paper-parity).** Port **FESOM1.4 inline KPP**

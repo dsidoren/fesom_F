@@ -50,7 +50,9 @@ module mod_step_oce
                                   DUMP_SUBSTEP_HBAR, DUMP_SUBSTEP_ETA_N, &
                                   DUMP_SUBSTEP_ALE, DUMP_SUBSTEP_TRACERS, &
                                   DUMP_SUBSTEP_THICKNESS
-    use oce_pressure_bv,    only: pressure_bv
+    use oce_pressure_bv,    only: pressure_bv, sw_alpha_beta, compute_sigma_xy, compute_neutral_slope
+    use oce_fer_gm,         only: init_Redi_GM, fer_solve_Gamma, fer_gamma2vel
+    use mod_param_phys,     only: Fer_GM, Redi
     use oce_pgf,            only: pressure_force_4_linfs_fullcell
     use oce_ale_mixing_pp,  only: oce_mixing_pp
     use oce_mo_conv,        only: mo_convect
@@ -108,7 +110,19 @@ contains
                                              dynamics%work%pgf_x, dynamics%work%pgf_y, partit)
 
         !_______________________________________________________________________
-        ! [sw_alpha_beta / compute_sigma_xy / compute_neutral_slope omitted — dead in M2]
+        ! M4 GM/Redi producers: sw_alpha_beta -> sigma_xy (feeds the GM streamfunction +, for
+        ! Redi, compute_neutral_slope -> slope_tapered/fer_tapfac). FESOM2 oce_ale.F90:3673-3682,
+        ! after PGF, before mixing. Guarded by Fer_GM.or.Redi (GM/Redi-off step unchanged).
+        if (Fer_GM .or. Redi) then
+            call sw_alpha_beta(tracers%data(1)%values, tracers%data(2)%values, mesh, &
+                               dynamics%work%sw_alpha, dynamics%work%sw_beta, partit)
+            call compute_sigma_xy(tracers%data(1)%values, tracers%data(2)%values, &
+                                  dynamics%work%sw_alpha, dynamics%work%sw_beta, mesh, &
+                                  dynamics%work%sigma_xy, partit)
+            if (Redi) call compute_neutral_slope(dynamics%work%sigma_xy, dynamics%work%bvfreq, mesh, &
+                                  dynamics%work%neutral_slope, dynamics%work%slope_tapered, &
+                                  dynamics%work%fer_tapfac, partit)
+        end if
 
         !_______________________________________________________________________
         ! vertical mixing: PP Richardson-number Kv/Av + convective adjustment.
@@ -146,6 +160,25 @@ contains
         call dump_node_2d(DUMP_SUBSTEP_ETA_N, n, 'eta_n', dynamics%eta_n)
 
         !_______________________________________________________________________
+        ! M4 GM diffusivity + streamfunction + bolus velocity (FESOM2 oce_ale.F90:4050-4058 —
+        ! after the SSH/velocity/elevation update, before vert_vel_ale which then fills fer_w).
+        ! Redi off (M4d). fer_uv feeds vert_vel_ale (fer_w) + the tracer bolus add/subtract.
+        if (Fer_GM .or. Redi) then
+            if (Redi) then
+                call init_Redi_GM(mesh, dynamics%work%bvfreq, dynamics%work%fer_K, dynamics%work%fer_c, &
+                                  dynamics%work%fer_scal, partit, dynamics%work%Ki, dynamics%work%fer_tapfac)
+            else
+                call init_Redi_GM(mesh, dynamics%work%bvfreq, dynamics%work%fer_K, &
+                                  dynamics%work%fer_c, dynamics%work%fer_scal, partit)
+            end if
+        end if
+        if (Fer_GM) then
+            call fer_solve_Gamma(mesh, dynamics%work%sigma_xy, dynamics%work%bvfreq, &
+                                 dynamics%work%fer_c, dynamics%work%fer_K, dynamics%work%fer_gamma, partit)
+            call fer_gamma2vel(mesh, dynamics%work%fer_gamma, dynamics%fer_uv, partit)
+        end if
+
+        !_______________________________________________________________________
         ! vertical velocity / ALE thickness (linfs: hnode_new = hnode)
         call vert_vel_ale(dynamics, mesh, dt, partit)
         call dump_node(DUMP_SUBSTEP_ALE, n, 'hnode_new', mesh%hnode_new, mesh%nlevels_nod2D)
@@ -153,9 +186,18 @@ contains
 
         !_______________________________________________________________________
         ! tracer solve (advection + diffusion; tracer TDMA consumes LIVE Kv)
-        call solve_tracers_ale(dt, dynamics, tracers, mesh, Ki, &
-                               heat_flux, water_flux, virtual_salt, relax_salt, &
-                               real_salt_flux, is_nonlinfs, partit)
+        ! M4d Redi: the diffusion uses the computed Redi diffusivity dynamics%work%Ki (the Ki
+        ! arg is the prescribed background, 0 in the reduced config). The diff routines' Redi
+        ! terms are if(Redi)-guarded so the non-Redi path is byte-unchanged.
+        if (Redi) then
+            call solve_tracers_ale(dt, dynamics, tracers, mesh, dynamics%work%Ki, &
+                                   heat_flux, water_flux, virtual_salt, relax_salt, &
+                                   real_salt_flux, is_nonlinfs, partit)
+        else
+            call solve_tracers_ale(dt, dynamics, tracers, mesh, Ki, &
+                                   heat_flux, water_flux, virtual_salt, relax_salt, &
+                                   real_salt_flux, is_nonlinfs, partit)
+        end if
         call dump_node(DUMP_SUBSTEP_TRACERS, n, 'T', tracers%data(1)%values, mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_TRACERS, n, 'S', tracers%data(2)%values, mesh%nlevels_nod2D)
 

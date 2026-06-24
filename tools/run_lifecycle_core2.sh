@@ -30,6 +30,10 @@ RUN="${1:-/scratch/a/a270088/lifecycle_core2}"
 DUMP="${2:-$RUN/life_f2}"
 NSTEPS="${3:-3}"
 NP="${4:-1}"
+# M4c/M4d: FER_GM=1 / REDI=1 keep the work_core Fer_GM/Redi=.true. (GM bolus / Redi isopycnal
+# diffusion ON) instead of the reduced-M2 sed-off. Default 0 = the proven GM/Redi-off gate.
+FER_GM="${FER_GM:-0}"
+REDI="${REDI:-0}"
 
 source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 
@@ -38,9 +42,9 @@ cp "$F2"/work_core/namelist.* "$RUN"/
 ln -sf "$F2"/build/bin/fesom.x "$RUN"/fesom.x      # loads build/lib64/libfesom.so (output 1-rank fix)
 printf '0 1 1948\n0 1 1948\n' > "$RUN"/fesom.clock # cold start, year 1948 (unforced: year irrelevant)
 
-python3 - "$RUN" "$NSTEPS" <<'PY'
+python3 - "$RUN" "$NSTEPS" "$FER_GM" "$REDI" <<'PY'
 import re, sys
-run, nsteps = sys.argv[1], sys.argv[2]
+run, nsteps, fer_gm, redi = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 # namelist.config
 p = run + '/namelist.config'; s = open(p).read()
 s = re.sub(r"ResultPath\s*=\s*'[^']*'", "ResultPath       = './'", s, count=1)
@@ -56,8 +60,11 @@ open(p, 'w').write(s)
 # namelist.oce  (reduced-M2 dynamics)
 p = run + '/namelist.oce'; s = open(p).read()
 s = re.sub(r"mix_scheme\s*=\s*'KPP'", "mix_scheme         = 'PP'", s, count=1)
-s = re.sub(r"Fer_GM\s*=\s*\.true\.",  "Fer_GM             = .false.", s, count=1)
-s = re.sub(r"Redi\s*=\s*\.true\.",    "Redi               = .false.", s, count=1)
+# M4c/M4d: keep work_core Fer_GM/Redi=.true. when FER_GM=1 / REDI=1; else reduce them off.
+if fer_gm != '1':
+    s = re.sub(r"Fer_GM\s*=\s*\.true\.",  "Fer_GM             = .false.", s, count=1)
+if redi != '1':
+    s = re.sub(r"Redi\s*=\s*\.true\.",    "Redi               = .false.", s, count=1)
 open(p, 'w').write(s)
 PY
 

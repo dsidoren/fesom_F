@@ -32,8 +32,9 @@ module oce_ale_tracer
     use mod_partit,         only: t_partit
     use mod_part_bounds,    only: owned_bounds, is_multirank, local_dims
     use mod_halo,           only: exchange_nod
+    use mod_param_phys,     only: Fer_GM, Redi
     use oce_tracer_mod,     only: init_tracers_AB
-    use oce_tracer_grad,    only: tracer_gradient_elements
+    use oce_tracer_grad,    only: tracer_gradient_elements, tracer_gradient_z
     use oce_adv_tra_driver, only: do_oce_adv_tra
     implicit none
     private
@@ -113,7 +114,7 @@ contains
         real(kind=WP),  intent(in)            :: virtual_salt(mesh%nod2D), relax_salt(mesh%nod2D)
         real(kind=WP),  intent(in)            :: real_salt_flux(mesh%nod2D), is_nonlinfs
         type(t_partit), intent(in), optional  :: partit
-        integer :: tr_num, node, nzmin, nzmax
+        integer :: tr_num, node, elem, nzmin, nzmax
         integer :: nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF
         real(kind=WP), allocatable :: tr_xy(:,:,:)
         real(kind=WP), dimension(:,:), pointer :: Svalues
@@ -124,11 +125,28 @@ contains
         call local_dims(mesh, partit, nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF)
         allocate(tr_xy(2, mesh%nl-1, nElemF))
 
+        ! M4c GM bolus ADD (FESOM2 oce_ale_tracer.F90:199-211): advect with the residual-mean
+        ! velocity UV + fer_uv / Wvel + fer_w. Added over owned+halo (advection reads the halo;
+        ! fer_uv/fer_w were exchanged in fer_gamma2vel/vert_vel_ale), subtracted after the tracer
+        ! loop. fer_w goes into BOTH w and w_e (faithful; w_e is unused at use_wsplit=.false.).
+        ! Guarded by Fer_GM -> the GM-off (M2/M3) tracer solve is byte-unchanged.
+        if (Fer_GM) then
+            do elem = 1, nElemL
+                dynamics%uv(:,:,elem) = dynamics%uv(:,:,elem) + dynamics%fer_uv(:,:,elem)
+            end do
+            do node = 1, nNodL
+                dynamics%w_e(:,node) = dynamics%w_e(:,node) + dynamics%fer_w(:,node)
+                dynamics%w(:,node)   = dynamics%w(:,node)   + dynamics%fer_w(:,node)
+            end do
+        end if
+
         do tr_num = 1, tracers%num_tracers
             ! advection: del_ttf = advhoriz + advvert (del_ttf zeroed in init_tracers_AB)
             call advect_tracer(dt, tr_num, dynamics, tracers, mesh, partit)
             ! elemental gradient of the pre-diffusion tracer (advection left values = T^n)
             call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh, partit)
+            ! M4d Redi: vertical gradient tr_z of the same T^n (feeds diff_part_hor_redi K13/K23)
+            if (Redi) call tracer_gradient_z(tracers%data(tr_num)%values, tracers%work%tr_z, mesh, partit)
             ! horizontal diffusion + ALE reconstruct + implicit vertical-diffusion TDMA
             call diff_tracers_ale(tr_num, dt, dynamics, tracers, mesh, tr_xy, Ki, &
                                   heat_flux, water_flux, virtual_salt, relax_salt, &
@@ -139,6 +157,18 @@ contains
             ! owned+halo loop below).
             if (is_multirank(partit)) call exchange_nod(tracers%data(tr_num)%values, partit)
         end do
+
+        ! M4c GM bolus SUBTRACT (FESOM2 oce_ale_tracer.F90:284-296): restore the Eulerian
+        ! velocity after advection/diffusion, before the salinity clamp.
+        if (Fer_GM) then
+            do elem = 1, nElemL
+                dynamics%uv(:,:,elem) = dynamics%uv(:,:,elem) - dynamics%fer_uv(:,:,elem)
+            end do
+            do node = 1, nNodL
+                dynamics%w_e(:,node) = dynamics%w_e(:,node) - dynamics%fer_w(:,node)
+                dynamics%w(:,node)   = dynamics%w(:,node)   - dynamics%fer_w(:,node)
+            end do
+        end if
 
         ! salinity clamp (tracer 2 = salinity, FESOM2 :304-316): S in [3, 45], owned+halo
         ! (the clamp is per-node idempotent, so the owned values match the 1-rank result).
@@ -185,11 +215,12 @@ contains
         del_ttf => tracers%work%del_ttf
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
-        ! horizontal diffusion: del_ttf += R_T^n (Redi=.false. -> plain Laplacian)
-        call diff_part_hor_redi(tr_xy, Ki, dt, tracers, mesh, partit)
+        ! horizontal diffusion: del_ttf += R_T^n (+ M4d Redi K13/K23 isoneutral terms if Redi)
+        call diff_part_hor_redi(tr_xy, Ki, dt, dynamics, tracers, mesh, partit)
 
         ! explicit vertical diffusion (diff_ver_part_expl_ale) is skipped: i_vert_diff=.true.
-        ! Redi vertical projection (diff_ver_part_redi_expl) is skipped: Redi=.false.
+        ! M4d Redi explicit vertical projection K31/K32 (FESOM2 diff_tracers_ale:394, if(Redi))
+        if (Redi) call diff_ver_part_redi_expl(dt, dynamics, tracers, mesh, tr_xy, partit)
 
         !_______________________________________________________________________
         ! ALE tracer reconstruct: T* = (dt*R_T^n + h^{n-0.5}*T^{n-0.5})/h^{n+0.5}
@@ -218,7 +249,7 @@ contains
     end subroutine diff_tracers_ale
 
     !===========================================================================
-    subroutine diff_part_hor_redi(tr_xy, Ki, dt, tracers, mesh, partit)
+    subroutine diff_part_hor_redi(tr_xy, Ki, dt, dynamics, tracers, mesh, partit)
         ! Horizontal tracer diffusion, Redi=.false. branch of FESOM2 oce_ale_tracer.F90:1173.
         ! Edge-based flux form: across each edge the diffusive flux Kh*(Tx,Ty) (Kh = mean of
         ! the two edge-node diffusivities Ki, (Tx,Ty) = elemental tracer gradient tr_xy)
@@ -230,6 +261,10 @@ contains
         ! owned-only element range; Ki/areasvol are read at the edge's two nodes (one may be a
         ! halo node — Ki is prescribed owned+halo, areasvol is M2.12b-exchanged). The owned-
         ! node del_ttf scatter is complete (invariant i).
+        ! M4d: the Redi K13/K23 isoneutral terms (Tz/SxTz/SyTz x isredi, FESOM2 :1233-1312) are
+        ! added inside the flux assembly, guarded by if(Redi) so the GM-off/GM-only configs
+        ! (slope_tapered/tr_z unallocated) are byte-unchanged. isredi=1 is absorbed (SxTz*1==SxTz).
+        type(t_dyn),    intent(in),    target :: dynamics
         type(t_tracer), intent(inout), target :: tracers
         type(t_mesh),   intent(in),    target :: mesh
         real(kind=WP),  intent(in)            :: tr_xy(2, mesh%nl-1, mesh%elem2D)
@@ -240,6 +275,7 @@ contains
         integer :: nl1, ul1, nl2, ul2, nl12, ul12
         integer :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, c, Fx, Fy, Tx, Ty, Kh, dz
+        real(kind=WP) :: Tz(2), SxTz, SyTz
         real(kind=WP) :: rhs1(mesh%nl-1), rhs2(mesh%nl-1)
         real(kind=MP), dimension(:,:), pointer :: del_ttf
 
@@ -270,7 +306,14 @@ contains
                 Kh = sum(Ki(nz, enodes))/2.0_WP
                 dz = mesh%helem(nz, el(1))
                 Tx = tr_xy(1,nz,el(1)); Ty = tr_xy(2,nz,el(1))
-                Fx = Kh*Tx; Fy = Kh*Ty
+                if (Redi) then
+                    Tz   = 0.5_WP*(tracers%work%tr_z(nz,enodes)+tracers%work%tr_z(nz+1,enodes))
+                    SxTz = sum(Tz*dynamics%work%slope_tapered(1,nz,enodes))/2.0_WP
+                    SyTz = sum(Tz*dynamics%work%slope_tapered(2,nz,enodes))/2.0_WP
+                    Fx = Kh*(Tx+SxTz); Fy = Kh*(Ty+SyTz)
+                else
+                    Fx = Kh*Tx; Fy = Kh*Ty
+                end if
                 c  = (-deltaX1*Fy + deltaY1*Fx)*dz
                 rhs1(nz) = rhs1(nz) + c
                 rhs2(nz) = rhs2(nz) - c
@@ -281,7 +324,14 @@ contains
                     Kh = sum(Ki(nz, enodes))/2.0_WP
                     dz = mesh%helem(nz, el(2))
                     Tx = tr_xy(1,nz,el(2)); Ty = tr_xy(2,nz,el(2))
+                    if (Redi) then
+                    Tz   = 0.5_WP*(tracers%work%tr_z(nz,enodes)+tracers%work%tr_z(nz+1,enodes))
+                    SxTz = sum(Tz*dynamics%work%slope_tapered(1,nz,enodes))/2.0_WP
+                    SyTz = sum(Tz*dynamics%work%slope_tapered(2,nz,enodes))/2.0_WP
+                    Fx = Kh*(Tx+SxTz); Fy = Kh*(Ty+SyTz)
+                else
                     Fx = Kh*Tx; Fy = Kh*Ty
+                end if
                     c  = (deltaX2*Fy - deltaY2*Fx)*dz
                     rhs1(nz) = rhs1(nz) + c
                     rhs2(nz) = rhs2(nz) - c
@@ -293,7 +343,14 @@ contains
                 dz = sum(mesh%helem(nz, el))/2.0_WP
                 Tx = 0.5_WP*(tr_xy(1,nz,el(1))+tr_xy(1,nz,el(2)))
                 Ty = 0.5_WP*(tr_xy(2,nz,el(1))+tr_xy(2,nz,el(2)))
-                Fx = Kh*Tx; Fy = Kh*Ty
+                if (Redi) then
+                    Tz   = 0.5_WP*(tracers%work%tr_z(nz,enodes)+tracers%work%tr_z(nz+1,enodes))
+                    SxTz = sum(Tz*dynamics%work%slope_tapered(1,nz,enodes))/2.0_WP
+                    SyTz = sum(Tz*dynamics%work%slope_tapered(2,nz,enodes))/2.0_WP
+                    Fx = Kh*(Tx+SxTz); Fy = Kh*(Ty+SyTz)
+                else
+                    Fx = Kh*Tx; Fy = Kh*Ty
+                end if
                 c  = ((deltaX2-deltaX1)*Fy - (deltaY2-deltaY1)*Fx)*dz
                 rhs1(nz) = rhs1(nz) + c
                 rhs2(nz) = rhs2(nz) - c
@@ -303,7 +360,14 @@ contains
                 Kh = sum(Ki(nz, enodes))/2.0_WP
                 dz = mesh%helem(nz, el(1))
                 Tx = tr_xy(1,nz,el(1)); Ty = tr_xy(2,nz,el(1))
-                Fx = Kh*Tx; Fy = Kh*Ty
+                if (Redi) then
+                    Tz   = 0.5_WP*(tracers%work%tr_z(nz,enodes)+tracers%work%tr_z(nz+1,enodes))
+                    SxTz = sum(Tz*dynamics%work%slope_tapered(1,nz,enodes))/2.0_WP
+                    SyTz = sum(Tz*dynamics%work%slope_tapered(2,nz,enodes))/2.0_WP
+                    Fx = Kh*(Tx+SxTz); Fy = Kh*(Ty+SyTz)
+                else
+                    Fx = Kh*Tx; Fy = Kh*Ty
+                end if
                 c  = (-deltaX1*Fy + deltaY1*Fx)*dz
                 rhs1(nz) = rhs1(nz) + c
                 rhs2(nz) = rhs2(nz) - c
@@ -313,7 +377,14 @@ contains
                 Kh = sum(Ki(nz, enodes))/2.0_WP
                 dz = mesh%helem(nz, el(2))
                 Tx = tr_xy(1,nz,el(2)); Ty = tr_xy(2,nz,el(2))
-                Fx = Kh*Tx; Fy = Kh*Ty
+                if (Redi) then
+                    Tz   = 0.5_WP*(tracers%work%tr_z(nz,enodes)+tracers%work%tr_z(nz+1,enodes))
+                    SxTz = sum(Tz*dynamics%work%slope_tapered(1,nz,enodes))/2.0_WP
+                    SyTz = sum(Tz*dynamics%work%slope_tapered(2,nz,enodes))/2.0_WP
+                    Fx = Kh*(Tx+SxTz); Fy = Kh*(Ty+SyTz)
+                else
+                    Fx = Kh*Tx; Fy = Kh*Ty
+                end if
                 c  = (deltaX2*Fy - deltaY2*Fx)*dz
                 rhs1(nz) = rhs1(nz) + c
                 rhs2(nz) = rhs2(nz) - c
@@ -328,6 +399,83 @@ contains
                 + rhs2(ul12:nl12)*dt/mesh%areasvol(ul12:nl12,enodes(2))
         end do
     end subroutine diff_part_hor_redi
+
+    !===========================================================================
+    subroutine diff_ver_part_redi_expl(dt, dynamics, tracers, mesh, tr_xy, partit)
+        ! Explicit vertical Redi flux K31/K32 (FESOM2 oce_ale_tracer.F90:1086-1169), called
+        ! if(Redi). Node-averages the elemental tracer gradient tr_xy -> tr_xynodes, then the
+        ! isoneutral vertical flux vd_flux = Ki*(Sx*Tx + Sy*Ty) interpolated to interfaces, and
+        ! adds its divergence to del_ttf. slope_tapered + Ki ride dynamics%work; uses hnode (=
+        ! hnode_new linfs) + zbar_3d_n(nlevels_nod2D,n) as the node-bottom anchor.
+        real(kind=WP),  intent(in)            :: dt
+        type(t_dyn),    intent(in),    target :: dynamics
+        type(t_tracer), intent(inout), target :: tracers
+        type(t_mesh),   intent(in),    target :: mesh
+        real(kind=WP),  intent(in)            :: tr_xy(2, mesh%nl-1, mesh%elem2D)
+        type(t_partit), intent(in), optional  :: partit
+        integer :: n, k, elem, nz, nl1, ul1
+        integer :: nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: Tx, Ty, vd_flux(mesh%nl)
+        real(kind=WP) :: zbar_n(mesh%nl), z_n(mesh%nl-1)
+        real(kind=WP), allocatable :: tr_xynodes(:,:,:)
+        real(kind=MP), dimension(:,:), pointer :: del_ttf
+        real(kind=WP), dimension(:,:),   pointer :: Ki
+        real(kind=WP), dimension(:,:,:), pointer :: slope_tapered
+
+        del_ttf       => tracers%work%del_ttf
+        Ki            => dynamics%work%Ki
+        slope_tapered => dynamics%work%slope_tapered
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        allocate(tr_xynodes(2, mesh%nl-1, nNodL))
+
+        ! node-averaged element gradients (no halo exchange of tr_xynodes is needed)
+        do n = 1, nNodO
+            nl1 = mesh%nlevels_nod2D(n)-1
+            ul1 = mesh%ulevels_nod2D(n)
+            do nz = ul1, nl1
+                Tx = 0.0_WP
+                Ty = 0.0_WP
+                do k = 1, mesh%nod_in_elem2D_num(n)
+                    elem = mesh%nod_in_elem2D(k,n)
+                    if (nz <= (mesh%nlevels(elem)-1) .and. nz >= mesh%ulevels(elem)) then
+                        Tx = Tx + tr_xy(1,nz,elem)*mesh%elem_area(elem)
+                        Ty = Ty + tr_xy(2,nz,elem)*mesh%elem_area(elem)
+                    end if
+                end do
+                tr_xynodes(1,nz,n) = Tx/3.0_WP/mesh%areasvol(nz,n)
+                tr_xynodes(2,nz,n) = Ty/3.0_WP/mesh%areasvol(nz,n)
+            end do
+        end do
+
+        ! vertical isoneutral flux + divergence into del_ttf
+        do n = 1, nNodO
+            nl1 = mesh%nlevels_nod2D(n)-1
+            ul1 = mesh%ulevels_nod2D(n)
+            vd_flux = 0.0_WP
+            zbar_n(1:mesh%nl)   = 0.0_WP
+            z_n(1:mesh%nl-1)    = 0.0_WP
+            zbar_n(nl1+1) = mesh%zbar_3d_n(nl1+1, n)               ! = zbar_n_bot(n)
+            z_n(nl1)      = zbar_n(nl1+1) + mesh%hnode(nl1,n)/2.0_WP
+            do nz = nl1, ul1+1, -1
+                zbar_n(nz) = zbar_n(nz+1) + mesh%hnode(nz,n)
+                z_n(nz-1)  = zbar_n(nz)   + mesh%hnode(nz-1,n)/2.0_WP
+            end do
+            zbar_n(ul1) = zbar_n(ul1+1) + mesh%hnode(ul1,n)
+            do nz = ul1+1, nl1
+                vd_flux(nz) = (z_n(nz-1)-zbar_n(nz))*(slope_tapered(1,nz-1,n)*tr_xynodes(1,nz-1,n) &
+                            + slope_tapered(2,nz-1,n)*tr_xynodes(2,nz-1,n))*Ki(nz-1,n)
+                vd_flux(nz) = vd_flux(nz) + &
+                              (zbar_n(nz)-z_n(nz))*(slope_tapered(1,nz,n)*tr_xynodes(1,nz,n) &
+                            + slope_tapered(2,nz,n)*tr_xynodes(2,nz,n))*Ki(nz,n)
+                vd_flux(nz) = vd_flux(nz)/(z_n(nz-1)-z_n(nz))*mesh%area(nz,n)
+            end do
+            do nz = ul1, nl1
+                del_ttf(nz,n) = del_ttf(nz,n) + (vd_flux(nz)-vd_flux(nz+1))*dt/mesh%areasvol(nz,n)
+            end do
+        end do
+
+        deallocate(tr_xynodes)
+    end subroutine diff_ver_part_redi_expl
 
     !===========================================================================
     subroutine diff_ver_part_impl_ale(tr_num, dt, dynamics, tracers, mesh, &
@@ -359,7 +507,7 @@ contains
         real(kind=WP) :: zbar_n(mesh%nl), Z_n(mesh%nl-1)
         integer       :: nz, n, nzmax, nzmin, id
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: m, zinv, dz, zinv1, zinv2, v_adv
+        real(kind=WP) :: m, zinv, dz, zinv1, zinv2, v_adv, Ty, Ty1
         logical       :: do_wimpl
         real(kind=WP), dimension(:,:), pointer :: trarr, Wvel_i
 
@@ -394,12 +542,16 @@ contains
             end do
             zbar_n(nzmin)   = zbar_n(nzmin+1) + mesh%hnode_new(nzmin,n)
             !___________________________________________________________________
-            ! surface layer coefficients (isredi=0 -> no Ty1 term)
+            ! surface layer coefficients (+ M4d Redi K33 = Kd*s^2, FESOM2 :754-767; if(Redi)-
+            ! guarded so the off path reads c=-(Kv+0)*..==-Kv*.. byte-unchanged)
             nz = nzmin
             zinv2 = 1.0_WP/(Z_n(nz)-Z_n(nz+1))
             zinv  = 1.0_WP*dt
+            Ty1 = 0.0_WP
+            if (Redi) Ty1 = (Z_n(nz)     -zbar_n(nz+1))*zinv2*dynamics%work%slope_tapered(3,nz  ,n)**2*dynamics%work%Ki(nz  ,n) &
+                          + (zbar_n(nz+1)-Z_n(nz+1)   )*zinv2*dynamics%work%slope_tapered(3,nz+1,n)**2*dynamics%work%Ki(nz+1,n)
             a(nz) = 0.0_WP
-            c(nz) = -dynamics%work%Kv(nz+1,n)*zinv2*zinv * mesh%area(nz+1,n)/mesh%areasvol(nz,n)
+            c(nz) = -(dynamics%work%Kv(nz+1,n)+Ty1)*zinv2*zinv * mesh%area(nz+1,n)/mesh%areasvol(nz,n)
             b(nz) = -c(nz) + mesh%hnode_new(nz,n)
             if (do_wimpl) then
                 v_adv = zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
@@ -413,8 +565,16 @@ contains
             ! interior layers
             do nz = nzmin+1, nzmax-2
                 zinv2 = 1.0_WP/(Z_n(nz)-Z_n(nz+1))
-                a(nz) = -dynamics%work%Kv(nz,n)  *zinv1*zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
-                c(nz) = -dynamics%work%Kv(nz+1,n)*zinv2*zinv *   mesh%area(nz+1,n)/mesh%areasvol(nz,n)
+                ! M4d Redi K33 = Kd*s^2 interface-weighted (FESOM2 :794-808); if(Redi)-guarded.
+                Ty = 0.0_WP; Ty1 = 0.0_WP
+                if (Redi) then
+                    Ty  = (Z_n(nz-1)  -zbar_n(nz  ))*zinv1*dynamics%work%slope_tapered(3,nz-1,n)**2*dynamics%work%Ki(nz-1,n) &
+                        + (zbar_n(nz  )-Z_n(nz     ))*zinv1*dynamics%work%slope_tapered(3,nz  ,n)**2*dynamics%work%Ki(nz  ,n)
+                    Ty1 = (Z_n(nz     )-zbar_n(nz+1))*zinv2*dynamics%work%slope_tapered(3,nz  ,n)**2*dynamics%work%Ki(nz  ,n) &
+                        + (zbar_n(nz+1)-Z_n(nz+1    ))*zinv2*dynamics%work%slope_tapered(3,nz+1,n)**2*dynamics%work%Ki(nz+1,n)
+                end if
+                a(nz) = -(dynamics%work%Kv(nz,n)  +Ty )*zinv1*zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
+                c(nz) = -(dynamics%work%Kv(nz+1,n)+Ty1)*zinv2*zinv *   mesh%area(nz+1,n)/mesh%areasvol(nz,n)
                 b(nz) = -a(nz)-c(nz) + mesh%hnode_new(nz,n)
                 zinv1 = zinv2
                 if (do_wimpl) then
@@ -427,10 +587,13 @@ contains
                 end if
             end do
             !___________________________________________________________________
-            ! bottom layer (nz = nzmax-1)
+            ! bottom layer (nz = nzmax-1) + M4d Redi K33 (FESOM2 :838-849; if(Redi)-guarded)
             nz = nzmax-1
             zinv = 1.0_WP*dt
-            a(nz) = -dynamics%work%Kv(nz,n)*zinv1*zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
+            Ty = 0.0_WP
+            if (Redi) Ty = (Z_n(nz-1)-zbar_n(nz))*zinv1*dynamics%work%slope_tapered(3,nz-1,n)**2*dynamics%work%Ki(nz-1,n) &
+                         + (zbar_n(nz )-Z_n(nz  ))*zinv1*dynamics%work%slope_tapered(3,nz  ,n)**2*dynamics%work%Ki(nz  ,n)
+            a(nz) = -(dynamics%work%Kv(nz,n)+Ty)*zinv1*zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
             c(nz) = 0.0_WP
             b(nz) = -a(nz) + mesh%hnode_new(nz,n)
             if (do_wimpl) then

@@ -15,13 +15,19 @@ program fesom_pressuredump
     use mod_precision,    only: WP, MP
     use mod_constants,    only: density_0
     use mod_param_phys,   only: N2smth_h
+    use mod_param_phys,   only: Fer_GM, Redi, Redi_Ktaper, scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97
     use mod_mesh,         only: t_mesh
     use mod_partit,       only: t_partit
     use mod_partitioning, only: par_init, par_ex
     use mod_mesh_read,    only: read_mesh
     use mod_mesh_areas,   only: compute_geometry
     use mod_dyn,          only: t_dyn
-    use oce_pressure_bv,  only: pressure_bv
+    use oce_pressure_bv,  only: pressure_bv, sw_alpha_beta, compute_sigma_xy, compute_neutral_slope
+    use oce_fer_gm,       only: init_Redi_GM, fer_solve_Gamma, fer_gamma2vel
+    use mod_param_phys,   only: K_GM_max, K_GM_min, K_GM_bvref, K_GM_rampmax, K_GM_rampmin, &
+                                K_GM_resscalorder, K_GM_cm, K_GM_cmin, K_GM_Ktaper, &
+                                scaling_Ferreira, scaling_Rossby, scaling_resolution, &
+                                scaling_FESOM14, scaling_GMzexp, scaling_GINsea, GMzexp_zref, GMzexp_smin
     use oce_pgf,          only: pressure_force_4_linfs_fullcell
     use oce_dyn_velrhs,   only: compute_vel_rhs
     use oce_dyn_visc,     only: viscosity_filter
@@ -98,6 +104,11 @@ program fesom_pressuredump
     ! implicit vertical-diffusion TDMA, the FIRST consumer of the M2.8 dyn%work%Kv) ---
     type(t_tracer) :: tracers
     real(kind=WP), allocatable :: Ki(:,:), del_ttf_in(:,:), tr_xy(:,:,:)
+    ! --- M4a GM/Redi producers (sw_alpha_beta -> sigma_xy -> neutral_slope) ---
+    real(kind=WP), allocatable :: sw_alpha(:,:), sw_beta(:,:), sigma_xy(:,:,:)
+    real(kind=WP), allocatable :: neutral_slope(:,:,:), slope_tapered(:,:,:), fer_tapfac(:,:)
+    ! --- M4b GM diffusivity / streamfunction / bolus velocity (fer_uv/fer_w ride dyn) ---
+    real(kind=WP), allocatable :: fer_K(:,:), fer_c(:), fer_scal(:), fer_gamma(:,:,:)
     real(kind=WP), allocatable :: heat_flux(:), water_flux(:), virtual_salt(:), relax_salt(:)
     real(kind=WP), allocatable :: real_salt_flux(:)
     real(kind=WP), allocatable :: t_solved(:,:), s_solved(:,:), del_ttf_t(:,:), del_ttf_s(:,:)
@@ -213,6 +224,25 @@ program fesom_pressuredump
     N2smth_h = .true.
     bvfreq = 0.0_WP
     call pressure_bv(temp, salt, density_ref, mesh, density, hpressure, bvfreq)
+
+    ! ============== M4a GM/Redi producers (feed-forward diagnostics) ==============
+    ! sw_alpha_beta -> compute_sigma_xy -> compute_neutral_slope, from T/S + the smoothed
+    ! bvfreq. Force the work_core GM/Redi taper config so compute_neutral_slope takes the
+    ! PRODUCTION branch (slope_tapered = ns*sqrt(c1*c2), fer_tapfac = c1*c2); the oracle shim
+    ! forces the SAME flags + allocates fer_tapfac. Restored after so the downstream reduced-M2
+    ! step (28-field gate) is unperturbed. ODM95_Scr=0.2e-2 is the work_core override (not 1e-2).
+    Fer_GM = .true.; Redi = .true.; Redi_Ktaper = .true.
+    scaling_ODM95 = .true.; ODM95_Scr = 0.2e-2_WP; ODM95_Sd = 1.0e-3_WP; scaling_LDD97 = .false.
+    allocate(sw_alpha(nl-1, mesh%nod2D), sw_beta(nl-1, mesh%nod2D))
+    allocate(sigma_xy(2, nl-1, mesh%nod2D))
+    allocate(neutral_slope(3, nl-1, mesh%nod2D), slope_tapered(3, nl-1, mesh%nod2D))
+    allocate(fer_tapfac(nl-1, mesh%nod2D))
+    sw_alpha = 0.0_WP; sw_beta = 0.0_WP; sigma_xy = 0.0_WP
+    neutral_slope = 0.0_WP; slope_tapered = 0.0_WP; fer_tapfac = 0.0_WP
+    call sw_alpha_beta(temp, salt, mesh, sw_alpha, sw_beta)
+    call compute_sigma_xy(temp, salt, sw_alpha, sw_beta, mesh, sigma_xy)
+    call compute_neutral_slope(sigma_xy, bvfreq, mesh, neutral_slope, slope_tapered, fer_tapfac)
+    Fer_GM = .false.; Redi = .false.; Redi_Ktaper = .false.   ! restore reduced-M2 for downstream
 
     ! M2.2: hydrostatic PGF from the M2.1 hpressure (the smoothing pass leaves
     ! hpressure unchanged - it only touches bvfreq, L13). Caller pre-zeros pgf_x/pgf_y
@@ -459,7 +489,34 @@ program fesom_pressuredump
     uv_upd = dyn%uv
     call compute_hbar_ale(dyn, mesh, dt_velrhs)     ! ssh_rhs_old, hbar_old, hbar, dhe
     call update_eta_n(dyn, mesh)                    ! eta_n = alpha*hbar + (1-alpha)*hbar_old
-    call vert_vel_ale(dyn, mesh, dt_velrhs)         ! w + cfl_z + w_e/w_i split
+
+    ! ============== M4b GM diffusivity + streamfunction + bolus velocity ==============
+    ! init_Redi_GM (fer_K/fer_c/fer_scal) -> fer_solve_Gamma (fer_gamma TDMA) ->
+    ! fer_gamma2vel (fer_uv), then vert_vel_ale computes fer_w (vertical divergence of fer_uv)
+    ! with Fer_GM on. Force the work_core GM config (Fer_GM=T, Redi=F isolating gate;
+    ! scaling_resolution+GMzexp, K_GM_max=1000, K_GM_cm=3, K_GM_cmin=0.1, ramp off, Ktaper off).
+    ! Inits MUST match FESOM2 oce_setup_step.F90:962-967 (fer_K=500/fer_c=1/fer_scal=0/
+    ! fer_gamma=0) + :670/:688 (fer_uv/fer_w=0) so the below-bottom / unwritten regions
+    ! byte-match. init_Redi_GM/fer_solve_Gamma read the M4a sigma_xy + the smoothed bvfreq.
+    ! Restored after vert_vel_ale so the downstream reduced-M2 M2.8/M2.9 step is unperturbed.
+    Fer_GM = .true.; Redi = .false.
+    K_GM_max = 1000.0_WP; K_GM_min = 2.0_WP; K_GM_bvref = 1
+    K_GM_rampmax = -1.0_WP; K_GM_rampmin = -1.0_WP; K_GM_resscalorder = 2.0_WP
+    K_GM_cm = 3.0_WP; K_GM_cmin = 0.1_WP; K_GM_Ktaper = .false.
+    scaling_Ferreira = .false.; scaling_Rossby = .false.; scaling_resolution = .true.
+    scaling_FESOM14 = .false.; scaling_GMzexp = .true.; scaling_GINsea = .false.
+    GMzexp_zref = 500.0_WP; GMzexp_smin = 0.6_WP
+    allocate(fer_K(nl, mesh%nod2D), fer_c(mesh%nod2D), fer_scal(mesh%nod2D))
+    allocate(fer_gamma(2, nl, mesh%nod2D))
+    allocate(dyn%fer_uv(2, nl-1, mesh%elem2D), dyn%fer_w(nl, mesh%nod2D))
+    fer_K = 500.0_WP; fer_c = 1.0_WP; fer_scal = 0.0_WP; fer_gamma = 0.0_WP
+    dyn%fer_uv = 0.0_WP; dyn%fer_w = 0.0_WP
+    call init_Redi_GM(mesh, bvfreq, fer_K, fer_c, fer_scal)
+    call fer_solve_Gamma(mesh, sigma_xy, bvfreq, fer_c, fer_K, fer_gamma)
+    call fer_gamma2vel(mesh, fer_gamma, dyn%fer_uv)
+
+    call vert_vel_ale(dyn, mesh, dt_velrhs)         ! w + cfl_z + w_e/w_i split + (Fer_GM) fer_w
+    Fer_GM = .false.; Redi = .false.   ! restore reduced-M2 for the downstream M2.8/M2.9 step
 
     ! gate-strength diagnostic (NOT dumped): the Wvel split fires only where CFL_z >
     ! wsplit_maxcfl. A non-zero share confirms the split formula (dd, Wvel_e/Wvel_i) is
@@ -646,6 +703,12 @@ program fesom_pressuredump
     call wr_r2(u, 'hpressure',      real(hpressure(1:nl-1,:), MP))
     call wr_r2(u, 'bvfreq_raw',     real(bvfreq_raw,         MP))
     call wr_r2(u, 'bvfreq',         real(bvfreq,             MP))
+    call wr_r2(u, 'sw_alpha',       real(sw_alpha,           MP))
+    call wr_r2(u, 'sw_beta',        real(sw_beta,            MP))
+    call wr_r3(u, 'sigma_xy',       real(sigma_xy,           MP))
+    call wr_r3(u, 'neutral_slope',  real(neutral_slope,      MP))
+    call wr_r3(u, 'slope_tapered',  real(slope_tapered,      MP))
+    call wr_r2(u, 'fer_tapfac',     real(fer_tapfac,         MP))
     call wr_r2(u, 'pgf_x',          real(pgf_x(1:nl-1, :),   MP))
     call wr_r2(u, 'pgf_y',          real(pgf_y(1:nl-1, :),   MP))
     ! M2.3 vel_rhs + M2.4 momadv: gated coriolis + prescribed inputs (incl. w_e) +
@@ -691,6 +754,15 @@ program fesom_pressuredump
     call wr_r2(u, 'cfl_z',          real(dyn%cfl_z(1:nl, :), MP))
     call wr_r2(u, 'w_split_e',      real(dyn%w_e(1:nl, :), MP))
     call wr_r2(u, 'w_split_i',      real(dyn%w_i(1:nl, :), MP))
+    ! M4b GM: the diffusivity fer_K (nl) + gravity-wave fer_c (cm^2) + scaling fer_scal +
+    ! the streamfunction fer_gamma (fer_solve_Gamma TDMA) + bolus velocity fer_uv
+    ! (fer_gamma2vel) + bolus vertical velocity fer_w (vert_vel_ale, Fer_GM branch).
+    call wr_r2(u, 'fer_K',          real(fer_K(1:nl, :),    MP))
+    call wr_r1(u, 'fer_c',          real(fer_c,             MP))
+    call wr_r1(u, 'fer_scal',       real(fer_scal,          MP))
+    call wr_r3(u, 'fer_gamma',      real(fer_gamma(1:2, 1:nl, :), MP))
+    call wr_r3(u, 'fer_uv',         real(dyn%fer_uv,        MP))
+    call wr_r2(u, 'fer_w',          real(dyn%fer_w(1:nl, :), MP))
     ! M2.8 PP vertical mixing: the prescribed nodal-velocity shear input + the gate
     ! targets pp_Kv (vertical diffusivity, nodes) and pp_Av (vertical viscosity, elements).
     call wr_r3(u, 'uvnode',         real(dyn%uvnode,            MP))

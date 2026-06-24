@@ -27,6 +27,10 @@ NSTEPS="${4:-3}"
 ATMFLUX="${5:-$RUN/atmflux_f2}"   # M3f: per-step post-bulk atmospheric forcing (fesom_atmflux_dump)
 WHICHEVP="${6:-0}"                # M3f: ice EVP solver (0=std EVP, 1=mEVP) — must match FESOM3
 NP="${7:-1}"                      # M3f-4: number of ranks (CORE2 dist_<NP>)
+# M4e: FER_GM=1 / REDI=1 keep the work_core Fer_GM/Redi=.true. (GM bolus / Redi isopycnal
+# diffusion ON) instead of the reduced-M2 sed-off. Default 0 = the proven GM/Redi-off gate.
+FER_GM="${FER_GM:-0}"
+REDI="${REDI:-0}"
 
 source /home/a/a270088/fesom3/env.sh intel >/dev/null 2>&1
 rm -rf "$RUN"; mkdir -p "$RUN"
@@ -36,9 +40,9 @@ sed -i "s/^whichEVP *=.*/whichEVP = ${WHICHEVP}/" "$RUN"/namelist.ice   # M3f: m
 ln -sf "$F2"/build/bin/fesom.x "$RUN"/fesom.x
 printf '0 1 1948\n0 1 1948\n' > "$RUN"/fesom.clock
 
-python3 - "$RUN" "$STUB" "$POOL" "$NSTEPS" <<'PY'
+python3 - "$RUN" "$STUB" "$POOL" "$NSTEPS" "$FER_GM" "$REDI" <<'PY'
 import re,sys
-run,stub,pool,nsteps=sys.argv[1:5]
+run,stub,pool,nsteps,fer_gm,redi=sys.argv[1:7]
 p=run+'/namelist.config'; s=open(p).read()
 s=re.sub(r"ResultPath\s*=\s*'[^']*'","ResultPath       = './'",s,1)
 s=re.sub(r"which_ALE\s*=\s*'zlevel'","which_ALE          = 'linfs'",s,1)
@@ -49,8 +53,11 @@ s=re.sub(r"use_sw_pene\s*=\s*\.true\.","use_sw_pene              = .false.",s,1)
 open(p,'w').write(s)
 p=run+'/namelist.oce'; s=open(p).read()
 s=re.sub(r"mix_scheme\s*=\s*'KPP'","mix_scheme         = 'PP'",s,1)
-s=re.sub(r"Fer_GM\s*=\s*\.true\.","Fer_GM             = .false.",s,1)
-s=re.sub(r"Redi\s*=\s*\.true\.","Redi               = .false.",s,1)
+# M4e: keep work_core Fer_GM/Redi=.true. when FER_GM=1 / REDI=1; else reduce them off.
+if fer_gm!='1':
+    s=re.sub(r"Fer_GM\s*=\s*\.true\.","Fer_GM             = .false.",s,1)
+if redi!='1':
+    s=re.sub(r"Redi\s*=\s*\.true\.","Redi               = .false.",s,1)
 open(p,'w').write(s)
 p=run+'/namelist.forcing'; s=open(p).read()
 s=s.replace("FORCING/CORE2/", stub+"/")                                          # atm stubs absolute

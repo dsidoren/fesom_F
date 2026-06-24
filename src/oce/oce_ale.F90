@@ -31,7 +31,7 @@ module oce_ale
     ! whole chain is max|delta|=0 by transitivity (L9). hbar is prescribed identically.
     use mod_precision,  only: WP, MP
     use mod_constants,  only: g
-    use mod_param_phys, only: alpha, theta
+    use mod_param_phys, only: alpha, theta, Fer_GM
     use mod_mesh,       only: t_mesh
     use mod_dyn,        only: t_dyn
     use mod_partit,     only: t_partit
@@ -279,18 +279,26 @@ contains
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2
         ! c1 is an array over levels (FESOM2 keeps it an array — a deadlock-avoidance note
         ! under OpenMP; here it just carries the per-level edge flux for the slice scatter).
-        real(kind=WP) :: c1(mesh%nl-1)
-        real(kind=WP), dimension(:,:,:), pointer :: UV
-        real(kind=WP), dimension(:,:),   pointer :: Wvel
+        real(kind=WP) :: c1(mesh%nl-1), c2(mesh%nl-1)
+        real(kind=WP), dimension(:,:,:), pointer :: UV, fer_UV
+        real(kind=WP), dimension(:,:),   pointer :: Wvel, fer_Wvel
 
         UV   => dynamics%uv
         Wvel => dynamics%w
+        ! M4b GM bolus vertical velocity: fer_w = vertical divergence of fer_uv, mirrors
+        ! Wvel exactly under if(Fer_GM) (FESOM2 oce_ale.F90:2366-2524). Byte-neutral when
+        ! Fer_GM=.false. (the M2/M3 config) — fer_uv/fer_w are then unallocated + untouched.
+        if (Fer_GM) then
+            fer_UV   => dynamics%fer_uv
+            fer_Wvel => dynamics%fer_w
+        end if
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         !______________________________________________________________________
         ! zero the vertical velocity over the whole column (below-bottom stays 0)
         do n = 1, nNodL
             Wvel(:, n) = 0.0_WP
+            if (Fer_GM) fer_Wvel(:, n) = 0.0_WP
         end do
 
         !______________________________________________________________________
@@ -305,11 +313,17 @@ contains
             nzmax   = mesh%nlevels(el(1)) - 1
             do nz = nzmax, nzmin, -1
                 c1(nz) = (UV(2,nz,el(1))*deltaX1 - UV(1,nz,el(1))*deltaY1)*mesh%helem(nz,el(1))
+                if (Fer_GM) c2(nz) = (fer_UV(2,nz,el(1))*deltaX1 - fer_UV(1,nz,el(1))*deltaY1)*mesh%helem(nz,el(1))
             end do
             Wvel(nzmin:nzmax, enodes(1)) = Wvel(nzmin:nzmax, enodes(1)) + c1(nzmin:nzmax)
             Wvel(nzmin:nzmax, enodes(2)) = Wvel(nzmin:nzmax, enodes(2)) - c1(nzmin:nzmax)
+            if (Fer_GM) then
+                fer_Wvel(nzmin:nzmax, enodes(1)) = fer_Wvel(nzmin:nzmax, enodes(1)) + c2(nzmin:nzmax)
+                fer_Wvel(nzmin:nzmax, enodes(2)) = fer_Wvel(nzmin:nzmax, enodes(2)) - c2(nzmin:nzmax)
+            end if
 
             c1 = 0.0_WP
+            if (Fer_GM) c2 = 0.0_WP
             if (el(2) > 0) then
                 deltaX2 = mesh%edge_cross_dxdy(3, ed)
                 deltaY2 = mesh%edge_cross_dxdy(4, ed)
@@ -317,9 +331,14 @@ contains
                 nzmax   = mesh%nlevels(el(2)) - 1
                 do nz = nzmax, nzmin, -1
                     c1(nz) = -(UV(2,nz,el(2))*deltaX2 - UV(1,nz,el(2))*deltaY2)*mesh%helem(nz,el(2))
+                    if (Fer_GM) c2(nz) = -(fer_UV(2,nz,el(2))*deltaX2 - fer_UV(1,nz,el(2))*deltaY2)*mesh%helem(nz,el(2))
                 end do
                 Wvel(nzmin:nzmax, enodes(1)) = Wvel(nzmin:nzmax, enodes(1)) + c1(nzmin:nzmax)
                 Wvel(nzmin:nzmax, enodes(2)) = Wvel(nzmin:nzmax, enodes(2)) - c1(nzmin:nzmax)
+                if (Fer_GM) then
+                    fer_Wvel(nzmin:nzmax, enodes(1)) = fer_Wvel(nzmin:nzmax, enodes(1)) + c2(nzmin:nzmax)
+                    fer_Wvel(nzmin:nzmax, enodes(2)) = fer_Wvel(nzmin:nzmax, enodes(2)) - c2(nzmin:nzmax)
+                end if
             end if
         end do
 
@@ -330,6 +349,7 @@ contains
             nzmax = mesh%nlevels_nod2D(n) - 1
             do nz = nzmax, nzmin, -1
                 Wvel(nz, n) = Wvel(nz, n) + Wvel(nz+1, n)
+                if (Fer_GM) fer_Wvel(nz, n) = fer_Wvel(nz, n) + fer_Wvel(nz+1, n)
             end do
         end do
 
@@ -340,6 +360,7 @@ contains
             nzmax = mesh%nlevels_nod2D(n) - 1
             do nz = nzmin, nzmax
                 Wvel(nz, n) = Wvel(nz, n)/mesh%area(nz, n)
+                if (Fer_GM) fer_Wvel(nz, n) = fer_Wvel(nz, n)/mesh%area(nz, n)
             end do
         end do
 
@@ -347,6 +368,7 @@ contains
         if (is_multirank(partit)) then
             call exchange_nod(Wvel, partit)             ! FESOM2 :2870
             call exchange_nod(mesh%hnode_new, partit)   ! FESOM2 :2871
+            if (Fer_GM) call exchange_nod(fer_Wvel, partit)
         end if
 
         call compute_CFLz(dynamics, mesh, dt, partit)
