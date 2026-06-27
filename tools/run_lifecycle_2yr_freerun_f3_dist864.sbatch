@@ -46,6 +46,7 @@ export FESOM3_SSS_FILE="$POOL/PHC2_salx.nc"
 export FESOM3_CHL_SWEENEY=1
 export FESOM3_WHICH_ALE=zstar FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1 FESOM3_SW_PENE=1
 export FESOM3_WHICHEVP="$WHICHEVP" FESOM3_NSTEPS="$NSTEPS"
+export FESOM3_STEP_DIAG=1   # this run's PURPOSE is the per-step global MPI_MAX peak trajectory (gated OFF by default since M8-perf)
 
 date
 echo "################################################################"

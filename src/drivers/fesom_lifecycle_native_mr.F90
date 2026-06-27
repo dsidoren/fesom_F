@@ -107,6 +107,7 @@ program fesom_lifecycle_native_mr
     integer            :: clk_d0, clk_y0, clk_unit, idx, ierr
     real(kind=WP)      :: clk_t0, dstat(6)   ! dstat: M8c Step-3 global per-step physical diagnostics
     logical            :: ftz_supported   ! M8c Step-3: flush-to-zero (denormal) underflow control (match FESOM2)
+    logical            :: step_diag        ! perf: per-step global MPI_MAX stability diagnostic (env FESOM3_STEP_DIAG; default OFF — FESOM2 has no per-step collective)
     character(len=512) :: start_clock, restart_in
     real(kind=MP) :: zbar_srf, zbar_bot
     real(kind=WP), allocatable :: Ki(:,:), real_salt_flux(:), stress_surf(:,:)
@@ -159,6 +160,11 @@ program fesom_lifecycle_native_mr
     use_chl_sweeney = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_KPP_NONLCL', env, length=env_len, status=ios)
     do_nonlcl = (ios == 0 .and. env_len > 0)
+    ! perf: the per-step GLOBAL MPI_Allreduce stability diagnostic (max|eta|/|uv|/a_ice/m_ice/T/S) is a
+    ! sync point FESOM2 does NOT have (it logs only every logfile_outfreq). OFF by default so the production
+    ! driver matches FESOM2's per-step work; the M8e free-running stability run sets FESOM3_STEP_DIAG=1.
+    call get_environment_variable('FESOM3_STEP_DIAG', env, length=env_len, status=ios)
+    step_diag = (ios == 0 .and. env_len > 0)
     ! M6a-4: ALE vertical coordinate (default linfs). 'zstar' -> full free surface + real
     ! freshwater flux (use_virt_salt=.false., is_nonlinfs=1; mirror of the 1-rank M6a-3 wiring).
     call get_environment_variable('FESOM3_WHICH_ALE', env, length=env_len, status=ios)
@@ -706,11 +712,12 @@ program fesom_lifecycle_native_mr
                       atm%heat_flux, atm%water_flux, atm%virtual_salt, atm%relax_salt, &
                       atm%real_salt_flux, is_nonlinfs, stress_surf, partit, &   ! M6a-4: native rsf (zstar)
                       stress_node_surf=atm%stress_node_surf)
-        ! M8c Step 3 (physical validation): GLOBAL per-step diagnostics. ALL ranks compute local
-        ! extrema and reduce with ONE MPI_MAX; only rank 0 prints. Stability (max|eta|,max|uv|),
-        ! cryosphere (max a_ice in [0,1], max m_ice), and warm/salty drift ceilings (global Tmax,
-        ! Smax — maxes are immune to the dry-cell 0.0 padding that floors the mins). Diagnostic-only:
-        ! reads the prognostic state after step_oce, never writes it.
+        ! M8c Step 3: GLOBAL per-step diagnostics. ALL ranks compute local extrema and reduce with ONE
+        ! MPI_MAX; only rank 0 prints. Stability (max|eta|,max|uv|), cryosphere (max a_ice in [0,1], max
+        ! m_ice), and warm/salty drift ceilings (global Tmax, Smax). Diagnostic-only: reads the prognostic
+        ! state after step_oce, never writes it. GATED (perf): the per-step MPI_Allreduce is a global sync
+        ! FESOM2 lacks — skip unless FESOM3_STEP_DIAG is set (the stability run sets it; benchmarks/production do not).
+        if (.not. step_diag) cycle
         dstat(1) = maxval(abs(dyn%eta_n(1:nNodO)))
         dstat(2) = maxval(abs(dyn%uv(:,:,1:nElemO)))
         dstat(3) = maxval(ice%data(1)%values(1:nNodO))            ! a_ice  (area fraction, >=0)
