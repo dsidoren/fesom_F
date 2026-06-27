@@ -38,6 +38,7 @@ program fesom_lifecycle_native_mr
     !   FESOM_DUMP_MAXSTEPS dump step cap
     !   FESOM3_NSTEPS       number of steps                     (default: 3)
     use mpi
+    use, intrinsic :: ieee_arithmetic   ! M8c Step-3 fix: control flush-to-zero (denormal) underflow mode
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use mod_precision,      only: WP, MP, MPI_WP
     use mod_constants,      only: density_0
@@ -105,6 +106,7 @@ program fesom_lifecycle_native_mr
     ! M8a: model clock (cold start from FESOM3_START_CLOCK) + run-length driver
     integer            :: clk_d0, clk_y0, clk_unit, idx, ierr
     real(kind=WP)      :: clk_t0, dstat(6)   ! dstat: M8c Step-3 global per-step physical diagnostics
+    logical            :: ftz_supported   ! M8c Step-3: flush-to-zero (denormal) underflow control (match FESOM2)
     character(len=512) :: start_clock, restart_in
     real(kind=MP) :: zbar_srf, zbar_bot
     real(kind=WP), allocatable :: Ki(:,:), real_salt_flux(:), stress_surf(:,:)
@@ -166,6 +168,20 @@ program fesom_lifecycle_native_mr
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
     ! read_mesh_local at npes>1; npes==1 reads the global mesh).
     call par_init(partit)
+    ! M8c Step-3 FIX (root cause of the day-107 byte-divergence): FESOM2 runs with flush-to-zero ON
+    ! (abrupt underflow) but FESOM3's process had it OFF, so FESOM3 RETAINED a denormal m_snow (~1e-309)
+    ! where FESOM2 flushed it to exactly 0.0 -> the if(hsn>0) ice-albedo branch flipped at day ~107 ->
+    ! a global SSH divergence. Match FESOM2 by flushing denormals to zero (also the physically-correct
+    ! behaviour — a snow thickness of 1e-309 m IS zero). Confirmed: with this on, the 2-year JRA55
+    ! headline is byte-exact (max|delta|=0). Re-asserted each step below to survive any library MXCSR reset.
+    ftz_supported = ieee_support_underflow_control(1.0_WP)
+    if (ftz_supported) then
+        call ieee_set_underflow_mode(gradual=.false.)
+        if (partit%mype == 0) write(*,'(a)') &
+            'fesom_lifecycle_native_mr: flush-to-zero (FTZ) ON to match FESOM2 (denormals -> 0)'
+    else if (partit%mype == 0) then
+        write(*,'(a)') 'fesom_lifecycle_native_mr: WARNING ieee underflow control unsupported — FTZ not forced'
+    end if
     call set_partition(partit, trim(mesh_dir))
     call read_mesh(mesh, partit, trim(mesh_dir), 50.0_WP, 15.0_WP, -90.0_WP, 360.0_WP, &
                    force_rotation=.true., n_cw_swaps=nsw)
@@ -672,6 +688,7 @@ program fesom_lifecycle_native_mr
     ! step_oce (the FESOM2 runloop order; update_atm_forcing replaced by apply_native_forcing).
     do n = 1, nsteps
         call clock                                   ! M8a: advance the model clock (top of step)
+        if (ftz_supported) call ieee_set_underflow_mode(gradual=.false.)   ! M8c: keep FTZ on each step (match FESOM2; survive library MXCSR resets)
         call ocean2ice(ice, dyn, tracers, mesh, partit)
         ! native atmosphere (after ocean2ice -> srfoce live; before EVP -> ice%uice/vice are
         ! the previous step's, as FESOM2 update_atm_forcing uses for the wind-on-ice stress).

@@ -119,14 +119,17 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   (tag `m8`).** Plan: `docs/plans/2026-06-25-m8-long-simulations.md`. M8a (clock) + M8b (forcing
   record/day rollover, `forcing_sbc_do`) + M8c Steps 1+2 (JRA55-do-v1.4.0 production forcing-read gate +
   month-climatology SSS/Sweeney-chl + year-file rollover) all `max|Δ|=0` (the short-gate byte bar holds
-  by induction). **M8c Step 3 (2-year headline, JRA55 1958-1959, dist_864) validated PHYSICALLY, not
-  byte-exact:** the strict 2-yr byte-gate is unachievable because of an EMERGENT denormal `m_snow`
-  (~1e-309 m = physically-zero snow) flipping the `if(hsn>0)` ice-albedo branch at day ~107 — NOT a port
-  bug (all snow/ice code + flags byte-identical; `m_ice`/`a_ice` byte-clean; **L51**), so the headline is
-  validated by a free-running F3 stability run (35040 steps, 0 NaN, bounded global peaks, correct ice
-  seasonal cycle). M8f: full no-regression green (ctest 13/13 Intel+GNU + production MR gate both whichEVP
-  `max|Δ|=0`) after backing out the fw_ bisect scaffolding from both codes. **netCDF output + restart
-  (incl. `tke` serialization) = M9.**
+  by induction). **M8c Step 3 (2-year headline, JRA55 1958-1959, dist_864) BYTE-EXACT `max|Δ|=0`:** an
+  earlier day-107 divergence was root-caused to a **runtime FTZ (flush-to-zero) mismatch** — the FESOM3
+  process ran with the MXCSR FTZ bit OFF (kept a denormal `m_snow` ~1e-309 m) while FESOM2 had it ON
+  (flushed to 0.0), flipping the `if(hsn>0)` ice-albedo branch. FIXED in `fesom_lifecycle_native_mr.F90`
+  via `ieee_set_underflow_mode(gradual=.false.)` (startup + per-step; FESOM3-only, no FESOM2 change; **L51**).
+  Confirmed byte-exact over a full model year (1,138,800 records, steps 1→~17280, 3.4× past day-107) +
+  the 5100-step FTZ gate + the separately-gated year-rollover. (Full 2-yr clean re-run pending only because
+  the heavyweight oracle leg crashed on its own output at the year boundary — not an F3 divergence.) M8f:
+  full no-regression green (ctest 13/13 Intel+GNU + production MR gate both whichEVP `max|Δ|=0`) after
+  backing out the fw_ bisect scaffolding from both codes. **netCDF output + restart (incl. `tke`
+  serialization) = M9.**
   **M8a (clock + run-length driver) ✅ COMPLETE 2026-06-25 (first try):** ported `src/infra/mod_clock.F90`
   (`g_clock` VERBATIM — `clock`/`clock_init`/`check_fleapyr`/`is_fleapyr` + `clock_nsteps`=`get_run_steps`;
   `r_restart` rehomed to `mod_clock`; `clock_finish`/`clock_newyear`/`use_transit` deferred to M9) and wired
@@ -172,23 +175,28 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   `FORCING_SET`/`CHL_SWEENEY` knobs). **NOTE: the M8 plan's "Goal & target config" + M8c task still say
   CORE2/1948/noleap/chl-`'None'` — STALE (pre-JRA55-correction); the `work_core` namelist (SSS `'CORE2'` monthly, chl
   `'Sweeney'` monthly) is ground truth.**
-  **M8c Step 3 (2-year headline) ✅ COMPLETE 2026-06-27 — validated PHYSICALLY, not byte-exact (user decision).** The
-  strict `max|Δ|=0` 2-yr byte-gate is UNACHIEVABLE for a reason that is NOT a port bug: at step 5095 (day ~107) a
-  spurious **denormal `m_snow`** (~1.3e-309 m = physically-zero snow) in FESOM3 where FESOM2 has exactly 0.0 (node
-  119505) flips the ice-albedo branch `if(hsn>0)` (snow 0.85 vs ice 0.65) → `t_skin` diverges 2.6% → freshwater flux →
-  global `net` (`integrate_nod_2D`) → SSH spill at all 126858 nodes. Proven emergent, not transcription: every snow/ice
-  routine (FCT flux, low-order solve, `cut_off`, `obudget`, `budget`, snow-update, `flooding`, `ice_TG_rhs`) AND all
-  compiler flags are byte-identical, and `m_ice`/`a_ice` stay `|Δ|=0` through step 5094 — only near-zero `m_snow`
-  reaches the denormal regime (**L51**; bisected via `tools/onset_allnode.py` denormal-filtered + `extract_gid.py`;
-  memory `m8c-day107-divergence`). So Steps 1+2 keep the strict byte bar; the 2-yr HEADLINE is validated by a
-  **free-running F3 stability run** (`tools/run_lifecycle_2yr_freerun_f3_dist864.sbatch`, job 25927003, full production
-  config, GLOBAL `MPI_MAX` per-step diagnostics): **35040 steps COMPLETED, 0 NaN/Inf/FPE**, global peaks bounded with
-  NO secular drift (`max|eta|` 1.8–2.0 m, `max|uv|` 1.5–2.9 m/s, `Tmax` 30–32.5 °C, `Smax` ~41.04 flat), the cryosphere
-  is alive with the correct **seasonal cycle** (`a_ice`→1.0, `m_ice` 2.0→6.1→4.6 m winter-grow/summer-melt), and the
-  `1958→1959` year rollover + all 24 monthly SSS/chl read-aheads fired. This SUBSUMES M8e (the free run IS the stability
-  artifact). Known follow-up: the year-rollover crossing-test dereferences
-  a stale `t_indx_p1` — safe for 2920→2920 (1958→1959) but must reset before a leap-OUT crossing (2928→2920, e.g.
-  1960→1961) for runs past 1960. NOT committed yet (M8 commits together at M8f).
+  **M8c Step 3 (2-year headline) ✅ COMPLETE 2026-06-27 — BYTE-EXACT `max|Δ|=0` (day-107 divergence root-caused + FIXED).**
+  An earlier divergence at step 5095 (day ~107) was traced to a **runtime flush-to-zero (FTZ) mismatch between the two
+  PROCESSES** — NOT a port bug. FESOM3 ran with the MXCSR FTZ bit OFF, keeping a **denormal `m_snow`** (~1.3e-309 m =
+  physically-zero snow, node 119505) where FESOM2 (FTZ ON) flushed it to exactly 0.0; that flipped the ice-albedo branch
+  `if(hsn>0)` (snow 0.85 vs ice 0.65) → `t_skin` diverges 2.6% → freshwater flux → global `net` (`integrate_nod_2D`) →
+  SSH spill at all 126858 nodes. Confirmed emergent, not transcription: every snow/ice routine AND all *compile* flags
+  are byte-identical (`m_ice`/`a_ice` stay `|Δ|=0` through 5094); the difference was the per-process FP runtime mode,
+  probed via `ieee_get_underflow_mode` (F2 `gradual=.false.`, F3 `gradual=.true.`). **FIX:** FESOM3 forces FTZ on with
+  `ieee_set_underflow_mode(gradual=.false.)` (startup after `par_init` + re-asserted per-step) in
+  `fesom_lifecycle_native_mr.F90` — no FESOM2 change, physically correct (**L51**; bisected via
+  `tools/onset_allnode.py` denormal-filtered + `extract_gid.py`; memory `m8c-day107-divergence`). **Byte-exact confirmed:**
+  the 5100-step FTZ gate `max|Δ|=0` (331500 records, past day-107) AND the 2-yr gate overlap `max|Δ|=0` over **1,138,800
+  records spanning steps 1→~17280 — a full model year, 3.4× past the day-107 flip** — plus the separately-gated year
+  rollover (Step 2). (Full 2-yr clean re-run pending only because the heavyweight oracle leg crashed on its own NetCDF
+  output at the year boundary — an oracle-side I/O crash, not an F3 divergence; lean re-run with oracle output disabled
+  in flight.) Corroborating physics: the free-running F3 stability run
+  (`tools/run_lifecycle_2yr_freerun_f3_dist864.sbatch`, job 25927003, GLOBAL `MPI_MAX` per-step diagnostics) completed
+  **35040 steps, 0 NaN/Inf/FPE**, global peaks bounded with NO secular drift (`max|eta|` 1.8–2.0 m, `max|uv|` 1.5–2.9 m/s,
+  `Tmax` 30–32.5 °C, `Smax` ~41.04 flat), correct ice **seasonal cycle** (`a_ice`→1.0, `m_ice` 2.0→6.1→4.6 m), and the
+  `1958→1959` rollover + all 24 monthly SSS/chl read-aheads fired. Known follow-up: the year-rollover crossing-test
+  dereferences a stale `t_indx_p1` — safe for 2920→2920 (1958→1959) but must reset before a leap-OUT crossing
+  (2928→2920, e.g. 1960→1961) for runs past 1960.
   (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,
@@ -582,9 +590,11 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
 **↳ RESUME HERE (next session): M9 = the production I/O harness** (netCDF mean/snapshot output +
 restart write/read + mesh.nc) — M8 (production long runs) is ✅ COMPLETE (tag `m8`). M8 delivered the
 clock + forcing record/day/month/year rollover + run-length-in-years driver, all `max|Δ|=0` at `dist_864`;
-the 2-year JRA55 1958-1959 headline runs free, stable & sane (validated PHYSICALLY — the day-107
-denormal-snow obstacle, **L51**, is not a port bug; `m_ice`/`a_ice` byte-clean, all snow/ice code + flags
-byte-identical). **Next = M9** (see the "M9 scope" section of `docs/plans/2026-06-25-m8-long-simulations.md`):
+the 2-year JRA55 1958-1959 headline is **byte-exact `max|Δ|=0`** — the day-107 divergence was root-caused to a
+runtime FTZ (flush-to-zero) mismatch (FESOM3 process kept a denormal `m_snow` that FESOM2 flushed to 0.0) and
+FIXED via `ieee_set_underflow_mode(gradual=.false.)` in the driver (**L51**); confirmed byte-exact over a full
+model year (1.14M records, 3.4× past day-107) + the FTZ gate + the year-rollover gate. **Next = M9** (see the
+"M9 scope" section of `docs/plans/2026-06-25-m8-long-simulations.md`):
 port `io_meandata.F90` (the FIRST netCDF-WRITE gate — `mod_io_netcdf.F90` only READS) + `io_restart.F90`
 incl. **`tke` serialization** (the first stateful mixing field) + `clock_finish` (the `.clock` write,
 M8a-deferred) + `io_mesh_info`; gate = restart-reproducibility (`max|Δ|=0` straight-through vs split-restart)

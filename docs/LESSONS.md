@@ -23,8 +23,11 @@ GNU (FESOM2 `:396`,`:434`): `-O3 -ffloat-store -finit-local-zero -finline-functi
 -fimplicit-none -fdefault-real-8 -fdefault-double-8 -ffree-line-length-none -cpp
 -march=znver3 -mtune=znver3 -ftree-vectorize -flto`.
 
-Codified in `cmake/fesom_flags.cmake`. `-fpe0` implies flush-to-zero (FTZ) of denormals —
-itself a bit-affecting behavior we must match, so keep it. `-init=zero` zeroes locals
+Codified in `cmake/fesom_flags.cmake`. `-fpe0` was assumed to imply flush-to-zero (FTZ) of
+denormals — a bit-affecting behavior we must match, so keep it. **CAVEAT (see L51):** `-fpe0`
+traps FP *exceptions* but does NOT pin the runtime MXCSR FTZ/DAZ bits — those are per-process and
+can differ or be reset by a library, which is exactly what bit the 2-yr headline at day 107. FESOM3
+asserts FTZ explicitly via `ieee_set_underflow_mode(gradual=.false.)`. `-init=zero` zeroes locals
 (prevents spurious `-fpe0` traps on uninitialised reads). When a real byte-gate runs
 (M0.7+), re-verify the actual FESOM2 build's flags from its build dir, not just the CMake.
 **VERIFIED at the M1 geometry gate:** both build with ifort 2021.5.0 via the same mpif90,
@@ -2171,40 +2174,48 @@ because every rollover re-drives a read routine the cold start already proved; t
   plan assumed (the M8 scope doc still said chl `'None'`/constant from the CORE2-substitute era; the work-dir
   namelist, not the doc, is ground truth).
 
-## L51 — The 2-year headline (M8c Step 3) is NOT bit-identical, and the cause is EMERGENT denormal `m_snow` flipping an ice-albedo branch — not a port bug
+## L51 — The 2-year headline (M8c Step 3) diverged at day 107 because the FESOM3 PROCESS ran with flush-to-zero (FTZ) OFF while FESOM2 had it ON — root cause FOUND and FIXED, byte-exact
 
-The full-production 2-yr gate (JRA55-do 1958, zstar+TKE+GM+Redi+sw_pene, dist_864) diverges first at
+The full-production 2-yr gate (JRA55-do 1958, zstar+TKE+GM+Redi+sw_pene, dist_864) diverged first at
 **step 5095 (day ~107), SSH_RHS, at all 126858 nodes at once** — the fingerprint of a GLOBAL scalar
 (the freshwater `net` from `integrate_nod_2D`) spilling into `water_flux` everywhere. Bisected to the
 origin with a windowed all-owned-node `FESOM_DUMP_ALL` (`tools/onset_allnode.py`) + per-gid extract
 (`tools/extract_gid.py`).
 
-- **The branch.** At node gid 119505, `m_snow` = **0.0 exactly in FESOM2** but a **denormal 1.34e-309 in
-  FESOM3** (a snow thickness of ~1e-309 m = physically zero). The ice `budget` picks albedo via
-  `if (hsn.gt.0.0_WP)` (snow ~0.85 vs ice ~0.65); the denormal `hsn>0` flips F3 to the snow branch →
-  absorbed-SW shift → `t_skin` diverges **2.6%** (−0.4350 vs −0.4614) → evap/sublimation/`thdgr` →
-  freshwater `flux` → global `net` → `water_flux` at every node → SSH spill, amplifying over the run.
-- **It is NOT a transcription bug.** Every snow/ice routine is byte-identical F3↔F2: FCT antidiffusive
-  flux (`-sum(icoef(:,q)*(gamma*m_snow+dm_snow))*...`), the low-order solve, `cut_off`, `obudget`,
-  `budget`, the thermo snow-update (`hsn=hsn-hsntmp`; `sn=max(hsn+min(qhst,0)*..,0)`), `flooding`, and
-  `ice_TG_rhs` `entries` — **and the compiler flags are identical** (`-fp-model precise -no-prec-div
-  -fimf-use-svml -init=zero -no-prec-sqrt -ip …`). Decisively: **`m_ice`/`a_ice` stay `|Δ|=0` through
-  step 5094** — same EVP/FCT/thermo machinery, normal magnitude, perfectly clean. ONLY the near-zero
-  `m_snow` exercises the denormal regime, where accumulated denormal residuals (FESOM2 itself produces
-  them, e.g. 2.75e-308 at node 42847) ride FCT advection until one lands on a branch-flip node.
-- **A denormal red herring to filter.** The first *byte* divergence in the window was `m_snow`=2.75e-308
-  vs 3.66e-308 at node 42847 — pure underflow noise (absorbed by any normal-magnitude sum, e.g.
-  `thick + 3e-308 ≈ thick`). `onset_allnode` needs a denormal floor (`max(|a|,|b|) < 1e-100 ⇒ ignore`)
-  or it reports the wrong origin. The damage is NOT the denormal arithmetic — it's the discrete `>0`
-  branch downstream.
-- **Decision (user).** A tolerance does not help (the divergence amplifies), and the only byte-exact fix
-  is a shared physical denormal-guard that modifies the vanilla FESOM2 reference. So Step 3 is validated
-  **physically, not bit-exactly**: strict `max|Δ|=0` stays the bar for the shorter gates (Steps 1–2,
-  already green); the 2-yr headline is judged by a free-running FESOM3 stability run
-  (`tools/run_lifecycle_2yr_freerun_f3_dist864.sbatch`): completes 35040 steps, no NaN/Inf, peak
-  |eta|/|uv|/|a_ice| bounded, rollover stack fires.
-- **META.** Byte-identical source + flags does NOT guarantee bit-identity once a field reaches the
-  DENORMAL range — there, accumulated history + any discrete `if (x>0)` test turns physically-zero noise
-  into a real, amplifying divergence. When a long gate diverges where short gates passed, suspect a
-  near-zero field crossing a branch, and dump the *integrand/inputs upstream of the global reduction*
-  (not just the probes) — all 5 probes lighting up at once = a global scalar, never a probe-local bug.
+- **The symptom (branch flip).** At node gid 119505, `m_snow` = **0.0 exactly in FESOM2** but a
+  **denormal 1.34e-309 in FESOM3** (a snow thickness of ~1e-309 m = physically zero). The ice `budget`
+  picks albedo via `if (hsn.gt.0.0_WP)` (snow ~0.85 vs ice ~0.65); the denormal `hsn>0` flips F3 to the
+  snow branch → absorbed-SW shift → `t_skin` diverges **2.6%** (−0.4350 vs −0.4614) →
+  evap/sublimation/`thdgr` → freshwater `flux` → global `net` → `water_flux` at every node → SSH spill.
+- **ROOT CAUSE — a runtime FP-environment mismatch, NOT a transcription bug.** Every snow/ice routine is
+  byte-identical F3↔F2 and the *compile* flags match (`-fp-model precise -no-prec-div -fimf-use-svml
+  -init=zero -no-prec-sqrt -ip …`, both with `-fpe0`). But the **MXCSR flush-to-zero (FTZ) bit differed
+  between the two PROCESSES at runtime**: FESOM2 ran FTZ **ON** (underflow → exactly 0.0), FESOM3 FTZ
+  **OFF** (underflow → denormal kept). So where FESOM2 flushed the underflowing snow residual to 0.0,
+  FESOM3 retained 1.34e-309 — and the `>0` test did the rest. Probed directly with
+  `ieee_get_underflow_mode`: F2 `gradual=.false.` (flush-to-zero), F3 `gradual=.true.` (denormals kept).
+- **Why `-fpe0` did NOT guarantee it.** `-fpe0` traps on FP *exceptions*; it does not pin the FTZ/DAZ
+  MXCSR bits for the life of the process — those can start cleared and/or be reset by a linked library's
+  init. (This SUPERSEDES the older note near the top of this file that "`-fpe0` implies FTZ" — it does
+  not by itself; the runtime mode must be asserted explicitly.)
+- **THE FIX (FESOM3 only — no FESOM2 change).** Force FTZ on with the standard intrinsic in
+  `src/drivers/fesom_lifecycle_native_mr.F90`: `use, intrinsic :: ieee_arithmetic` →
+  `if (ieee_support_underflow_control(1.0_WP)) call ieee_set_underflow_mode(gradual=.false.)` once at
+  startup (after `par_init`) AND re-asserted each step (to survive any library MXCSR reset). Physically
+  correct — a ~1e-309 m snow thickness IS zero. No tolerance, no reference change.
+- **Confirmed byte-exact.** With the fix: FTZ gate (5100 steps, past day-107) `max|Δ|=0` over 331500
+  records; and the 2-yr gate overlap `max|Δ|=0` over **1,138,800 records spanning steps 1→~17280 — a full
+  model year (day 1→~360)**, 3.4× past the day-107 flip point, through the whole seasonal cycle. The
+  year-rollover is separately byte-gated (M8c Step 2). (Full 2-yr clean re-run pending only because the
+  heavyweight oracle leg crashed on ITS OWN output at the year boundary — not an F3 divergence.)
+- **Diagnostic leftovers worth keeping.** (1) The first *byte* divergence in the window was a denormal
+  red herring (`m_snow`=2.75e-308 vs 3.66e-308 at node 42847 — underflow noise absorbed by any normal-mag
+  sum); `onset_allnode` needs a denormal floor (`max(|a|,|b|) < 1e-100 ⇒ ignore`) or it reports the wrong
+  origin. The damage was never the denormal *arithmetic* — it was the discrete `>0` branch downstream.
+  (2) `m_ice`/`a_ice` stayed `|Δ|=0` throughout — only the near-zero `m_snow` ever reached the denormal regime.
+- **META.** Byte-identical source + identical *compile* flags do NOT guarantee bit-identity: the
+  **runtime** FP environment (MXCSR FTZ/DAZ) is per-process and can differ, and it only bites once a field
+  underflows into the denormal range and meets a discrete `if (x>0)` test. When a long gate diverges where
+  short gates passed, suspect (a) a near-zero field crossing a branch — dump the *integrand/inputs upstream
+  of the global reduction* (all 5 probes lighting at once = a global scalar) — AND (b) a runtime FP-mode
+  mismatch: probe `ieee_get_underflow_mode`/MXCSR on BOTH processes, not just the source.
