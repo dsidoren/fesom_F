@@ -12,8 +12,8 @@ module load netcdf-c/4.8.1-gcc-11.2.0
 module load netcdf-fortran/4.5.3-gcc-11.2.0
 module load git
 
-ulimit -s unlimited
-ulimit -c 0
+ulimit -s unlimited 2>/dev/null || true   # best-effort (see shell.intel): on a SLURM compute node
+ulimit -c 0 2>/dev/null || true           # the hard stack may be capped; raising it errors under set -e
 
 export OMPI_MCA_pml="ucx"
 export OMPI_MCA_btl=self

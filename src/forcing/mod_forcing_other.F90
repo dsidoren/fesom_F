@@ -49,7 +49,7 @@ contains
         type(t_mesh),   intent(in)           :: mesh
         type(t_partit), intent(in), optional :: partit
         integer :: i, j, ii, jj, k, n, num, flag, cnt
-        integer :: latlen, lonlen, ncid
+        integer :: latlen, lonlen, ncid, st
         real(real64) :: miss, aux
         real(real64), allocatable :: lon(:), lat(:)
         real(real64), allocatable :: ncdata(:,:), ncdata_temp(:,:)
@@ -73,7 +73,12 @@ contains
         allocate(ncdata(lonlen,latlen), ncdata_temp(lonlen,latlen))
         ncdata = 0.0_WP
         call nc_get_slice_dp(ncid, [vari], itime, ncdata)
-        miss = nc_get_att_dp(ncid, [vari], 'missing_value')
+        ! missing_value: PHC2 SSS carries missing_value=-99 (st==0 => miss=-99). The Sweeney chl file
+        ! has NO missing_value attribute — FESOM2 then leaves `miss` undefined, but the chl field is a
+        ! fully-extrapolated [.001,.6] climatology with no -99/sentinels so the fill loop never fires;
+        ! miss=-99 here reproduces that no-fill (the hardcoded -99 check below stays the only trigger).
+        miss = nc_get_att_dp(ncid, [vari], 'missing_value', stat=st)
+        if (st /= 0) miss = -99.0_real64
         call nc_close(ncid)
 
         ! fill missing values on the raw regular grid

@@ -115,6 +115,80 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   **`tke` restart serialization = M8** (the FIRST stateful mixing field — `dyn%work%tke`; not in
   `write_t_dyn_work`). **Tag `m7`. RESUME at M8** = production months/years runs (netCDF output + restart
   write + run-length-in-years + Fortran comparison ~byte-identical) — its own plan.
+  **→ M8 (production long simulations — months/years, CORE2/JRA55 multinode) ✅ COMPLETE 2026-06-27
+  (tag `m8`).** Plan: `docs/plans/2026-06-25-m8-long-simulations.md`. M8a (clock) + M8b (forcing
+  record/day rollover, `forcing_sbc_do`) + M8c Steps 1+2 (JRA55-do-v1.4.0 production forcing-read gate +
+  month-climatology SSS/Sweeney-chl + year-file rollover) all `max|Δ|=0` (the short-gate byte bar holds
+  by induction). **M8c Step 3 (2-year headline, JRA55 1958-1959, dist_864) validated PHYSICALLY, not
+  byte-exact:** the strict 2-yr byte-gate is unachievable because of an EMERGENT denormal `m_snow`
+  (~1e-309 m = physically-zero snow) flipping the `if(hsn>0)` ice-albedo branch at day ~107 — NOT a port
+  bug (all snow/ice code + flags byte-identical; `m_ice`/`a_ice` byte-clean; **L51**), so the headline is
+  validated by a free-running F3 stability run (35040 steps, 0 NaN, bounded global peaks, correct ice
+  seasonal cycle). M8f: full no-regression green (ctest 13/13 Intel+GNU + production MR gate both whichEVP
+  `max|Δ|=0`) after backing out the fw_ bisect scaffolding from both codes. **netCDF output + restart
+  (incl. `tke` serialization) = M9.**
+  **M8a (clock + run-length driver) ✅ COMPLETE 2026-06-25 (first try):** ported `src/infra/mod_clock.F90`
+  (`g_clock` VERBATIM — `clock`/`clock_init`/`check_fleapyr`/`is_fleapyr` + `clock_nsteps`=`get_run_steps`;
+  `r_restart` rehomed to `mod_clock`; `clock_finish`/`clock_newyear`/`use_transit` deferred to M9) and wired
+  it into `fesom_lifecycle_native_mr`: `step_per_day=48`/`mod_config%dt=1800` so `clock` advances per step;
+  `FESOM3_START_CLOCK` ("t d y", default "0 1 1948") → rank-0 writes a 2-identical-line `.clock`, barrier,
+  all ranks `clock_init`; `nsteps=clock_nsteps(partit)` (`FESOM3_NSTEPS` short-gate override kept); `call
+  clock` at the top of each step. Forcing path UNCHANGED (still hard-codes the day-1 rdate) ⇒ byte-NEUTRAL
+  within day 1. Gates `max|Δ|=0`: unit `fesom_clocktest` (`tools/run_clocktest.sh` — hand-computed table for
+  day/month/year rollovers + `clock_nsteps` s/d/m/y, Intel AND GNU, 1+2 rank); zstar+TKE MR 325 records
+  dist_2 (BOTH whichEVP) + dist_8, 5 steps; no-regression ctest 13/13 (Intel+GNU dp) + step-65 1-rank.
+  **M8b (forcing record/day rollover — `forcing_sbc_do`) ✅ COMPLETE 2026-06-26:** ported
+  `gen_surface_forcing.F90:1524-1567` as `forcing_sbc_do` (per-field running rdate from `mod_clock` with
+  the `-dt/2` half-step; crossing test `rdate>nc_time(t_indx_p1) .and. nc_time(t_indx)<nc_time(ntime)` ⇒
+  re-fire `forcing_getcoeffld` + wind g2r re-rotate) MINUS the year branch (M8c) and the leap special-case
+  (dead for `'none'`). `forcing_getcoeffld` now PERSISTS the per-field bracket `t_indx`/`t_indx_p1` in
+  `t_ffile` (`nc_Ntime`==existing `ntime`); driver cold-start coef build seeded from the clock
+  (`rdate_cold` NO half-step, SSS at `i=month`) — required REORDERING the M8a clock block to BEFORE the
+  forcing setup. **GATES `max|Δ|=0` (both whichEVP, CORE2 full-year pool):** login `dist_2`+`dist_8` 48
+  steps = 3120 records with **18 `getcoeffld` re-fires** (6-hourly winds/q/Tair 1/2→2/3→3/4→4/5 at steps
+  ~7/19/31/43 + daily radiation 1/2 at ~25); **PRODUCTION `dist_864` (7 nodes/864 ranks) — the FIRST
+  fesom3 SLURM-batch inter-node byte-gate — 3120 records, both whichEVP** (also dist_128 batch). No
+  regression: ctest 13/13 + zstar+TKE MR stub day-1 (325 records, dist_2 both whichEVP + dist_8). NEW
+  `tools/run_lifecycle_long_gate_multirank.sh` + `…_dist864.sbatch`; `run_lifecycle_forced_core2.sh` + the
+  MR gate parametrized with `FORCING_OVERRIDE`/`START_CLOCK` + `srun`/204800-stack SLURM branches. TWO
+  latent harness bugs fixed en route — see **L48** (`grep|head` SIGPIPE + `set -e`; `ulimit -s unlimited`
+  raise on a hard-capped compute node).
+  **M8c (JRA55-do production forcing — the REAL target, not the CORE2 substitute) ✅ Steps 1+2 COMPLETE 2026-06-26:**
+  The production atmosphere is **JRA55-do-v1.4.0** (3-hourly, `gregorian` + `include_fleapyear=.true.`, `tmid=0`,
+  fields `uas/vas/huss/rsds/rlds/tas/prra/prsn`, start **1958** — NOT CORE2/1948; M2.10→M8b used the CORE2 NCAR
+  substitute). **Step 1 (forcing-read gate)** byte-matches the 8 atmosphere fields + bulk from 1958 — exposed and
+  fixed the **calendar NUL-byte trap** (`nc_get_att_text` returned `'gregorian'//char(0)` ⇒ `trim()=='gregorian'`
+  silently FALSE ⇒ noleap branch ⇒ wrong slice ⇒ `ssh_rhs`~1e4; CORE2's `'NOLEAP'` had masked it for 8 milestones —
+  **L49**). `max|Δ|=0`: `dist_2` (both whichEVP) + `dist_8`; CORE2 no-regression 48-step `dist_2` (3120 records) still
+  `max|Δ|=0`. **Step 2 (rollover)** ports the **year-file branch** (`forcing_sbc_do` `yearnew/=yearold` ⇒
+  `forcing_read_grid` per field + `force_newcoeff`; grid re-entrancy via `if(allocated)deallocate`) + **SSS monthly
+  read-ahead** + **Sweeney chl monthly** (`roll_monthly_clim` in the driver: `update_monthly_flag` last-instant trigger,
+  `i=month/(mstep>1→+1)/wrap`; chl needed `nc_get_att_dp` optional-`stat` + `miss=-99` for the attribute-less Sweeney
+  file — **L50**). `max|Δ|=0` at `dist_2`: Jan→Feb month gate (SSS read-ahead fires step 2), Dec31'58→Jan1'59 YEAR
+  gate (atmosphere 1958→1959 rollover + Dec→Jan SSS), chl-Sweeney month gate — all non-vacuous (stdout `YEAR ROLLOVER`
+  / `roll_monthly_clim` markers). Files: `mod_io_netcdf.F90` (NUL sanitize + att `stat`), `mod_forcing_other.F90`
+  (no-fill sentinel), `mod_forcing_read.F90` (year branch + re-entrancy), `fesom_lifecycle_native_mr.F90` (forc_set
+  JRA55/CORE2 wiring, `roll_monthly_clim`, chl-Sweeney), runners (`run_lifecycle_jra55_gate_multirank.sh` +
+  `FORCING_SET`/`CHL_SWEENEY` knobs). **NOTE: the M8 plan's "Goal & target config" + M8c task still say
+  CORE2/1948/noleap/chl-`'None'` — STALE (pre-JRA55-correction); the `work_core` namelist (SSS `'CORE2'` monthly, chl
+  `'Sweeney'` monthly) is ground truth.**
+  **M8c Step 3 (2-year headline) ✅ COMPLETE 2026-06-27 — validated PHYSICALLY, not byte-exact (user decision).** The
+  strict `max|Δ|=0` 2-yr byte-gate is UNACHIEVABLE for a reason that is NOT a port bug: at step 5095 (day ~107) a
+  spurious **denormal `m_snow`** (~1.3e-309 m = physically-zero snow) in FESOM3 where FESOM2 has exactly 0.0 (node
+  119505) flips the ice-albedo branch `if(hsn>0)` (snow 0.85 vs ice 0.65) → `t_skin` diverges 2.6% → freshwater flux →
+  global `net` (`integrate_nod_2D`) → SSH spill at all 126858 nodes. Proven emergent, not transcription: every snow/ice
+  routine (FCT flux, low-order solve, `cut_off`, `obudget`, `budget`, snow-update, `flooding`, `ice_TG_rhs`) AND all
+  compiler flags are byte-identical, and `m_ice`/`a_ice` stay `|Δ|=0` through step 5094 — only near-zero `m_snow`
+  reaches the denormal regime (**L51**; bisected via `tools/onset_allnode.py` denormal-filtered + `extract_gid.py`;
+  memory `m8c-day107-divergence`). So Steps 1+2 keep the strict byte bar; the 2-yr HEADLINE is validated by a
+  **free-running F3 stability run** (`tools/run_lifecycle_2yr_freerun_f3_dist864.sbatch`, job 25927003, full production
+  config, GLOBAL `MPI_MAX` per-step diagnostics): **35040 steps COMPLETED, 0 NaN/Inf/FPE**, global peaks bounded with
+  NO secular drift (`max|eta|` 1.8–2.0 m, `max|uv|` 1.5–2.9 m/s, `Tmax` 30–32.5 °C, `Smax` ~41.04 flat), the cryosphere
+  is alive with the correct **seasonal cycle** (`a_ice`→1.0, `m_ice` 2.0→6.1→4.6 m winter-grow/summer-melt), and the
+  `1958→1959` year rollover + all 24 monthly SSS/chl read-aheads fired. This SUBSUMES M8e (the free run IS the stability
+  artifact). Known follow-up: the year-rollover crossing-test dereferences
+  a stale `t_indx_p1` — safe for 2920→2920 (1958→1959) but must reset before a leap-OUT crossing (2928→2920, e.g.
+  1960→1961) for runs past 1960. NOT committed yet (M8 commits together at M8f).
   (M3 scoped 2026-06-22 into M3a–M3f.) M3a (ice foundation + cold-start IC + FCT mass
   matrix) ✅ DONE 2026-06-22 (`max|Δ|=0`, 4 fields, CORE2 1-rank, `tools/run_ice_gate_core2.sh`). M3b (ocean2ice + EVP
   dynamics) ✅ DONE 2026-06-22 (`max|Δ|=0`, 7 fields × BOTH whichEVP=0 standard-EVP AND whichEVP=1 mEVP, CORE2 1-rank,
@@ -505,16 +579,18 @@ their halo exchanges) gated PER-RANK vs same-partition FESOM2 — not a from-scr
       `dump_shim` is the gate). **No regression:** ctest 13/13 + 1-rank fully-native 195 + iceflux 5×2 + forcing pi +
       step-65 1-rank + step-65 MR dist_2 all `max|Δ|=0`. ⚠️ multi-rank levante needs the `env.sh` KNEM flag (L35).
 
-**↳ RESUME HERE (next session): M7 = TKE vertical mixing.** M5 ✅ COMPLETE (tag `m5`). **M6a (zstar
-ALE) ✅ COMPLETE (M6a-1 PGF + M6a-2 thickness + M6a-3 forced/freshwater + M6a-4 multi-rank — all
-byte-exact, see "M6 progress"); tag `m6`.** The whole default FESOM config (zstar + KPP + GM + Redi +
-sw_pene, native ice/forcing) is byte-exact 1-rank AND multi-rank, both whichEVP. Next: **M7 = TKE** —
-write its own plan first, then port `mix_scheme='TKE'` from the **FORTRAN** oracle applying C-port
-experience (NO CVMix, NO diagnostics-array bloat); prognostic `tke` field (the one stateful mixing
-scheme → needs serialization + restart); byte-gate vs FESOM2 TKE (`work_tke_dump`/`work_linfs_tke`
-exist); decompose like KPP (isolated module → step → unforced → forced → multi-rank). Then **M8 =
-production months/years runs** (netCDF output + restart write + run-length-in-years driver + forcing
-rollover; compare to FESOM2 ~byte-identical). Plan: `docs/plans/2026-06-24-m6-zstar.md` (M7/M8 noted).
+**↳ RESUME HERE (next session): M9 = the production I/O harness** (netCDF mean/snapshot output +
+restart write/read + mesh.nc) — M8 (production long runs) is ✅ COMPLETE (tag `m8`). M8 delivered the
+clock + forcing record/day/month/year rollover + run-length-in-years driver, all `max|Δ|=0` at `dist_864`;
+the 2-year JRA55 1958-1959 headline runs free, stable & sane (validated PHYSICALLY — the day-107
+denormal-snow obstacle, **L51**, is not a port bug; `m_ice`/`a_ice` byte-clean, all snow/ice code + flags
+byte-identical). **Next = M9** (see the "M9 scope" section of `docs/plans/2026-06-25-m8-long-simulations.md`):
+port `io_meandata.F90` (the FIRST netCDF-WRITE gate — `mod_io_netcdf.F90` only READS) + `io_restart.F90`
+incl. **`tke` serialization** (the first stateful mixing field) + `clock_finish` (the `.clock` write,
+M8a-deferred) + `io_mesh_info`; gate = restart-reproducibility (`max|Δ|=0` straight-through vs split-restart)
++ field-by-field vs the F2 output. **Known M8 follow-up (only matters past 1960):** the year-rollover
+crossing-test dereferences a stale `t_indx_p1` — safe for the 2920→2920 (1958→1959) headline, but must reset
+before a leap-OUT crossing (2928→2920, e.g. 1960→1961).
 
 **DIRECTION (user 2026-06-24):** target = `which_ALE='zstar'` (canonical `config/namelist.config`; the
 `work_core` copy was customized to zlevel — my brief zlevel/paper-parity detour was wrong, corrected).

@@ -39,7 +39,7 @@ program fesom_lifecycle_native_mr
     !   FESOM3_NSTEPS       number of steps                     (default: 3)
     use mpi
     use, intrinsic :: iso_fortran_env, only: int32, real64
-    use mod_precision,      only: WP, MP
+    use mod_precision,      only: WP, MP, MPI_WP
     use mod_constants,      only: density_0
     use mod_param_phys,     only: N2smth_h, alpha, theta
     use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const, mix_scheme_nmb
@@ -60,7 +60,10 @@ program fesom_lifecycle_native_mr
                                   tke_kappaM_min, tke_kappaM_max, tke_min, tke_surf_min, &
                                   tke_mxl_choice, tke_only, tke_use_ubound_dirichlet, &
                                   tke_use_lbound_dirichlet, tke_dolangmuir
-    use mod_config,         only: use_sw_pene, which_ALE
+    use mod_config,         only: use_sw_pene, which_ALE, &
+                                  cfg_dt => dt, step_per_day, run_length, run_length_unit, &
+                                  runid, RestartInPath, include_fleapyear
+    use mod_clock,          only: clock, clock_init, clock_nsteps, yearnew, daynew, timenew, month
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
     use oce_mixing_tke,     only: tke_init
     use oce_shortwave_pene, only: cal_shortwave_rad
@@ -99,15 +102,23 @@ program fesom_lifecycle_native_mr
     type(t_ic3d_config):: ic
     integer :: n, nz, nl, nzmin, nzmax, e, tr_num, nsteps, ios, env_len, nsw, whichevp
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF
+    ! M8a: model clock (cold start from FESOM3_START_CLOCK) + run-length driver
+    integer            :: clk_d0, clk_y0, clk_unit, idx, ierr
+    real(kind=WP)      :: clk_t0, dstat(6)   ! dstat: M8c Step-3 global per-step physical diagnostics
+    character(len=512) :: start_clock, restart_in
     real(kind=MP) :: zbar_srf, zbar_bot
     real(kind=WP), allocatable :: Ki(:,:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
     logical :: use_fer_gm, use_redi   ! M4f: GM bolus / Redi isopycnal diffusion toggles
     logical :: use_kpp, do_swpene, do_nonlcl   ! M5d: KPP / shortwave pene / ghats nonlocal flux
     logical :: use_tke      ! M7d: FESOM3_MIX_TKE -> cvmix_TKE producer at multi-rank (LOCAL nNodL)
-    real(kind=WP), allocatable :: chl(:)       ! M5d: constant chlorophyll (work_core 0.1)
-    ! native CORE2 forcing read (the whole atmosphere, over owned+halo).
-    character(len=512)  :: forcing_dir, runoff_file, sss_file
+    real(kind=WP), allocatable :: chl(:)       ! M5d const 0.1 / M8c Sweeney monthly climatology
+    logical :: use_chl_sweeney                 ! M8c: FESOM3_CHL_SWEENEY -> read Sweeney chl monthly
+    ! native atmospheric forcing read (the whole atmosphere, over owned+halo).
+    character(len=512)  :: forcing_dir, runoff_file, sss_file, chl_file
+    ! M8c: forcing dataset select. CORE2 = the legacy regression substitute (noleap, NCAR fields);
+    ! JRA55 = the production target (gregorian + leap, JRA55-do fields, 3-hourly, tmid=0).
+    character(len=16)   :: forc_set, forc_calendar
     type(t_atm_forcing) :: frc
     integer             :: fld, fyear
     real(kind=WP)       :: rdate_cold
@@ -115,6 +126,11 @@ program fesom_lifecycle_native_mr
     real(kind=WP), allocatable :: ncd(:), nch(:), nce(:), nsx(:), nsy(:), nix(:), niy(:)
     real(kind=WP), allocatable :: nro(:), nss(:)
     integer, allocatable :: idlist(:)
+    ! M8c bisection: optional per-field atmosphere self-check vs the F2 atmflux dump (np=1 only).
+    character(len=512) :: atmchk_file
+    integer            :: atmchk_unit
+    logical            :: do_atm_chk
+    real(kind=WP), allocatable :: tscr(:)
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -122,9 +138,6 @@ program fesom_lifecycle_native_mr
     call get_environment_variable('FESOM3_IC_FILE', ic_file)
     if (len_trim(ic_file) == 0) &
         ic_file = '/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc'
-    nsteps = 3
-    call get_environment_variable('FESOM3_NSTEPS', env, length=env_len, status=ios)
-    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) nsteps
     whichevp = 0
     call get_environment_variable('FESOM3_WHICHEVP', whichevp_str)
     if (len_trim(whichevp_str) > 0) read(whichevp_str, *, iostat=ios) whichevp
@@ -138,6 +151,10 @@ program fesom_lifecycle_native_mr
     use_tke = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_SW_PENE', env, length=env_len, status=ios)
     do_swpene = (ios == 0 .and. env_len > 0)
+    ! M8c: FESOM3_CHL_SWEENEY -> read the Sweeney monthly chlorophyll climatology (production) instead
+    ! of the const-0.1 fallback. Only meaningful with shortwave penetration (use_sw_pene) on.
+    call get_environment_variable('FESOM3_CHL_SWEENEY', env, length=env_len, status=ios)
+    use_chl_sweeney = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_KPP_NONLCL', env, length=env_len, status=ios)
     do_nonlcl = (ios == 0 .and. env_len > 0)
     ! M6a-4: ALE vertical coordinate (default linfs). 'zstar' -> full free surface + real
@@ -397,16 +414,22 @@ program fesom_lifecycle_native_mr
             'fesom_lifecycle_native_mr: TKE vertical mixing ENABLED (cvmix_TKE)'
     end if
     !===========================================================================
-    ! M5d shortwave penetration (FESOM3_SW_PENE) — chl const 0.1; cal_shortwave_rad (partit) fills
-    ! dyn%work%sw_3d over owned+halo after oce_fluxes. sw_3d allocated by the KPP block.
+    ! M5d shortwave penetration (FESOM3_SW_PENE); cal_shortwave_rad (partit) fills dyn%work%sw_3d over
+    ! owned+halo after oce_fluxes. sw_3d allocated by the KPP block. chl is seeded to the const-0.1
+    ! fallback here; the Sweeney monthly read (M8c, needs clock_init's `month`) overwrites it below.
     if (do_swpene) then
         use_sw_pene = .true.
         allocate(chl(nNodL)); chl = 0.1_WP
         if (.not. allocated(dyn%work%sw_3d)) then
             allocate(dyn%work%sw_3d(nl, nNodL)); dyn%work%sw_3d = 0.0_WP
         end if
-        if (partit%mype == 0) write(*,'(a)') &
-            'fesom_lifecycle_native_mr: shortwave penetration ENABLED (chl_const=0.1)'
+        if (partit%mype == 0) then
+            if (use_chl_sweeney) then
+                write(*,'(a)') 'fesom_lifecycle_native_mr: shortwave penetration ENABLED, chl=Sweeney monthly'
+            else
+                write(*,'(a)') 'fesom_lifecycle_native_mr: shortwave penetration ENABLED, chl=const 0.1'
+            end if
+        end if
     end if
     !===========================================================================
     ! M5d KPP nonlocal counter-gradient flux (FESOM3_KPP_NONLCL) — DEAD in production; the gate
@@ -462,6 +485,63 @@ program fesom_lifecycle_native_mr
     atm%surf_relax_S  = 1.929e-06_WP
 
     !===========================================================================
+    ! M8a/M8b: model clock + run-length driver. Set the CORE2 timestep into mod_config so the
+    ! ported `clock` advances mod_config%dt per step (== the local dt parameter) and forcing_sbc_do
+    ! reads the same dt. FESOM3_START_CLOCK ("t d y", default "0 1 1948") positions a COLD start:
+    ! rank 0 writes a 2-identical-line .clock file, then every rank reads it through the faithful
+    ! clock_init (the M8b/c boundary gates set FESOM3_START_CLOCK to "0 31 1948" / "0 365 1948").
+    ! nsteps comes from clock_nsteps(run_length/unit) with FESOM3_NSTEPS keeping the short-gate
+    ! override. clock_init MUST precede the forcing cold-start build below: M8b seeds rdate_cold +
+    ! the SSS month from the clock's yearnew/daynew/timenew/month (prereq #6).
+    ! M8c: resolve the forcing dataset FIRST — include_fleapyear feeds check_fleapyr inside
+    ! clock_init below, and forc_calendar drives the cold-start/per-step rdate. Default CORE2 keeps
+    ! the legacy regression gates (noleap) byte-unchanged; FESOM3_FORCING=JRA55 = the production
+    ! target (gregorian + leap year cycle, the work_zstar_tke config).
+    call get_environment_variable('FESOM3_FORCING', forc_set, length=env_len, status=ios)
+    if (ios /= 0 .or. env_len == 0) forc_set = 'CORE2'
+    if (trim(forc_set) == 'JRA55') then
+        forc_calendar = 'gregorian'; include_fleapyear = .true.
+    else
+        forc_calendar = 'noleap';    include_fleapyear = .false.
+    end if
+    step_per_day    = 48
+    cfg_dt          = dt              ! 86400/48 = 1800 s; clock + forcing_sbc_do read mod_config%dt
+    run_length      = 2
+    run_length_unit = 'y'
+    call get_environment_variable('FESOM3_RUN_LENGTH', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) run_length
+    call get_environment_variable('FESOM3_RUN_UNIT', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) run_length_unit = trim(env)
+    ! RestartInPath for the .clock file: FESOM3_RESTART_IN, else dirname(FESOM_DUMP_FILE), else ./
+    call get_environment_variable('FESOM3_RESTART_IN', restart_in, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) then
+        if (restart_in(env_len:env_len) /= '/') restart_in = trim(restart_in)//'/'
+    else
+        call get_environment_variable('FESOM_DUMP_FILE', restart_in, length=env_len, status=ios)
+        idx = 0
+        if (ios == 0 .and. env_len > 0) idx = index(trim(restart_in), '/', back=.true.)
+        if (idx > 0) then; restart_in = restart_in(1:idx); else; restart_in = './'; end if
+    end if
+    RestartInPath = trim(restart_in)
+    ! cold-start clock values from FESOM3_START_CLOCK (default 0 1 <start year>); both lines equal
+    ! => cold start. JRA55 forcing starts 1958 (no 1949), CORE2 NCAR at 1948.
+    clk_t0 = 0.0_WP; clk_d0 = 1; clk_y0 = merge(1958, 1948, trim(forc_set) == 'JRA55')
+    call get_environment_variable('FESOM3_START_CLOCK', start_clock, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(start_clock, *, iostat=ios) clk_t0, clk_d0, clk_y0
+    if (partit%mype == 0) then
+        open(newunit=clk_unit, file=trim(RestartInPath)//trim(runid)//'.clock', &
+             status='replace', action='write')
+        write(clk_unit,*) clk_t0, clk_d0, clk_y0
+        write(clk_unit,*) clk_t0, clk_d0, clk_y0
+        close(clk_unit)
+    end if
+    call MPI_Barrier(partit%MPI_COMM_FESOM, ierr)
+    call clock_init(partit)
+    nsteps = clock_nsteps(partit)
+    call get_environment_variable('FESOM3_NSTEPS', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) nsteps   ! short-gate override
+
+    !===========================================================================
     ! native CORE2 forcing read setup (REQUIRED — fully native). frc%nnod = nNodL so the
     ! 8 NCAR fields read + bilinear + g2r-rotate fill the OWNED+HALO nodes (each node
     ! interpolates from the full global raw grid — partition-independent, no exchange).
@@ -471,20 +551,41 @@ program fesom_lifecycle_native_mr
             'fesom_lifecycle_native_mr: FULLY NATIVE requires FESOM3_FORCING_DIR'
         call par_ex(partit%MPI_COMM_FESOM, partit%mype); error stop 1
     end if
-    fyear = 1948
+    ! M8b (prereq #6): cold-start forcing from the clock (yearnew/daynew/timenew/month set by
+    ! clock_init above) so a non-day-1 START_CLOCK initialises forcing at the SAME point as F2.
+    fyear = yearnew
     frc%nfld = 8;  frc%nnod = nNodL
-    frc%iyear = 1948; frc%imm = 1; frc%idd = 1; frc%freq = 1; frc%tmid = 1
+    frc%imm = 1; frc%idd = 1; frc%freq = 1
     frc%ic_cyclic = .true.; frc%rotated_grid = .true.
     frc%i_xwind = 1; frc%i_ywind = 2
-    frc%f(1)%file_base = trim(forcing_dir)//'/u_10.';        frc%f(1)%varname = 'U_10_MOD'
-    frc%f(2)%file_base = trim(forcing_dir)//'/v_10.';        frc%f(2)%varname = 'V_10_MOD'
-    frc%f(3)%file_base = trim(forcing_dir)//'/q_10.';        frc%f(3)%varname = 'Q_10_MOD'
-    frc%f(4)%file_base = trim(forcing_dir)//'/ncar_rad.';    frc%f(4)%varname = 'SWDN_MOD'
-    frc%f(5)%file_base = trim(forcing_dir)//'/ncar_rad.';    frc%f(5)%varname = 'LWDN_MOD'
-    frc%f(6)%file_base = trim(forcing_dir)//'/t_10.';        frc%f(6)%varname = 'T_10_MOD'
-    frc%f(7)%file_base = trim(forcing_dir)//'/ncar_precip.'; frc%f(7)%varname = 'RAIN'
-    frc%f(8)%file_base = trim(forcing_dir)//'/ncar_precip.'; frc%f(8)%varname = 'SNOW'
-    rdate_cold = real(forcing_julday(fyear,1,1,'noleap'),WP)
+    ! field->slot order matches FESOM2 update_atm_forcing's atmdata indexing + conversions
+    ! (gen_forcing_couple.F90:681-694): 1,2=wind 3=humi 4=sw 5=lw 6=Tair(-273.15) 7=rain 8=snow(/1000).
+    if (trim(forc_set) == 'JRA55') then
+        ! JRA55-do-v1.4.0: 3-hourly, gregorian (days since 1900-01-01), start-of-interval => tmid=0
+        ! (the mid-point shift fires). var-name == file-name.
+        frc%iyear = 1900; frc%tmid = 0
+        frc%f(1)%file_base = trim(forcing_dir)//'/uas.';  frc%f(1)%varname = 'uas'
+        frc%f(2)%file_base = trim(forcing_dir)//'/vas.';  frc%f(2)%varname = 'vas'
+        frc%f(3)%file_base = trim(forcing_dir)//'/huss.'; frc%f(3)%varname = 'huss'
+        frc%f(4)%file_base = trim(forcing_dir)//'/rsds.'; frc%f(4)%varname = 'rsds'
+        frc%f(5)%file_base = trim(forcing_dir)//'/rlds.'; frc%f(5)%varname = 'rlds'
+        frc%f(6)%file_base = trim(forcing_dir)//'/tas.';  frc%f(6)%varname = 'tas'
+        frc%f(7)%file_base = trim(forcing_dir)//'/prra.'; frc%f(7)%varname = 'prra'
+        frc%f(8)%file_base = trim(forcing_dir)//'/prsn.'; frc%f(8)%varname = 'prsn'
+    else
+        ! CORE2 NCAR: 6-hourly winds/q/t (1460) + daily rad (365) + monthly precip (12), noleap, tmid=1.
+        frc%iyear = 1948; frc%tmid = 1
+        frc%f(1)%file_base = trim(forcing_dir)//'/u_10.';        frc%f(1)%varname = 'U_10_MOD'
+        frc%f(2)%file_base = trim(forcing_dir)//'/v_10.';        frc%f(2)%varname = 'V_10_MOD'
+        frc%f(3)%file_base = trim(forcing_dir)//'/q_10.';        frc%f(3)%varname = 'Q_10_MOD'
+        frc%f(4)%file_base = trim(forcing_dir)//'/ncar_rad.';    frc%f(4)%varname = 'SWDN_MOD'
+        frc%f(5)%file_base = trim(forcing_dir)//'/ncar_rad.';    frc%f(5)%varname = 'LWDN_MOD'
+        frc%f(6)%file_base = trim(forcing_dir)//'/t_10.';        frc%f(6)%varname = 'T_10_MOD'
+        frc%f(7)%file_base = trim(forcing_dir)//'/ncar_precip.'; frc%f(7)%varname = 'RAIN'
+        frc%f(8)%file_base = trim(forcing_dir)//'/ncar_precip.'; frc%f(8)%varname = 'SNOW'
+    end if
+    rdate_cold = real(forcing_julday(yearnew,1,1,forc_calendar),WP) &  ! cold-start rdate, NO half-step
+               + real(daynew-1,WP) + timenew/86400._WP                 ! (FESOM2 nc_sbc_ini:643-644)
     call forcing_alloc(frc)
     do fld = 1, frc%nfld
         call forcing_read_grid(frc, fld, fyear)
@@ -498,9 +599,10 @@ program fesom_lifecycle_native_mr
              nswr(nNodL), nlw(nNodL), npr(nNodL), nps(nNodL), &
              ncd(nNodL), nch(nNodL), nce(nNodL), &
              nsx(nNodL), nsy(nNodL), nix(nNodL), niy(nNodL))
-    ! native runoff + SSS climatology (read ONCE — both constant for a Jan run). PASS partit
-    ! so read_other_NetCDF interpolates over owned+halo (myDim+eDim; read_dist_partition sets
-    ! myDim — the L42 trap is the 1-rank case where myDim=0, here npes>1 sets it).
+    ! native runoff (CORE2 single-slice climatology, read ONCE) + SSS at the cold-start month
+    ! (M8b prereq #6: i=month, not hard-coded 1; M8c adds the in-loop monthly read-ahead). PASS
+    ! partit so read_other_NetCDF interpolates over owned+halo (myDim+eDim; read_dist_partition
+    ! sets myDim — the L42 trap is the 1-rank case where myDim=0, here npes>1 sets it).
     call get_environment_variable('FESOM3_RUNOFF_FILE', runoff_file)
     if (len_trim(runoff_file) == 0) &
         runoff_file = '/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc'
@@ -511,12 +613,24 @@ program fesom_lifecycle_native_mr
     if (partit%npes == 1) then
         ! 1-rank: omit partit (read_other_NetCDF then counts mesh%nod2D — the L42 trap fix).
         call read_other_NetCDF(trim(runoff_file), 'Foxx_o_roff', 1, nro, .false., .true., mesh)
-        call read_other_NetCDF(trim(sss_file), 'SALT', 1, nss, .true., .true., mesh)
+        call read_other_NetCDF(trim(sss_file), 'SALT', month, nss, .true., .true., mesh)
     else
         call read_other_NetCDF(trim(runoff_file), 'Foxx_o_roff', 1, nro, .false., .true., mesh, partit)
-        call read_other_NetCDF(trim(sss_file), 'SALT', 1, nss, .true., .true., mesh, partit)
+        call read_other_NetCDF(trim(sss_file), 'SALT', month, nss, .true., .true., mesh, partit)
     end if
     nro = nro / 1000.0_WP
+    ! M8c: production Sweeney monthly chlorophyll, read at the cold-start month (overwrites the
+    ! const-0.1 seed). Guard on use_sw_pene so chl is allocated; FESOM3_CHL_FILE overrides the path.
+    if (use_sw_pene .and. use_chl_sweeney) then
+        call get_environment_variable('FESOM3_CHL_FILE', chl_file)
+        if (len_trim(chl_file) == 0) &
+            chl_file = '/pool/data/AWICM/FESOM2/FORCING/Sweeney/Sweeney_2005.nc'
+        if (partit%npes == 1) then
+            call read_other_NetCDF(trim(chl_file), 'chl', month, chl, .true., .true., mesh)
+        else
+            call read_other_NetCDF(trim(chl_file), 'chl', month, chl, .true., .true., mesh, partit)
+        end if
+    end if
     if (partit%mype == 0) &
         write(*,'(a,2es12.4,a,2es12.4,a)') 'fesom_lifecycle_native_mr: native runoff[', &
             minval(nro(1:nNodO)), maxval(nro(1:nNodO)), '] Ssurf[', &
@@ -529,6 +643,19 @@ program fesom_lifecycle_native_mr
     is_nonlinfs = merge(1.0_WP, 0.0_WP, trim(which_ALE)/='linfs')
     allocate(Ki(nl-1, nNodL), real_salt_flux(nNodL), stress_surf(2, nElemF))
     Ki = 0.0_WP; real_salt_flux = 0.0_WP; stress_surf = 0.0_WP
+
+    !===========================================================================
+    ! M8c bisection: FESOM3_ATMFLUX_CHECK = an F2 atmflux dump (fesom_atmflux_dump order, np=1) =>
+    ! each step, read the F2 record and print per-field max|delta| between the NATIVE atmosphere and
+    ! the oracle's, localizing a forcing-read mismatch BEFORE it propagates into ssh_rhs. np=1 only
+    ! (the dump + the local mesh are both global-sized there).
+    do_atm_chk = .false.
+    call get_environment_variable('FESOM3_ATMFLUX_CHECK', atmchk_file, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0 .and. partit%npes == 1) then
+        open(newunit=atmchk_unit, file=trim(atmchk_file), status='old', form='unformatted', &
+             access='stream', action='read', iostat=ios)   ! fesom_atmflux_dump is STREAM
+        if (ios == 0) then; do_atm_chk = .true.; allocate(tscr(nNodL)); end if
+    end if
 
     !===========================================================================
     ! per-rank dump (mod_dump: gid-keyed probes, the rank owning a probe writes it).
@@ -544,10 +671,12 @@ program fesom_lifecycle_native_mr
     ! runloop: ocean2ice -> [native atm] -> ice_timestep -> oce_fluxes_mom -> oce_fluxes ->
     ! step_oce (the FESOM2 runloop order; update_atm_forcing replaced by apply_native_forcing).
     do n = 1, nsteps
+        call clock                                   ! M8a: advance the model clock (top of step)
         call ocean2ice(ice, dyn, tracers, mesh, partit)
         ! native atmosphere (after ocean2ice -> srfoce live; before EVP -> ice%uice/vice are
         ! the previous step's, as FESOM2 update_atm_forcing uses for the wind-on-ice stress).
         call apply_native_forcing(n)
+        if (do_atm_chk) call atm_selfcheck(n)
         call ice_timestep(ice, mesh, atm, partit)
         call oce_fluxes_mom(ice, atm, stress_surf, mesh, partit)
         call oce_fluxes(ice, tracers, atm, mesh, partit)
@@ -560,11 +689,23 @@ program fesom_lifecycle_native_mr
                       atm%heat_flux, atm%water_flux, atm%virtual_salt, atm%relax_salt, &
                       atm%real_salt_flux, is_nonlinfs, stress_surf, partit, &   ! M6a-4: native rsf (zstar)
                       stress_node_surf=atm%stress_node_surf)
+        ! M8c Step 3 (physical validation): GLOBAL per-step diagnostics. ALL ranks compute local
+        ! extrema and reduce with ONE MPI_MAX; only rank 0 prints. Stability (max|eta|,max|uv|),
+        ! cryosphere (max a_ice in [0,1], max m_ice), and warm/salty drift ceilings (global Tmax,
+        ! Smax — maxes are immune to the dry-cell 0.0 padding that floors the mins). Diagnostic-only:
+        ! reads the prognostic state after step_oce, never writes it.
+        dstat(1) = maxval(abs(dyn%eta_n(1:nNodO)))
+        dstat(2) = maxval(abs(dyn%uv(:,:,1:nElemO)))
+        dstat(3) = maxval(ice%data(1)%values(1:nNodO))            ! a_ice  (area fraction, >=0)
+        dstat(4) = maxval(ice%data(2)%values(1:nNodO))            ! m_ice  (effective thickness, >=0)
+        dstat(5) = maxval(tracers%data(1)%values(:,1:nNodO))      ! T max  (tropical SST ceiling)
+        dstat(6) = maxval(tracers%data(2)%values(:,1:nNodO))      ! S max  (evaporative-basin salinity)
+        call MPI_Allreduce(MPI_IN_PLACE, dstat, 6, MPI_WP, MPI_MAX, partit%MPI_COMM_FESOM, ierr)
         if (partit%mype == 0) &
-            write(*,'(a,i0,a,es12.4,a,es12.4,a,es12.4)') 'fesom_lifecycle_native_mr: step ', n, &
-                '  max|eta_n(owned)|=', maxval(abs(dyn%eta_n(1:nNodO))), &
-                '  max|uv(owned)|=', maxval(abs(dyn%uv(:,:,1:nElemO))), &
-                '  max|a_ice(owned)|=', maxval(abs(ice%data(1)%values(1:nNodO)))
+            write(*,'(a,i0,6(a,es12.4))') 'fesom_lifecycle_native_mr: step ', n, &
+                '  max|eta|=', dstat(1), '  max|uv|=', dstat(2), &
+                '  a_ice=', dstat(3), '  m_ice=', dstat(4), &
+                '  Tmax=', dstat(5), '  Smax=', dstat(6)
     end do
 
     call dump_finalize()
@@ -579,11 +720,16 @@ contains
     ! + the wind-on-ice stress (previous-step uice/vice). runoff (nro) + Ssurf (nss) were read
     ! once at setup. Every routine threads partit -> the OWNED+HALO nodes are filled.
     subroutine compute_native_forcing(n)
-        integer, intent(in) :: n
-        real(kind=WP) :: tnew, rcur
-        tnew = real(n,WP)*dt                          ! daynew=1 for n<48 (within forcing day 1)
-        rcur = real(forcing_julday(fyear,1,1,'noleap'),WP) + real(1-1,WP) &
-             + tnew/86400._WP - dt/86400._WP/2._WP
+        integer, intent(in) :: n                       ! step index -> per-step forcing rdate (rcur)
+        real(kind=WP) :: rcur
+        ! M8b: refresh interp coefficients on record/day crossings (forcing_sbc_do reads the model
+        ! clock yearnew/daynew/timenew), THEN evaluate atmdata at the per-step rdate. rcur MUST equal
+        ! forcing_sbc_do's per-field rdate (same formula, same clock; forc_calendar matches the file
+        ! calendar — CORE2 'noleap'=>365*yyyy, JRA55 'gregorian') — FESOM2 sbc_do uses one rdate for
+        ! both the crossing test and the interp.
+        call forcing_sbc_do(frc, mesh, partit)
+        rcur = real(forcing_julday(yearnew,1,1,forc_calendar),WP) + real(daynew-1,WP) &
+             + timenew/86400._WP - dt/86400._WP/2._WP
         call forcing_timeinterp(frc, rcur, partit)
         nuw = frc%atmdata(1,1:nNodL);  nvw = frc%atmdata(2,1:nNodL);  nsh = frc%atmdata(3,1:nNodL)
         nswr = frc%atmdata(4,1:nNodL);  nlw = frc%atmdata(5,1:nNodL)
@@ -597,10 +743,45 @@ contains
         call forcing_ice_stress(0.0012_WP, nuw, nvw, ice%uice, ice%vice, nix, niy, mesh, partit)
     end subroutine compute_native_forcing
 
+    ! M8c monthly climatology read-ahead (FESOM2 sbc_do:1590-1618). At the last instant of a month
+    ! (timenew==86400 on the month's final day) and at step 1, re-read the SSS restoring and (when the
+    ! production Sweeney path is on) the chl for the NEXT month. update_monthly_flag + the i=month /
+    ! (mstep>1 -> +1) / wrap-at-12 index logic is byte-faithful to the oracle; the read_other_NetCDF
+    ! call is the same one the cold start used, so the slice bytes match. Called after the atmosphere
+    ! (compute_native_forcing) so the per-step order mirrors sbc_do (atmosphere -> SSS -> chl).
+    subroutine roll_monthly_clim(n)
+        use mod_clock, only: month, day_in_month, num_day_in_month, fleapyear, timenew
+        integer, intent(in) :: n
+        logical :: update_monthly
+        integer :: i
+        update_monthly = ( (day_in_month == num_day_in_month(fleapyear, month) .and. &
+                            timenew == 86400._WP) .or. n == 1 )
+        if (.not. update_monthly) return
+        ! SSS restoring (sss_data_source='CORE2'; always active in this native lifecycle)
+        i = month; if (n > 1) i = i + 1; if (i > 12) i = 1
+        if (partit%npes == 1) then
+            call read_other_NetCDF(trim(sss_file), 'SALT', i, nss, .true., .true., mesh)
+        else
+            call read_other_NetCDF(trim(sss_file), 'SALT', i, nss, .true., .true., mesh, partit)
+        end if
+        ! Sweeney chl (production; same month index)
+        if (use_sw_pene .and. use_chl_sweeney) then
+            i = month; if (n > 1) i = i + 1; if (i > 12) i = 1
+            if (partit%npes == 1) then
+                call read_other_NetCDF(trim(chl_file), 'chl', i, chl, .true., .true., mesh)
+            else
+                call read_other_NetCDF(trim(chl_file), 'chl', i, chl, .true., .true., mesh, partit)
+            end if
+        end if
+        if (partit%mype == 0) write(*,'(a,i0,a,i0)') &
+            ' roll_monthly_clim: month update -> SSS/chl slice ', i, ' at step ', n
+    end subroutine roll_monthly_clim
+
     ! compute natively + WRITE into atm%* / ice%stress_atmice for the step.
     subroutine apply_native_forcing(n)
         integer, intent(in) :: n
         call compute_native_forcing(n)
+        call roll_monthly_clim(n)          ! M8c: SSS + Sweeney chl monthly read-ahead
         atm%shortwave       = nswr
         atm%longwave        = nlw
         atm%Tair            = nta
@@ -618,6 +799,39 @@ contains
         atm%runoff          = nro
         atm%Ssurf           = nss
     end subroutine apply_native_forcing
+
+    ! M8c bisection: read one F2 atmflux record (fesom_atmflux_dump order) into tscr field-by-field
+    ! and print max|delta| of each NATIVE atmosphere/bulk field vs the oracle's, over owned nodes.
+    subroutine atm_selfcheck(n)
+        integer, intent(in) :: n
+        integer :: is, inn, ine, no
+        real(kind=WP) :: d_uw, d_vw, d_ta, d_sh, d_sw, d_lw, d_pr, d_ps
+        real(kind=WP) :: d_ch, d_ce, d_sx, d_sy, d_ix, d_iy
+        read(atmchk_unit) is, inn, ine            ! inn = oracle myDim_nod2D (record array size)
+        no = min(inn, nNodO)                      ! compare over owned nodes (np=1 => global order)
+        read(atmchk_unit) tscr(1:inn); d_sw = maxval(abs(nswr(1:no) - tscr(1:no)))   ! shortwave
+        read(atmchk_unit) tscr(1:inn); d_lw = maxval(abs(nlw (1:no) - tscr(1:no)))   ! longwave
+        read(atmchk_unit) tscr(1:inn); d_ta = maxval(abs(nta (1:no) - tscr(1:no)))   ! Tair [degC]
+        read(atmchk_unit) tscr(1:inn); d_sh = maxval(abs(nsh (1:no) - tscr(1:no)))   ! shum
+        read(atmchk_unit) tscr(1:inn); d_pr = maxval(abs(npr (1:no) - tscr(1:no)))   ! prec_rain [m/s]
+        read(atmchk_unit) tscr(1:inn); d_ps = maxval(abs(nps (1:no) - tscr(1:no)))   ! prec_snow [m/s]
+        read(atmchk_unit) tscr(1:inn)                                                ! runoff (read once)
+        read(atmchk_unit) tscr(1:inn); d_uw = maxval(abs(nuw (1:no) - tscr(1:no)))   ! u_wind
+        read(atmchk_unit) tscr(1:inn); d_vw = maxval(abs(nvw (1:no) - tscr(1:no)))   ! v_wind
+        read(atmchk_unit) tscr(1:inn); d_ch = maxval(abs(nch (1:no) - tscr(1:no)))   ! Ch_atm_oce
+        read(atmchk_unit) tscr(1:inn); d_ce = maxval(abs(nce (1:no) - tscr(1:no)))   ! Ce_atm_oce
+        read(atmchk_unit) tscr(1:inn); d_sx = maxval(abs(nsx (1:no) - tscr(1:no)))   ! stress_atmoce_x
+        read(atmchk_unit) tscr(1:inn); d_sy = maxval(abs(nsy (1:no) - tscr(1:no)))   ! stress_atmoce_y
+        read(atmchk_unit) tscr(1:inn); d_ix = maxval(abs(nix (1:no) - tscr(1:no)))   ! stress_atmice_x
+        read(atmchk_unit) tscr(1:inn); d_iy = maxval(abs(niy (1:no) - tscr(1:no)))   ! stress_atmice_y
+        read(atmchk_unit) tscr(1:inn)                                                ! Ssurf
+        if (partit%mype == 0) then
+            write(*,'(a,i0,a,8es10.2)') 'ATMCHK step ', n, &
+                ' |d| uw,vw,ta,sh,sw,lw,pr,ps=', d_uw, d_vw, d_ta, d_sh, d_sw, d_lw, d_pr, d_ps
+            write(*,'(a,6es10.2)') '            |d| ch,ce,sx,sy,ix,iy=', &
+                d_ch, d_ce, d_sx, d_sy, d_ix, d_iy
+        end if
+    end subroutine atm_selfcheck
 
     subroutine alloc_atm(a, nn)
         type(t_atmflux), intent(inout) :: a

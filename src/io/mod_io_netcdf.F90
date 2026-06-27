@@ -119,13 +119,21 @@ contains
     ! read_other_NetCDF (gen_modules_read_NetCDF.F90:105) nf90_get_att into a real64 miss;
     ! an on-disk float attribute (1.e30f / -99.f) converts float -> real64 exactly, so the
     ! ==miss equality against the (also float->real64) data values matches the oracle.
-    real(real64) function nc_get_att_dp(ncid, varnames, attname) result(val)
+    real(real64) function nc_get_att_dp(ncid, varnames, attname, stat) result(val)
         integer, intent(in) :: ncid
         character(len=*), intent(in) :: varnames(:)
         character(len=*), intent(in) :: attname
-        integer :: vid
+        integer, intent(out), optional :: stat   ! present => return status, don't error-stop
+        integer :: vid, st
+        val = 0.0_real64
         vid = nc_varid(ncid, varnames)
-        call nc_check(nf90_get_att(ncid, vid, trim(attname), val), 'get_att_dp '//trim(attname))
+        st  = nf90_get_att(ncid, vid, trim(attname), val)
+        if (present(stat)) then
+            ! caller tolerates an absent attribute (e.g. the Sweeney chl file has no missing_value)
+            stat = st
+        else
+            call nc_check(st, 'get_att_dp '//trim(attname))
+        end if
     end function nc_get_att_dp
 
     ! Read a full real(8) (lon,lat,depth) cube from a 3-D variable into buf, whose
@@ -152,12 +160,20 @@ contains
         character(len=*), intent(in) :: varnames(:)
         character(len=*), intent(in) :: attname
         character(len=64) :: txt
-        integer :: vid, st, alen
+        integer :: vid, st, alen, k
         txt = ''
         vid = nc_varid(ncid, varnames)
         st = nf90_inquire_attribute(ncid, vid, trim(attname), len=alen)
         if (st /= nf90_noerr) return
         st = nf90_get_att(ncid, vid, trim(attname), txt)
+        if (st /= nf90_noerr) then; txt = ''; return; end if
+        ! netCDF C-string attributes can carry a trailing NUL (and other control bytes); blank
+        ! them so trim()/string compares work. This was the JRA55 trap: calendar='gregorian'+char(0)
+        ! made forcing_julday's `trim(calendar)=='gregorian'` test fail -> noleap branch (CORE2's
+        ! 'NOLEAP' was immune since it falls to the same else branch regardless).
+        do k = 1, len(txt)
+            if (iachar(txt(k:k)) < 32) txt(k:k) = ' '
+        end do
     end function nc_get_att_text
 
 end module mod_io_netcdf

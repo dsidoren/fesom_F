@@ -2059,3 +2059,152 @@ Two reusable points:
   kernel that reads it — mirror the oracle's flag lifecycle exactly, don't leave it set; (ii) if a "green" gate suddenly
   segfaults with NO source change, suspect an uninitialised/unallocated read whose luck ran out on a heap re-layout —
   reach for the DEBUG `-check all` build first (it converts the silent UB into a named, located error).
+
+## L48 — The FIRST SLURM-batch gate (M8b `dist_864`) exposed TWO latent `set -e` footguns in the shared harness — both invisible to the login-node mpirun gates, both about a non-fatal command made fatal by `set -euo pipefail`
+
+**M8b's port (`forcing_sbc_do`) was byte-exact at `dist_2`/`dist_8` on the FIRST clean run — but two HARNESS bugs,
+dormant since fesom3 had only ever gated on the login node with `mpirun`, surfaced the moment the run got LONGER
+(48 steps) and moved to a SLURM compute node (`srun`).** Both were `set -e` + a command that returns non-zero in a
+context the login gates never hit. The byte-gate diff (`max|Δ|=0`) was never in question; the harness just aborted
+before the comparison ran (oracle "completes" but F3 never launches → no `run_f3.log`).
+
+- **`grep … | head` SIGPIPE (long runs).** The oracle runner's LAST line was a diagnostic
+  `grep -E '…' run.log | head` (`run_lifecycle_forced_core2.sh`). With `set -o pipefail`, once the run is long
+  enough that `grep` produces enough matching lines (~50 at 48 steps; ~19 at 16 steps did NOT trip it) that `head`
+  closes the pipe after 10 BEFORE `grep` finishes writing, `grep` dies with SIGPIPE → exit 141 → pipefail makes the
+  pipeline 141 → `set -e` aborts the oracle runner → the gate's `bash oracle | tail -4` propagates 141 → the gate
+  aborts after `[1/3]`, before `[2/3]`. The legacy gates ran 3-5 steps (<10 matches) so it NEVER fired. **Symptom:
+  `GATE_EXIT=141`.** FIX: `… | head || true` (a diagnostic's exit must never gate the run).
+- **`ulimit -s unlimited` RAISE on a hard-capped compute node.** `env/levante.dkrz.de/shell.intel` (sourced by
+  `env.sh`) did a bare `ulimit -s unlimited`. On the LOGIN node the hard stack limit is unlimited so this succeeds;
+  on a SLURM COMPUTE node the default is `soft=8192 hard=unlimited`, BUT my batch script first ran `ulimit -s 204800`
+  which sets BOTH soft AND hard to 204800 — after which `ulimit -s unlimited` tries to RAISE the hard limit and gets
+  "Operation not permitted" (rc=1). Under the oracle's `set -e`, `source env.sh` (which sources shell.intel) returns
+  non-zero → the oracle aborts at `source env.sh`, BEFORE `mkdir` → **missing run dir, ~1 s, no output at all.** The
+  debugging trap: env.sh sources shell.intel with `>/dev/null 2>&1`, so the failing line is invisible; and a DIRECT
+  oracle run (no pre-`ulimit -s 204800`) WORKED, masking it. FIXES (both applied): (a) `shell.intel`/`shell.gnu`
+  `ulimit -s unlimited 2>/dev/null || true` (best-effort — the env must survive a caller's `set -e` when the hard
+  limit is already capped); (b) do NOT pre-cap the hard limit in the batch script — let the gate runners set the
+  204800 dump-writer stack per leg AFTER sourcing env.sh (lowering soft+hard is always allowed; raising is not).
+- **META (reusable for M8c/d/e and any future batch gate):** a Fortran↔Fortran byte-port is "done" when the DIFF is
+  zero, but a gate is a SHELL PIPELINE wrapped in `set -euo pipefail`, and every `cmd | head`, `[ ] && cmd`, bare
+  `ulimit`/`module`/`hostname -f` in it (or in `env.sh`) is a latent non-zero that a longer run or a different node
+  can make fatal. When a batch gate dies in seconds with no diff output, the bug is almost always the HARNESS, not
+  the port — re-run the failing leg with `bash -x` (un-redirected) on the actual compute node to find the aborting
+  line, and prefer `|| true` on every non-essential diagnostic. The batch harness itself
+  (`run_lifecycle_long_gate_dist864.sbatch` + the `srun`/`SLURM_JOB_ID`-gated branches in the runners) is NEW
+  infrastructure for M8 — reuse it, it now works at 864 ranks.
+
+## L49 — The FIRST JRA55-do byte-gate (M8c Step 1): a netCDF calendar attribute's trailing NUL made `trim(cal)=='gregorian'` silently FALSE — and the CORE2 substitute had hidden the trap for the whole M2.10→M8b port
+
+**Every fesom3 forcing gate from M2.10 to M8b used the CORE2 NCAR substitute (`noleap`); the FIRST gate on the REAL
+production atmosphere — JRA55-do-v1.4.0 (`gregorian` + `include_fleapyear=.true.`, 3-hourly, `tmid=0`) — diverged hard
+(`ssh_rhs` ~1.0e4 at step 1).** The port logic was correct; the bug was a single trailing NUL byte on a string read
+from netCDF.
+
+- **Bisection (reusable recipe).** A per-field `atm_selfcheck` (reads the F2 `atmflux` STREAM dump, prints `max|Δ|`
+  of each native atmosphere/bulk field over owned nodes) localized the divergence to the atmosphere READ, not the
+  ice/flux coupling. Then: range diagnostics → argmax node → raw on-disk slice → time-axis scale → calendar
+  attribute. The slice index was wrong: `rdate` on the gregorian Julian-Day scale (~2436205) vs `nc_time` built on
+  the NOLEAP scale (~714684) ⇒ `binarysearch` capped to the wrong record ⇒ garbage wind/heat.
+- **Root cause — the NUL byte.** `nc_get_att_text` returned `calendar = 'gregorian'//char(0)` (len 10): netCDF
+  C-string attributes carry a trailing NUL. Fortran `trim()` strips trailing SPACES, NOT NUL — so `forcing_julday`'s
+  `trim(calendar)=='gregorian'` was `.false.` ⇒ the routine fell to the `else` (noleap) branch ⇒ `julday=365*yyyy`
+  instead of the gregorian Numerical-Recipes formula ⇒ wrong `nc_time` ⇒ wrong slice ⇒ `ssh_rhs` blew up.
+- **Why it hid for 8 milestones.** CORE2's calendar string is `'NOLEAP'`, which `lc()`-lowercases to `'noleap'` and
+  takes the SAME `else` branch *whether or not* the NUL is stripped — so the substitute dataset NEVER exercised the
+  `=='gregorian'` comparison. The bug was invisible until the real JRA55 data finally drove the other branch. (The
+  concrete cost of the "we never used CORE2" reality the user flagged: a substitute that drives a DIFFERENT branch of
+  a shared routine masks any bug on the branch it skips.)
+- **FIX (one place, byte-NEUTRAL for CORE2).** In `nc_get_att_text`, after the get, blank every control byte:
+  `do k=1,len(txt); if (iachar(txt(k:k)) < 32) txt(k:k)=' '; end do`. The CORE2 no-regression gate (48 steps,
+  `dist_2`, 3120 records) stayed `max|Δ|=0`; JRA55 then byte-matched `dist_2` (both whichEVP) + `dist_8`, all
+  `max|Δ|=0`.
+- **META.** Any string read from a C library (netCDF attribute, `units`, a variable `name`) can carry a trailing
+  `char(0)` that `trim()` will not remove, so every `trim(x)=='literal'` is a latent silent-false. When a string
+  compare "should" match but doesn't, dump `len_trim(x)` and the `iachar` of each byte before trusting it. And widen
+  the lens: when a port is gated only with a SUBSTITUTE input, the gate proves only the branches that input drives —
+  the first run on the real production data is itself a milestone, not a formality.
+
+## L50 — Multi-year forcing rollover (M8c Step 2): year-file + month-climatology read-ahead byte-match across the SAME read routines as the cold start; cross every boundary CHEAPLY by starting at 23:00 of the last day, and an attribute-less file needs a no-fill sentinel
+
+**With M8b's record/day crossing already byte-exact, M8c Step 2 closed the remaining JRA55 production rollovers — the
+atmosphere YEAR-file (1958→1959), the SSS monthly climatology, and the Sweeney chlorophyll monthly climatology — all
+`max|Δ|=0` at `dist_2` (Jan→Feb month gate, Dec31→Jan1 year gate, and a chl-Sweeney month gate).** The port is small
+because every rollover re-drives a read routine the cold start already proved; the work is the TRIGGER and re-entrancy.
+
+- **Year-file branch (`forcing_sbc_do`).** Port `gen_surface_forcing.F90:1510-1519` verbatim: `if (yearnew/=yearold)`
+  ⇒ for each field `call forcing_read_grid(frc, fld, yearnew)` (re-opens `<var>.<yearnew>.nc`, re-anchors `nc_time`
+  to the new year) + `force_newcoeff=.true.`, then OR `force_newcoeff` into the per-field crossing test so
+  `getcoeffld` re-fires that step. `yearnew`/`yearold` come straight from `mod_clock` (the clock sets `yearold=yearnew`
+  at the top of `clock`, then bumps `yearnew` on the day-365→1 wrap) — no separate state to track. The bilinear source
+  indices (`forcing_build_bilin`) are NOT rebuilt: the grid is identical year-to-year (FESOM2 re-reads grid via
+  `nc_readTimeGrid` but never re-runs `nc_sbc_ini`). `getcoeffld`'s fresh `binarysearch(rdate)` resets the stale
+  prev-year `t_indx` to the new year's early-January bracket.
+- **`forcing_read_grid` re-entrancy (prereq).** The cold-start grid read had a bare `allocate(nc_lon/nc_lat/nc_time)`;
+  a second call aborts (ifort: already allocated). Guard each with `if (allocated) deallocate` first. NOTE `ntime`
+  CAN change across a leap boundary (2920 non-leap vs 2928 leap) so the arrays must be freed, not reused — 1958→1959
+  is 2920→2920 (no leap), but the headline must not assume constant `ntime`.
+- **Monthly read-ahead (`roll_monthly_clim`, driver).** Port `gen_surface_forcing.F90:1590-1618`:
+  `update_monthly_flag = (day_in_month==num_day_in_month(fleapyear,month) .and. timenew==86400._WP) .or. mstep==1`;
+  on a hit read the NEXT month `i=month; if(mstep>1) i=i+1; if(i>12) i=1` via the SAME `read_other_NetCDF('SALT'/'chl',
+  i)` the cold start used (so the slice bytes match). The trigger is the LAST instant of the month (read-ahead, NOT the
+  month-change step) — `timenew==86400._WP` is EXACT because `dt=1800` divides 86400 and any clock-file start time is a
+  multiple of `dt`. Keyed off the driver step counter `n` as `mstep`. The cold-start SSS/chl read at `i=month` stays
+  (feeds the diagnostic + is byte-identical to the redundant `mstep==1` re-read).
+- **Attribute-less file needs a no-fill sentinel (chl).** `Sweeney_2005.nc`'s `chl` variable has NO `missing_value`
+  attribute; FESOM2's `read_other_NetCDF` captures `status` and IGNORES it, leaving `miss` undefined — harmless there
+  only because the chl field is fully extrapolated to `[.001,.6]` with no `-99`/sentinels, so the fill loop never
+  fires. FESOM3's `nc_get_att_dp` error-STOPS on an absent attribute, so add an optional `stat` and set `miss=-99`
+  when absent: the hardcoded `==-99` check stays the only trigger ⇒ no fill ⇒ byte-identical to FESOM2's effective
+  no-fill (the chl gate confirmed `max|Δ|=0`). (PHC2 SSS HAS `missing_value=-99` ⇒ `stat==0`, `miss=-99` anyway —
+  the change is a no-op for the path that was already gated.)
+- **Cheap boundary-crossing gates.** To cross a month/year boundary in 2 steps instead of a full day, start at 23:00
+  of the last day: `START_CLOCK="82800 31 1958"` crosses Jan→Feb at step 3 with the SSS read-ahead firing at step 2;
+  `START_CLOCK="82800 365 1958"` crosses 1958→1959 (the year-file rollover fires at step 3, the Dec→Jan SSS read-ahead
+  at step 2). Each gate is non-vacuous (the `YEAR ROLLOVER`/`roll_monthly_clim` stdout markers prove the path fired)
+  AND `max|Δ|=0` — a passing gate that never crossed the boundary is the failure mode to guard against.
+- **META.** A multi-year run adds NO new physics — only triggers and re-entrancy around already-proven reads. Gate
+  each new trigger at the EARLIEST step it fires by SEEDING the clock next to the boundary (don't run a real year),
+  and print a stdout marker per fired path so a green gate can't secretly be a no-op. The production config is whatever
+  the REAL work-dir namelist says (`work_core`: SSS `'CORE2'` monthly, chl `'Sweeney'` monthly) — NOT what an earlier
+  plan assumed (the M8 scope doc still said chl `'None'`/constant from the CORE2-substitute era; the work-dir
+  namelist, not the doc, is ground truth).
+
+## L51 — The 2-year headline (M8c Step 3) is NOT bit-identical, and the cause is EMERGENT denormal `m_snow` flipping an ice-albedo branch — not a port bug
+
+The full-production 2-yr gate (JRA55-do 1958, zstar+TKE+GM+Redi+sw_pene, dist_864) diverges first at
+**step 5095 (day ~107), SSH_RHS, at all 126858 nodes at once** — the fingerprint of a GLOBAL scalar
+(the freshwater `net` from `integrate_nod_2D`) spilling into `water_flux` everywhere. Bisected to the
+origin with a windowed all-owned-node `FESOM_DUMP_ALL` (`tools/onset_allnode.py`) + per-gid extract
+(`tools/extract_gid.py`).
+
+- **The branch.** At node gid 119505, `m_snow` = **0.0 exactly in FESOM2** but a **denormal 1.34e-309 in
+  FESOM3** (a snow thickness of ~1e-309 m = physically zero). The ice `budget` picks albedo via
+  `if (hsn.gt.0.0_WP)` (snow ~0.85 vs ice ~0.65); the denormal `hsn>0` flips F3 to the snow branch →
+  absorbed-SW shift → `t_skin` diverges **2.6%** (−0.4350 vs −0.4614) → evap/sublimation/`thdgr` →
+  freshwater `flux` → global `net` → `water_flux` at every node → SSH spill, amplifying over the run.
+- **It is NOT a transcription bug.** Every snow/ice routine is byte-identical F3↔F2: FCT antidiffusive
+  flux (`-sum(icoef(:,q)*(gamma*m_snow+dm_snow))*...`), the low-order solve, `cut_off`, `obudget`,
+  `budget`, the thermo snow-update (`hsn=hsn-hsntmp`; `sn=max(hsn+min(qhst,0)*..,0)`), `flooding`, and
+  `ice_TG_rhs` `entries` — **and the compiler flags are identical** (`-fp-model precise -no-prec-div
+  -fimf-use-svml -init=zero -no-prec-sqrt -ip …`). Decisively: **`m_ice`/`a_ice` stay `|Δ|=0` through
+  step 5094** — same EVP/FCT/thermo machinery, normal magnitude, perfectly clean. ONLY the near-zero
+  `m_snow` exercises the denormal regime, where accumulated denormal residuals (FESOM2 itself produces
+  them, e.g. 2.75e-308 at node 42847) ride FCT advection until one lands on a branch-flip node.
+- **A denormal red herring to filter.** The first *byte* divergence in the window was `m_snow`=2.75e-308
+  vs 3.66e-308 at node 42847 — pure underflow noise (absorbed by any normal-magnitude sum, e.g.
+  `thick + 3e-308 ≈ thick`). `onset_allnode` needs a denormal floor (`max(|a|,|b|) < 1e-100 ⇒ ignore`)
+  or it reports the wrong origin. The damage is NOT the denormal arithmetic — it's the discrete `>0`
+  branch downstream.
+- **Decision (user).** A tolerance does not help (the divergence amplifies), and the only byte-exact fix
+  is a shared physical denormal-guard that modifies the vanilla FESOM2 reference. So Step 3 is validated
+  **physically, not bit-exactly**: strict `max|Δ|=0` stays the bar for the shorter gates (Steps 1–2,
+  already green); the 2-yr headline is judged by a free-running FESOM3 stability run
+  (`tools/run_lifecycle_2yr_freerun_f3_dist864.sbatch`): completes 35040 steps, no NaN/Inf, peak
+  |eta|/|uv|/|a_ice| bounded, rollover stack fires.
+- **META.** Byte-identical source + flags does NOT guarantee bit-identity once a field reaches the
+  DENORMAL range — there, accumulated history + any discrete `if (x>0)` test turns physically-zero noise
+  into a real, amplifying divergence. When a long gate diverges where short gates passed, suspect a
+  near-zero field crossing a branch, and dump the *integrand/inputs upstream of the global reduction*
+  (not just the probes) — all 5 probes lighting up at once = a global scalar, never a probe-local bug.

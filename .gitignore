@@ -25,3 +25,6 @@ __pycache__/
 *.swp
 *~
 .DS_Store
+
+# M8a runtime clock-state files (written by the clock machinery / gates)
+*.clock

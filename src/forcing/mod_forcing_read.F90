@@ -45,7 +45,7 @@ module mod_forcing_read
     private
     public :: t_atm_forcing, forcing_alloc, forcing_read_grid, forcing_build_bilin, &
               forcing_getcoeffld, forcing_rotate_wind, forcing_timeinterp, &
-              forcing_julday, forcing_binarysearch
+              forcing_julday, forcing_binarysearch, forcing_sbc_do
 
     integer, parameter, public :: FRC_MAXFLD = 16
 
@@ -57,6 +57,9 @@ module mod_forcing_read
         integer            :: year_orig = 0
         real(WP), allocatable :: nc_lon(:), nc_lat(:), nc_time(:)
         integer            :: flip_lat = 0
+        ! M8b: persisted time bracket from the previous forcing_getcoeffld (FESOM2 flfi_type
+        ! t_indx/t_indx_p1). forcing_sbc_do's crossing test reads them; nc_Ntime == ntime.
+        integer            :: t_indx = 1, t_indx_p1 = 1
     end type t_ffile
 
     type :: t_atm_forcing
@@ -183,6 +186,12 @@ contains
         frc%f(fld)%nlat  = nc_dimlen(ncid, ['LAT ','lat '])
         frc%f(fld)%ntime = nc_dimlen(ncid, ['TIME','time'])
         frc%f(fld)%nlon  = nlon0 + 2                            ! +2 periodic-lon halo (353)
+        ! M8c year-file rollover (forcing_sbc_do) re-reads the grid for the NEXT year, so the axis
+        ! arrays may already be allocated (and ntime can differ across a leap boundary: 2920 vs 2928);
+        ! free them first. Cold start: not allocated => the guards are no-ops.
+        if (allocated(frc%f(fld)%nc_lon))  deallocate(frc%f(fld)%nc_lon)
+        if (allocated(frc%f(fld)%nc_lat))  deallocate(frc%f(fld)%nc_lat)
+        if (allocated(frc%f(fld)%nc_time)) deallocate(frc%f(fld)%nc_time)
         allocate(frc%f(fld)%nc_lon(frc%f(fld)%nlon), frc%f(fld)%nc_lat(frc%f(fld)%nlat), &
                  frc%f(fld)%nc_time(frc%f(fld)%ntime))
         ! lat (no halo)
@@ -290,6 +299,10 @@ contains
         else                                 ! t_indx < 1: no extrapolation back in time
             t_indx = 1; t_indx_p1 = t_indx; delta_t = 1.0_WP
         end if
+        ! M8b: persist the resolved bracket so forcing_sbc_do's crossing test can read it next
+        ! step (FESOM2 getcoeffld stores via the sbc_flfi%t_indx/%t_indx_p1 pointers).
+        frc%f(fld)%t_indx    = t_indx
+        frc%f(fld)%t_indx_p1 = t_indx_p1
 
         ! read the two slices into the halo'd buffers (interior 2:nlon-1; halo mirror)
         allocate(raw(nlon-2, nlat), sbc1(nlon, nlat), sbc2(nlon, nlat))
@@ -367,6 +380,61 @@ contains
             end do
         end do
     end subroutine forcing_timeinterp
+
+    ! ---- per-step record/day forcing rollover (FESOM2 sbc_do, body 1524-1576) ------
+    ! Called every step from the driver (mirror FESOM2 update_atm_forcing -> sbc_do). Recompute
+    ! the running model rdate (with the -dt/2 half-step shift) from the clock and, where it has
+    ! crossed PAST the current bracket end (t_indx_p1) AND we are not already at the last record,
+    ! re-read the two bracketing slices via forcing_getcoeffld (which re-stores the bracket). On a
+    ! wind-coefficient refresh, rotate the wind interpolation coefficients g2r (as nc_sbc_ini's
+    ! cold start did). M8c adds the year-file branch (sbc_do:1510-1519); the noleap/leap special-case
+    ! (:1533-1554) stays OMITTED — it is gated on include_fleapyear==.false. and is dead for the
+    ! production JRA55 config (include_fleapyear=.true., model + forcing share the gregorian calendar).
+    ! data_timeinterp (atmdata = rdate*coef_a + coef_b) stays the caller's separate per-step step.
+    subroutine forcing_sbc_do(frc, mesh, partit)
+        use mod_clock,  only: yearnew, yearold, daynew, timenew
+        use mod_config, only: dt
+        type(t_atm_forcing), intent(inout)    :: frc
+        type(t_mesh),   intent(in),    target :: mesh
+        type(t_partit), intent(in),    target :: partit
+        integer  :: fld
+        real(WP) :: rdate
+        logical  :: do_rotation_wind, force_newcoeff
+        ! M8c year-file rollover (sbc_do:1510-1519): on a year change re-read EVERY field's grid +
+        ! time axis from the next year's file (forcing_read_grid re-anchors nc_time to yearnew, see its
+        ! re-entrancy guards) and force an immediate coeff refresh. The per-node bilinear source
+        ! indices (forcing_build_bilin) are NOT rebuilt — the grid is identical year-to-year, exactly
+        ! as FESOM2 (nc_readTimeGrid only). yearnew/yearold come straight from the model clock.
+        force_newcoeff = .false.
+        if (yearnew /= yearold) then
+            do fld = 1, frc%nfld
+                call forcing_read_grid(frc, fld, yearnew)
+            end do
+            force_newcoeff = .true.
+            if (partit%mype == 0) write(*,'(a,i0,a,i0)') &
+                ' forcing_sbc_do: YEAR ROLLOVER ', yearold, ' -> ', yearnew
+        end if
+        do_rotation_wind = .false.
+        do fld = 1, frc%nfld
+            ! running model rdate on the field's calendar (sbc_do:1527-1528)
+            rdate = real(forcing_julday(yearnew, 1, 1, frc%f(fld)%calendar), WP) &
+                  + real(daynew - 1, WP) + timenew/86400._WP - dt/86400._WP/2._WP
+            ! crossing test (sbc_do:1561): rdate past the bracket end AND not at the last record, OR a
+            ! year rollover just forced a refresh (force_newcoeff). getcoeffld re-binarysearches rdate
+            ! so the stale (prev-year) t_indx is reset to the new year's early-January bracket.
+            if ( ( (rdate > frc%f(fld)%nc_time(frc%f(fld)%t_indx_p1)) .and. &
+                   (frc%f(fld)%nc_time(frc%f(fld)%t_indx) < frc%f(fld)%nc_time(frc%f(fld)%ntime)) ) &
+                 .or. force_newcoeff ) then
+                call forcing_getcoeffld(frc, fld, yearnew, rdate, mesh, partit)
+                ! M8b diagnostic (stdout only — never touches the dump): confirm the rollover fired.
+                if (partit%mype == 0) write(*,'(a,i0,a,i0,a,i0,a,es18.10)') &
+                    ' forcing_sbc_do: REFRESH fld=', fld, ' new bracket t_indx=', &
+                    frc%f(fld)%t_indx, '/', frc%f(fld)%t_indx_p1, ' rdate=', rdate
+                if (fld == frc%i_xwind .and. frc%rotated_grid) do_rotation_wind = .true.
+            end if
+        end do
+        if (do_rotation_wind) call forcing_rotate_wind(frc, mesh, partit)
+    end subroutine forcing_sbc_do
 
     ! lowercase a calendar string (FESOM2 lowercase, 2798-2832)
     function lc(s) result(o)

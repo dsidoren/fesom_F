@@ -14,8 +14,13 @@ module load netcdf-c/4.8.1-openmpi-4.1.2-intel-2021.5.0
 module load netcdf-fortran/4.5.3-openmpi-4.1.2-intel-2021.5.0
 module load git
 
-ulimit -s unlimited   # netCDF lib segfaults at runtime without this
-ulimit -c 0
+ulimit -s unlimited 2>/dev/null || true   # netCDF wants a big stack; best-effort — on a SLURM
+                                          # compute node the hard limit may already be capped
+                                          # (e.g. batch `ulimit -s 204800`), and trying to RAISE it
+                                          # errors. Under a caller's `set -e` that bare ulimit aborted
+                                          # the whole gate (M8b dist_864). `|| true` keeps it benign;
+                                          # the batch sets an explicit 204800 stack which netCDF accepts.
+ulimit -c 0 2>/dev/null || true
 
 # OpenMPI 4.x runtime settings for Levante
 # https://docs.dkrz.de/doc/levante/running-jobs/runtime-settings.html

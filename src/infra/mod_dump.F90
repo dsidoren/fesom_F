@@ -54,6 +54,13 @@ module mod_dump
     integer, save :: max_steps    = 10
     integer, save :: probe_loc_nod(DUMP_NPROBES_NOD)   = -1
     integer, save :: probe_loc_elem(DUMP_NPROBES_ELEM) = -1
+    ! M8c Step-3 bisection: FESOM_DUMP_ALL dumps EVERY owned node/elem (not the 5 probes); paired
+    ! with FESOM_DUMP_MINSTEP it dumps a narrow step WINDOW [min_step, max_steps] so the all-node
+    ! volume stays bounded. Byte-format-identical to the FESOM2 shim's dump_all (gid-keyed).
+    logical, save :: dump_all  = .false.
+    integer, save :: min_step  = 0
+    integer, save :: my_nod    = 0, my_elem = 0
+    integer, allocatable, save :: list_nod(:), list_elem(:)
 
     public :: dump_init, dump_finalize
     public :: dump_node, dump_node_2d, dump_elem, dump_elem_2d
@@ -77,6 +84,18 @@ contains
         if (ios == 0 .and. len_trim(env_max) > 0) then
             read(env_max, *, iostat=ios) max_steps
             if (ios /= 0) max_steps = 10
+        end if
+        ! M8c Step-3 bisection: FESOM_DUMP_ALL (every owned node) + FESOM_DUMP_MINSTEP (window start)
+        call get_environment_variable('FESOM_DUMP_ALL', env_max, status=ios)
+        dump_all = (ios == 0 .and. len_trim(env_max) > 0)
+        call get_environment_variable('FESOM_DUMP_MINSTEP', env_max, status=ios)
+        if (ios == 0 .and. len_trim(env_max) > 0) then
+            read(env_max, *, iostat=ios) min_step
+            if (ios /= 0) min_step = 0
+        end if
+        if (dump_all) then
+            my_nod  = myDim_nod2D;  allocate(list_nod(my_nod));   list_nod  = myList_nod2D(1:my_nod)
+            my_elem = myDim_elem2D; allocate(list_elem(my_elem)); list_elem = myList_elem2D(1:my_elem)
         end if
 
         ! ---- node stream ----
@@ -138,8 +157,17 @@ contains
         integer,          intent(in) :: nlevels_nod2D(:)
         integer :: i, lid, nlev
         character(len=24) :: name24
-        if (.not. nod_active .or. step > max_steps) return
+        if (.not. nod_active .or. step > max_steps .or. step < min_step) return
         name24 = field_name
+        if (dump_all) then
+            do i = 1, my_nod
+                nlev = nlevels_nod2D(i)
+                write(nod_unit) int(step,int32), int(substep_id,int32), &
+                    int(list_nod(i),int32), int(nlev,int32), &
+                    name24, real(field_3d(1:nlev, i), real64)
+            end do
+            return
+        end if
         do i = 1, DUMP_NPROBES_NOD
             lid = probe_loc_nod(i)
             if (lid <= 0) cycle
@@ -156,8 +184,16 @@ contains
         real(kind=WP),    intent(in) :: field_2d(:)
         integer :: i, lid
         character(len=24) :: name24
-        if (.not. nod_active .or. step > max_steps) return
+        if (.not. nod_active .or. step > max_steps .or. step < min_step) return
         name24 = field_name
+        if (dump_all) then
+            do i = 1, my_nod
+                write(nod_unit) int(step,int32), int(substep_id,int32), &
+                    int(list_nod(i),int32), int(1,int32), &
+                    name24, [real(field_2d(i), real64)]
+            end do
+            return
+        end if
         do i = 1, DUMP_NPROBES_NOD
             lid = probe_loc_nod(i)
             if (lid <= 0) cycle
@@ -175,8 +211,17 @@ contains
         integer,          intent(in) :: nlevels_elem(:)
         integer :: i, lid, nlev
         character(len=24) :: name24
-        if (.not. elem_active .or. step > max_steps) return
+        if (.not. elem_active .or. step > max_steps .or. step < min_step) return
         name24 = field_name
+        if (dump_all) then
+            do i = 1, my_elem
+                nlev = nlevels_elem(i)
+                write(elem_unit) int(step,int32), int(substep_id,int32), &
+                    int(list_elem(i),int32), int(nlev,int32), &
+                    name24, real(field_3d(1:nlev, i), real64)
+            end do
+            return
+        end if
         do i = 1, DUMP_NPROBES_ELEM
             lid = probe_loc_elem(i)
             if (lid <= 0) cycle
@@ -193,8 +238,16 @@ contains
         real(kind=WP),    intent(in) :: field_2d(:)
         integer :: i, lid
         character(len=24) :: name24
-        if (.not. elem_active .or. step > max_steps) return
+        if (.not. elem_active .or. step > max_steps .or. step < min_step) return
         name24 = field_name
+        if (dump_all) then
+            do i = 1, my_elem
+                write(elem_unit) int(step,int32), int(substep_id,int32), &
+                    int(list_elem(i),int32), int(1,int32), &
+                    name24, [real(field_2d(i), real64)]
+            end do
+            return
+        end if
         do i = 1, DUMP_NPROBES_ELEM
             lid = probe_loc_elem(i)
             if (lid <= 0) cycle
