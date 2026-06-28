@@ -35,7 +35,6 @@ module mod_forcing_read
     ! prefetch reader stack + the SSS/runoff/chl climatology reads are NOT ported
     ! (perf / separate fields).
     use, intrinsic :: iso_fortran_env, only: real32, real64
-    use mpi,           only: MPI_Bcast, MPI_REAL4
     use mod_precision, only: WP
     use mod_constants,  only: rad
     use mod_io_netcdf
@@ -283,7 +282,7 @@ contains
         type(t_partit), intent(in), target :: partit
         character(len=512) :: fname
         character(len=4) :: cyear
-        integer :: ncid, nlon, nlat, ntime, t_indx, t_indx_p1, ii, i, j, ip1, jp1, extrp, ierr
+        integer :: ncid, nlon, nlat, ntime, t_indx, t_indx_p1, ii, i, j, ip1, jp1, extrp
         real(WP) :: delta_t, x, y, x1, x2, y1, y2, denom, data1, data2
         real(real32), allocatable :: raw(:,:), sbc1(:,:), sbc2(:,:)
 
@@ -305,32 +304,18 @@ contains
         frc%f(fld)%t_indx    = t_indx
         frc%f(fld)%t_indx_p1 = t_indx_p1
 
-        ! Read the two slices into the halo'd buffers (interior 2:nlon-1; halo mirror).
-        ! PERF (F3-vs-F2 root cause): read on rank 0 ONLY, then broadcast the two assembled
-        ! slices — this mirrors FESOM2 (gen_modules_read_NetCDF: `if(mype==0) nf90_open/read/close`
-        ! followed by a broadcast). All ranks open the SAME netCDF file, so rank 0's bytes are
-        ! byte-identical to what every rank would have read independently; broadcasting is therefore
-        ! exactly byte-neutral, but it removes the all-ranks open/read/close on each record crossing
-        ! (filesystem contention that does not scale with rank count, and which dominated the forcing
-        ! cost at scale — ~94% of forcing time at dist_512).
+        ! read the two slices into the halo'd buffers (interior 2:nlon-1; halo mirror)
         allocate(raw(nlon-2, nlat), sbc1(nlon, nlat), sbc2(nlon, nlat))
-        if (partit%mype == 0) then
-            ncid = nc_open_read(fname)
-            call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx, raw)
-            sbc1(2:nlon-1, 1:nlat) = raw
-            sbc1(1,    1:nlat) = sbc1(nlon-1, 1:nlat)
-            sbc1(nlon, 1:nlat) = sbc1(2,      1:nlat)
-            call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx_p1, raw)
-            sbc2(2:nlon-1, 1:nlat) = raw
-            sbc2(1,    1:nlat) = sbc2(nlon-1, 1:nlat)
-            sbc2(nlon, 1:nlat) = sbc2(2,      1:nlat)
-            call nc_close(ncid)
-        end if
-        if (partit%npes > 1) then
-            ! sbc1/sbc2 are contiguous real32(nlon,nlat); send the whole halo'd slice (post-mirror)
-            call MPI_Bcast(sbc1, nlon*nlat, MPI_REAL4, 0, partit%MPI_COMM_FESOM, ierr)
-            call MPI_Bcast(sbc2, nlon*nlat, MPI_REAL4, 0, partit%MPI_COMM_FESOM, ierr)
-        end if
+        ncid = nc_open_read(fname)
+        call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx, raw)
+        sbc1(2:nlon-1, 1:nlat) = raw
+        sbc1(1,    1:nlat) = sbc1(nlon-1, 1:nlat)
+        sbc1(nlon, 1:nlat) = sbc1(2,      1:nlat)
+        call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx_p1, raw)
+        sbc2(2:nlon-1, 1:nlat) = raw
+        sbc2(1,    1:nlat) = sbc2(nlon-1, 1:nlat)
+        sbc2(nlon, 1:nlat) = sbc2(2,      1:nlat)
+        call nc_close(ncid)
 
         do ii = 1, frc%nnod
             i = frc%idx_i(fld, ii); j = frc%idx_j(fld, ii)
