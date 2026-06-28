@@ -14,6 +14,8 @@ add_fesom_test(test_mesh   1)
 add_fesom_test(test_io_decomp 1)
 add_fesom_test(test_io_decomp 2)
 add_fesom_test(test_io_decomp 8)
+add_fesom_test(test_io_decomp_gather 1)
+add_fesom_test(test_io_decomp_gather 2)
 add_fesom_test(test_vector_rotate 1)
 add_fesom_test(test_io_means 1)
 

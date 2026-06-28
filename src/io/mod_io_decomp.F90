@@ -53,12 +53,19 @@ module mod_io_decomp
     end type t_io_decomp
 
     public :: decomp_init, decomp_init_entity
-    public :: decomp_redistribute, decomp_is_writer, decomp_writer_chunk_range
+    public :: decomp_redistribute, decomp_gather, decomp_is_writer, decomp_writer_chunk_range
 
     interface decomp_redistribute
         module procedure decomp_redistribute_2d_r, decomp_redistribute_3d_r, &
                          decomp_redistribute_2d_i, decomp_redistribute_3d_i
     end interface decomp_redistribute
+
+    ! Inverse of decomp_redistribute (the read/restore direction): pull canonical writer-buffer
+    ! values back to the compute partition's owned entities, reusing the SAME t_io_decomp plan.
+    ! Real WP only (restart serializes WP fields); no int variant needed.
+    interface decomp_gather
+        module procedure decomp_gather_2d_r, decomp_gather_3d_r
+    end interface decomp_gather
 
 contains
 
@@ -241,6 +248,48 @@ contains
             if (D%w_nbuf > 0) buf_writer(L, 1:D%w_nbuf) = outrow(1:D%w_nbuf)
         end do
     end subroutine decomp_redistribute_3d_r
+
+    ! ---- gather (real) — exact transpose of decomp_redistribute, run backwards on the SAME plan ----
+    ! redistribute (write):  field(i)->sbuf(send_pos(i)+1) ; Alltoallv(send->recv) ; rbuf(k)->buf(recv_target(k))
+    ! gather      (read):    buf(recv_target(k))->rbuf(k) ; Alltoallv(recv->send, counts/displs swapped) ;
+    !                        sbuf(send_pos(i)+1)->field(i)
+    ! The store holds only canonical OWNED values, so the partial last chunk's pad slots are never read
+    ! (recv_target only indexes real entities) — padding is ignored. npes==1 => the Alltoallv is a self-copy.
+
+    subroutine decomp_gather_2d_r(D, buf_writer, field_owned)
+        type(t_io_decomp), intent(in)  :: D
+        real(WP),          intent(in)  :: buf_writer(:)    ! 1..w_nbuf (canonical writer buffer)
+        real(WP),          intent(out) :: field_owned(:)   ! 1..myDim  (compute-partition owned)
+        real(WP), allocatable :: sbuf(:), rbuf(:)
+        integer :: i, k, ierr
+        allocate(sbuf(max(1,D%send_total)), rbuf(max(1,D%recv_total)))
+        if (D%w_nbuf > 0) then
+            do k = 1, D%recv_total
+                rbuf(k) = buf_writer(D%recv_target(k))
+            end do
+        end if
+        ! reversed Alltoallv: recv-side counts become SEND args, send-side counts become RECV args
+        call MPI_Alltoallv(rbuf, D%recvcounts, D%rdispls, MPI_WP, &
+                           sbuf, D%sendcounts, D%sdispls, MPI_WP, D%comm, ierr)
+        do i = 1, D%myDim
+            field_owned(i) = sbuf(D%send_pos(i)+1)
+        end do
+    end subroutine decomp_gather_2d_r
+
+    subroutine decomp_gather_3d_r(D, buf_writer, field_owned)
+        type(t_io_decomp), intent(in)  :: D
+        real(WP),          intent(in)  :: buf_writer(:,:)  ! (nlev, 1..w_nbuf)
+        real(WP),          intent(out) :: field_owned(:,:) ! (nlev, 1..myDim)
+        real(WP), allocatable :: col(:), inrow(:)
+        integer :: nlev, L
+        nlev = size(field_owned, 1)
+        allocate(col(max(1,D%myDim)), inrow(max(1,D%w_nbuf)))
+        do L = 1, nlev
+            if (D%w_nbuf > 0) inrow(1:D%w_nbuf) = buf_writer(L, 1:D%w_nbuf)
+            call decomp_gather_2d_r(D, inrow, col)
+            field_owned(L, 1:D%myDim) = col(1:D%myDim)
+        end do
+    end subroutine decomp_gather_3d_r
 
     ! ---- redistribution (integer) ----
 

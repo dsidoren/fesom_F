@@ -132,21 +132,24 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
 ### Stage 1 — `decomp_gather` (the inverse redistribution)
 *The one genuinely new MPI routine; it is the literal transpose of the proven `decomp_redistribute`.*
 
-#### Task 1.1: `decomp_gather_2d_r`/`3d_r` + transpose round-trip ctest
+#### Task 1.1 ✅: `decomp_gather_2d_r`/`3d_r` + transpose round-trip ctest
 
 **Files:**
 - Modify: `src/io/mod_io_decomp.F90`
 - Create: `test/test_io_decomp_gather.F90`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] add a `decomp_gather` interface (`_2d_r`, `_3d_r`) = `decomp_redistribute` transposed: gather
+- [x] add a `decomp_gather` interface (`_2d_r`, `_3d_r`) = `decomp_redistribute` transposed: gather
       `rbuf(k) = buf_writer(recv_target(k))`; one `MPI_Alltoallv` with **send/recv swapped** (`recvcounts/rdispls`
       as send, `sendcounts/sdispls` as recv); unpack `field_owned(i) = sbuf(send_pos(i)+1)`
-- [ ] reuse the **same** `t_io_decomp` plan — no new plan, no extra communication; real WP only (no int variant)
-- [ ] unit test: random `field_owned` → `decomp_redistribute` → `decomp_gather` reproduces it **identically**
-      (np=1 self-copy + np=2); last-chunk padding ignored
-- [ ] register ctest `test_io_decomp_gather` (np1, np2)
-- [ ] **GATE:** ctest GREEN — `gather ∘ redistribute == identity` on owned entities
+- [x] reuse the **same** `t_io_decomp` plan — no new plan, no extra communication; real WP only (no int variant)
+- [x] unit test: deterministic `field_owned` (`real(myList(i),WP)*1.5-0.25`, +per-level offset for 3D; NO RNG, per
+      reproducibility) → `decomp_redistribute` → `decomp_gather` reproduces it **identically** (np=1 self-copy + np=2);
+      last-chunk padding ignored
+- [x] register ctest `test_io_decomp_gather` (np1, np2)
+- [x] **GATE:** ctest GREEN — `gather ∘ redistribute == identity` on owned entities — PASS np=1 AND np=2 (Intel dp,
+      worktree build); both report `max|Δ|=0` over 2D+3D across 6 (N,C,n_writers) combos incl. partial last chunks,
+      writer subsets, and real cross-rank exchange at np=2
 
 ### Stage 2 — Shared coord/attr helper (DRY)
 *Factor the ushow-viewability embedding so restart stores are byte-identical in shape to M9 output stores.*
