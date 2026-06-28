@@ -206,18 +206,38 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
       `ctest -R io_posix` GREEN (`test_io_posix_np1 ... Passed`, ctest exit 0); direct driver prints
       `ALL PASS (rename/unlink/rmdir/fsync/rmtree, no fork, exit 0)`, **exit code 0** (no segfault)
 
-#### Task 3.2: Writer mechanism — one field end-to-end + folder + `checkpoint.json`
+#### Task 3.2 ✅: Writer mechanism — one field end-to-end + folder + `checkpoint.json`
 
 **Files:**
 - Create: `src/io/mod_io_restart.F90`
+- Create: `src/drivers/fesom_restartsmoke.F90` (➕ the Stage-3 GATE driver, mirrors `fesom_outputsmoke`)
+- Create: `tools/run_restartsmoke.sh` (➕ the gate runner; `F3`/`BUILD`/`RUN` overridable for worktree runs)
+- Modify: `tools/zarr_diff.py` (➕ `--restart` mode: snapshot-store + `checkpoint.json` verify)
 
-- [ ] a field descriptor (name, units, entity NODE/ELEM, **level kind `nl` vs `nl-1`**, precision, array pointer) + registry
-- [ ] `restart_write_field`: `decomp_redistribute` (compute→canonical) → `zarr_write_chunk` per owned chunk into a
+- [x] a field descriptor (name, units, entity NODE/ELEM, **level kind `nl` vs `nl-1`**, precision, array pointer) + registry
+      — `t_restart_field` (`p2d`/`p3d` live POINTERS, `entity`, `ndim`, `on_full_levels`, `dtype` default `<f8`,
+      `nlev`/`hdim`/`vdim`) + `t_restart` registry (`f(RESTART_MAXF=64)`, node `Dn`+elem `De` decomps, cached
+      node/elem coords + `depth_nz`/`nz1`); `restart_init` (builds decomps + coords once, like `means_init`) +
+      `restart_register_field(R, name, units, entity, p2d=/p3d=, on_full_levels, precision)` (pointer dummies →
+      strided model sections associate without a copy, stay live for Task 4.1 read-back)
+- [x] `restart_write_field`: `decomp_redistribute` (compute→canonical) → `zarr_write_chunk` per owned chunk into a
       single-variable single-entity **snapshot** store (`<f8`, codec from namelist), coords via the Stage 2 helper
-- [ ] checkpoint folder `fesom.<YYYY>.<DDD>.<SSSSS>/` + `checkpoint.json`
-      (`format_version, year, day, time_sec, globalstep, fesom_git, npes_wrote`, rank-0)
-- [ ] **GATE (smoke):** write one field; `zarr_diff.py`/xarray opens the store (dims, finite `lon`/`lat`,
-      `_ARRAY_DIMENSIONS`); `ushow <store> -m fesom.mesh.diag.zarr` noted (manual)
+      — general node+elem / 2-D `(entity)` + 3-D `(nlev, entity)` (NO time dim, NO mean accumulation); rank-0
+      define → barrier → every writer writes its chunks (M9 store-create ordering); 3-D embeds the `nz`/`nz1`
+      vertical coord; `io_coords_*` for the lon/lat + `_ARRAY_DIMENSIONS` + UGRID embed
+- [x] checkpoint folder `fesom.<YYYY>.<DDD>.<SSSSS>/` + `checkpoint.json`
+      (`format_version, year, day, time_sec, globalstep, fesom_git, npes_wrote`, rank-0) — `restart_write` zero-pads
+      the folder (`int(time_sec)`=sec-of-day for `SSSSS`), writes each registered field's store, then rank-0 writes
+      `checkpoint.json` via plain Fortran string writes (`fesom_git` from `$FESOM3_GIT` else `unknown`). Atomic
+      tmp/rename + `restart.latest` deferred to Task 3.3 (plain `zarr_mkdir` + direct write here)
+- [x] **GATE (smoke):** write one field; `zarr_diff.py`/xarray opens the store (dims, finite `lon`/`lat`,
+      `_ARRAY_DIMENSIONS`); `ushow <store> -m fesom.mesh.diag.zarr` noted (manual) — **PASS np=1 AND np=2** (Intel dp,
+      worktree `build_intel_dp`): `fesom_restartsmoke` writes `fesom.2000.001.03600/eta_n.zarr` (`value(g)==g`) +
+      `checkpoint.json`; xarray opens `eta_n` dims `(nod2,)`=3140 (NO time dim), embedded lon/lat shape `(3140,)`
+      finite, `_ARRAY_DIMENSIONS=['nod2']` (read raw off disk), `value(g)==g` `max|Δ|=0`; `checkpoint.json` parses
+      with all 7 keys + correct clock (`npes_wrote=2` at np=2). **np1 vs np2 store tree BYTE-IDENTICAL** (data+coord
+      chunks + `.zarray`/`.zattrs`) — canonical write is partition-independent. ushow command printed by the runner
+      (manual display; the xarray round-trip is the automated proxy)
 
 #### Task 3.3: Atomicity + `restart.latest` + keep-N prune (crash-injection gate)
 

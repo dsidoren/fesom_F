@@ -394,6 +394,63 @@ def _check_elem(out_dir):
         _fail("fld_e3 no NaN -> element below-bottom masking did not fire")
 
 
+def restart(ckpt_root):
+    """Restart Stage 3 (Task 3.2) round-trip: verify a checkpoint folder written by mod_io_restart.
+    ckpt_root is the dir holding the fesom.<YYYY>.<DDD>.<SSSSS>/ folder. Asserts the per-field SNAPSHOT
+    store (eta_n.zarr) opens in xarray with the right dims (NO time dim), carries _ARRAY_DIMENSIONS,
+    has embedded finite lon/lat sized to the entity, value(g)==g (canonical, partition-independent),
+    and that checkpoint.json parses with the expected keys. Self-consistency — no FESOM2 oracle."""
+    import json
+    print(f"[restart] root = {ckpt_root}")
+    folders = sorted(d for d in os.listdir(ckpt_root)
+                     if d.startswith("fesom.") and os.path.isdir(os.path.join(ckpt_root, d)))
+    if not folders:
+        _fail(f"no fesom.<YYYY>.<DDD>.<SSSSS> checkpoint folder in {ckpt_root}")
+    ck = os.path.join(ckpt_root, folders[-1])
+    print(f"  checkpoint folder = {folders[-1]}")
+
+    # --- per-field snapshot store (eta_n): a single-variable single-entity store, NO time dim ---
+    sp = os.path.join(ck, "eta_n.zarr")
+    if not os.path.isdir(sp):
+        _fail(f"eta_n.zarr missing in {ck}")
+    # raw _ARRAY_DIMENSIONS check straight off disk (the ushow/xarray contract)
+    with open(os.path.join(sp, "eta_n", ".zattrs")) as fh:
+        za = json.load(fh)
+    if za.get("_ARRAY_DIMENSIONS") != ["nod2"]:
+        _fail(f"eta_n _ARRAY_DIMENSIONS {za.get('_ARRAY_DIMENSIONS')} != ['nod2']")
+    ds = xr.open_zarr(sp, consolidated=False, mask_and_scale=False)
+    if "eta_n" not in ds:
+        _fail(f"eta_n not in {sp}")
+    da = ds["eta_n"]
+    if tuple(da.dims) != ("nod2",):
+        _fail(f"eta_n dims {da.dims} != (nod2,) — a snapshot store must have NO time dim")
+    (N,) = da.shape
+    g = np.arange(1, N + 1, dtype=np.float64)
+    d = float(np.max(np.abs(da.values.astype(np.float64) - g)))
+    print(f"  eta_n  shape=({N},) dtype={da.dtype}  max|Δ|={d:.3e}  (value(g)==g)")
+    if d != 0.0:
+        _fail(f"eta_n values max|Δ|={d} != 0 (decomp / C-order / coord-embed bug?)")
+    for c in ("lon", "lat"):
+        if c not in ds:
+            _fail(f"eta_n store missing {c}")
+        arr = np.asarray(ds[c].values)
+        if arr.shape != (N,) or not np.all(np.isfinite(arr)):
+            _fail(f"{c} shape={arr.shape}/finite check failed (expected ({N},), all finite)")
+    print(f"  lon/lat embedded: shape=({N},) finite=True")
+
+    # --- checkpoint.json provenance manifest ---
+    with open(os.path.join(ck, "checkpoint.json")) as fh:
+        meta = json.load(fh)
+    need = {"format_version", "year", "day", "time_sec", "globalstep", "fesom_git", "npes_wrote"}
+    miss = need - set(meta)
+    if miss:
+        _fail(f"checkpoint.json missing keys {miss}")
+    if meta["year"] != 2000 or meta["day"] != 1 or float(meta["time_sec"]) != 3600.0:
+        _fail(f"checkpoint.json clock fields wrong: {meta}")
+    print(f"  checkpoint.json OK: {meta}")
+    print("RESTART PASS (max|Δ|=0, snapshot store opens + checkpoint.json parses)")
+
+
 def output_cmp(d1, d2):
     """Partition-independence (Task 2.3): two output dirs (e.g. dist_2 vs dist_8) must hold
     value-identical stores — every variable max|Δ|=0."""
@@ -429,6 +486,7 @@ def main():
     ap.add_argument("--meshdiag", nargs=2, metavar=("ZARR", "NC"),
                     help="compare mesh.diag Zarr store vs FESOM2 fesom.mesh.diag.nc")
     ap.add_argument("--output", metavar="DIR", help="Stage-2 fesom_outputsmoke store verify (formula)")
+    ap.add_argument("--restart", metavar="DIR", help="Stage-3 restart checkpoint verify (snapshot + json)")
     ap.add_argument("--output-cmp", nargs=2, metavar=("DIR1", "DIR2"), dest="output_cmp",
                     help="compare two output dirs (partition-independence)")
     ap.add_argument("--frame", choices=("geographic", "native"), default="geographic",
@@ -444,10 +502,12 @@ def main():
         meshdiag(args.meshdiag[0], args.meshdiag[1], ftol=args.ftol)
     elif args.output:
         output(args.output, frame=args.frame)
+    elif args.restart:
+        restart(args.restart)
     elif args.output_cmp:
         output_cmp(args.output_cmp[0], args.output_cmp[1])
     else:
-        ap.error("no mode selected (use --roundtrip / --lz4 / --meshdiag / --output / --output-cmp)")
+        ap.error("no mode selected (use --roundtrip / --lz4 / --meshdiag / --output / --output-cmp / --restart)")
 
 
 if __name__ == "__main__":
