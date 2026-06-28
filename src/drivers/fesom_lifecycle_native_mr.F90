@@ -773,9 +773,12 @@ contains
         ! forcing_sbc_do's per-field rdate (same formula, same clock; forc_calendar matches the file
         ! calendar — CORE2 'noleap'=>365*yyyy, JRA55 'gregorian') — FESOM2 sbc_do uses one rdate for
         ! both the crossing test and the interp.
+        call timer_start(TMR_FRC_SBC)
         call forcing_sbc_do(frc, mesh, partit)
+        call timer_stop(TMR_FRC_SBC)
         rcur = real(forcing_julday(yearnew,1,1,forc_calendar),WP) + real(daynew-1,WP) &
              + timenew/86400._WP - dt/86400._WP/2._WP
+        call timer_start(TMR_FRC_INTERP)
         call forcing_timeinterp(frc, rcur, partit)
         nuw = frc%atmdata(1,1:nNodL);  nvw = frc%atmdata(2,1:nNodL);  nsh = frc%atmdata(3,1:nNodL)
         nswr = frc%atmdata(4,1:nNodL);  nlw = frc%atmdata(5,1:nNodL)
@@ -783,10 +786,15 @@ contains
         npr = frc%atmdata(7,1:nNodL) / 1000._WP
         nps = frc%atmdata(8,1:nNodL) / 1000._WP
         ncd = 0.0_WP; nch = 0.0_WP; nce = 0.0_WP
+        call timer_stop(TMR_FRC_INTERP)
+        call timer_start(TMR_FRC_BULK)
         call forcing_bulk_ncar(10.0_WP, 10.0_WP, 10.0_WP, nta, nsh, nuw, nvw, &
                                ice%srfoce_temp, ice%srfoce_u, ice%srfoce_v, ncd, nch, nce, mesh, partit)
+        call timer_stop(TMR_FRC_BULK)
+        call timer_start(TMR_FRC_STRESS)
         call forcing_wind_stress(0.0_WP, nuw, nvw, ice%srfoce_u, ice%srfoce_v, ncd, nsx, nsy, mesh, partit)
         call forcing_ice_stress(0.0012_WP, nuw, nvw, ice%uice, ice%vice, nix, niy, mesh, partit)
+        call timer_stop(TMR_FRC_STRESS)
     end subroutine compute_native_forcing
 
     ! M8c monthly climatology read-ahead (FESOM2 sbc_do:1590-1618). At the last instant of a month

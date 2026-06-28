@@ -20,29 +20,38 @@ module mod_timer
     implicit none
     private
 
-    ! ---- timer ids (extend here; keep NTIMER in sync) -----------------------
+    ! ---- timer ids (pre-order tree: each parent is immediately followed by its children, so the
+    !      report prints with correct indentation by simple iteration. Use the NAMES at call sites;
+    !      the integer values may be reordered freely.) ------------------------
     integer, parameter, public :: TMR_OCEAN2ICE   =  1   ! top-level driver components
     integer, parameter, public :: TMR_FORCING     =  2
-    integer, parameter, public :: TMR_ICE         =  3
-    integer, parameter, public :: TMR_FLUXES      =  4
-    integer, parameter, public :: TMR_STEP_OCE    =  5   ! umbrella: whole ocean step
-    integer, parameter, public :: TMR_OCE_MIXPRES =  6   ! ocean sub-steps (children of STEP_OCE)
-    integer, parameter, public :: TMR_OCE_DYN     =  7
-    integer, parameter, public :: TMR_OCE_SSH     =  8
-    integer, parameter, public :: TMR_OCE_SOLVE   =  9   ! SUBSET of SSH (the CG solve) — not summed
-    integer, parameter, public :: TMR_OCE_GMREDI  = 10
-    integer, parameter, public :: TMR_OCE_TRACER  = 11
-    integer, parameter, public :: NTIMER          = 11
+    integer, parameter, public :: TMR_FRC_SBC     =  3   ! forcing sub-steps (children of FORCING)
+    integer, parameter, public :: TMR_FRC_INTERP  =  4
+    integer, parameter, public :: TMR_FRC_BULK    =  5
+    integer, parameter, public :: TMR_FRC_STRESS  =  6
+    integer, parameter, public :: TMR_ICE         =  7
+    integer, parameter, public :: TMR_FLUXES      =  8
+    integer, parameter, public :: TMR_STEP_OCE    =  9   ! umbrella: whole ocean step
+    integer, parameter, public :: TMR_OCE_MIXPRES = 10   ! ocean sub-steps (children of STEP_OCE)
+    integer, parameter, public :: TMR_OCE_DYN     = 11
+    integer, parameter, public :: TMR_OCE_SSH     = 12
+    integer, parameter, public :: TMR_OCE_SOLVE   = 13   ! SUBSET of SSH (the CG solve) — not summed
+    integer, parameter, public :: TMR_OCE_GMREDI  = 14
+    integer, parameter, public :: TMR_OCE_TRACER  = 15
+    integer, parameter, public :: NTIMER          = 15
 
     character(len=20), parameter :: TNAME(NTIMER) = [character(len=20) :: &
-        'ocean2ice', 'forcing', 'ice', 'oce_fluxes', 'step_oce (ocean)', &
+        'ocean2ice', 'forcing', 'sbc / crossing', 'time-interp', 'bulk NCAR', 'wind/ice stress', &
+        'ice', 'oce_fluxes', 'step_oce (ocean)', &
         'mix, pres, EOS', 'dynamics u,v,w', 'dynamics ssh', '(of which) ssh solve', &
         'GM / Redi', 'tracer' ]
     ! parent id for the indented report (0 = top-level component)
-    integer, parameter :: TPARENT(NTIMER) = [ 0, 0, 0, 0, 0, &
+    integer, parameter :: TPARENT(NTIMER) = [ 0, 0, TMR_FORCING, TMR_FORCING, TMR_FORCING, TMR_FORCING, &
+        0, 0, 0, &
         TMR_STEP_OCE, TMR_STEP_OCE, TMR_STEP_OCE, TMR_OCE_SSH, TMR_STEP_OCE, TMR_STEP_OCE ]
     ! .true. => this timer is a subset of its parent (don't add to the parent's child-sum check)
-    logical, parameter :: TSUBSET(NTIMER) = [ .false.,.false.,.false.,.false.,.false., &
+    logical, parameter :: TSUBSET(NTIMER) = [ .false.,.false.,.false.,.false.,.false.,.false., &
+        .false.,.false.,.false., &
         .false.,.false.,.false., .true., .false.,.false. ]
 
     real(real64) :: tacc(NTIMER) = 0.0_real64   ! accumulated seconds
