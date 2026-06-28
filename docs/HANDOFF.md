@@ -320,12 +320,11 @@ The live "Oracle" section above + the "M2.12 entry notes" below cover what the c
 
 ## Next task
 
-### ⏭️ M9 (Zarr OUTPUT) — **Stage 0 + 1 + Stage 2 (scalars + 3-D + NODE VECTORS) DONE & byte-gated (2026-06-28). RESUME at Task 2.6, then 2.7 (ELEMENT output — USER-REQUESTED).**
+### ⏭️ M9 (Zarr OUTPUT) — **Stage 0 + 1 + Stage 2 + F1 COMPLETE (scalars + 3-D + NODE + ELEMENT vectors/scalars + Task 2.6 namelist/knobs + full no-regression sweep) DONE & byte-gated (2026-06-28). RESUME at F2 (commit + tag `m9` + move plan to completed/).**
 
-**Plan:** `docs/plans/2026-06-28-m9-zarr-output.md` (checkboxes ticked through Task 2.5; Task 2.7 ELEMENT output
-added per user). Design SETTLED.
+**Plan:** `docs/plans/2026-06-28-m9-zarr-output.md` (checkboxes ticked through F1). Design SETTLED.
 
-**DONE (11/14 tasks, all byte-gated, ctest 17/17 Intel+GNU, no regression):**
+**DONE (F1 done, all byte-gated, ctest 18/18 Intel+GNU, no regression):**
 - **Stage 0 — `mod_io_zarr`** (Zarr v2): JSON + C-order transpose + partial-chunk fill-pad + codecs `none`/**lz4** +
   `.zmetadata`; `zarr_write_chunk` 1d/2d/**3d**/int + `zarr_rewrite_zarray` (grow time dim). Gate `run_zarrsmoke.sh`.
 - **Stage 1 — `mod_io_decomp`** (canonical `MPI_Alltoallv` → writer subset, no rank-0 gather; ctest `test_io_decomp`
@@ -349,8 +348,35 @@ added per user). Design SETTLED.
   `vec_autorotate`, via `FESOM3_VEC_FRAME`. Gates: round-trip ctest `test_vector_rotate` (`g2r∘r2g==id` 8.9e-15);
   `run_output_gate.sh` native==raw `max|Δ|=0`, geographic==INDEPENDENT numpy `vector_r2g` ref `≈2e-13`≪1e-9
   (non-vacuous), partition-indep both frames. ctest 16→17.
+- **Task 2.6 (namelist.io knobs + chunk_time/chunk_vert/lz4/n_writers/filesplit + per-field cadence):** writer is
+  now CONFIGURABLE. `mod_io_zarr` gained `zarr_read_chunk` (1d/2d/3d + lz4 `LZ4_decompress_safe`) for the
+  `chunk_time>1` **read-modify-write** append (record t -> time-chunk t/ct slot mod(t,ct)). `mod_io_means`
+  REFACTORED to PER-FIELD record tracking: each field keeps its own `t` + period store; `means_begin`/`means_write`
+  replaced by **`means_output(io, istep, t_means_clock)`** evaluating the FESOM2-ported events (`event_due`:
+  annual/monthly/daily/hourly/step from `gen_events.F90`) per field. Global knobs (chunk_time, chunk_vert
+  [ceil(nz/cv) vert chunks], compressor [data-array lz4], filesplit [y|m -> `<name>.fesom.<YYYY>[_<MM>]`]) via
+  `means_init` args + `FESOM3_*` env. **`means_read_namelist`** parses `&nml_general` + `&nml_list` (FESOM2
+  derived-type-array trick: 1 `t_io_entry` per 5 flat values, +5th `op` mean|snap). Lifecycle now LIST-DRIVEN
+  (`register_output_var` dispatch by id; env-fallback default set kept; accumulate EVERY step via `means_has`).
+  GATES: `run_output_gate.sh` knob sweep — chunk_time={1,2,3} + chunk_vert + lz4 + n_writers=2 all value-identical
+  to base `max|Δ|=0`, combo partition-indep np1≡np2, per-field freq=2 (`fld_f2`) => floor(nrec/2) records;
+  `test_io_means` ctest pins the namelist parse Intel+GNU (17→18). No regression (zarrsmoke + meshdiag GREEN; GNU
+  writer round-trips, pure-data fields bit-identical to Intel, only rotation-derived lon/lat/unod/vnod differ
+  ~1e-13 = expected ifort/gfortran libm).
+- **Task 2.7 (ELEMENT output — user-requested):** added the element decomp `De` + owned elem-centroid coords to
+  `mod_io_means`: ROTATED centroid `sum(coord_nod2D(1:2,elem2D_nodes(1:3,e)))/3` (FESOM2 io_r2g:3004 VERBATIM,
+  flag_coord=0) for the vector r2g + the GEOGRAPHIC centroid `r2g(rotated)` (deg) for the embed + `mesh%nlevels`
+  for the element mask. New `means_define_elem2d`/`means_define_elem3d`/`means_define_vector3d_elem`; the field
+  registration refactored to a shared `add_field` core + node/elem wrappers; the write path resolves the entity
+  context (`D`/`nO`/`nlevown`/`rlon`/`rlat`) once in `write_one_field` (pointer into target `io`) + threads it
+  through the writers/`emit_chunks`/`put_static`/`open_field_store`; `def_field_store` uses per-field `hdim`
+  ('nod2'|'elem'). Lifecycle registers **u/v** (`dyn%uv`), **Av** (`dyn%work%Av` full levels), **bolus_u/v**
+  (`dyn%fer_uv`, Fer_GM-guarded) via the list dispatch + default set + `means_has`-guarded accumulate;
+  `config/namelist.io` gains u/v/Av rows. GATE (`run_output_gate.sh`, np 1/2/8): elem `native==raw` `max|Δ|=0`,
+  `geographic ==` numpy elem-centroid r2g ref (`≈4.8e-13`≪1e-9), elem scalars `fld_e2`/`fld_e3` `max|Δ|=0`,
+  partition-indep `dist_2≡dist_8≡1` `max|Δ|=0`, element nlevels mask fires. ctest 18/18 Intel+GNU; no regression.
 
-**KEY LESSONS (reuse for 2.6):**
+**KEY LESSONS (reuse for F1):**
 - Writer path (decomp_redistribute → zarr_write_chunk; store-create ordering rank0-define+barrier+writers-write) is
   PROVEN — reuse verbatim. POSIX `mkdir` (NOT `execute_command_line`; fork post-MPI_Init SEGFAULTS).
 - xarray: `decode_times=False` to compare raw `time` seconds (else →datetime64); `mask_and_scale=False` for exact;
@@ -370,36 +396,36 @@ tools/run_output_gate.sh                # Stage 2: np 1 2 8, scalars+3D+VECTORS,
 ```
 **Working tree is UNCOMMITTED** (the user commits): new `src/io/mod_io_{zarr,decomp,meshdiag,means}.F90`,
 `src/drivers/fesom_{zarrsmoke,meshdiagdump,outputsmoke}.F90`, `test/test_io_decomp.F90`, `test/test_vector_rotate.F90`,
-`tools/{run_zarrsmoke,run_meshdiag_gate,run_output_gate}.sh`, `tools/zarr_diff.py`, `config/namelist.io`; modified
-`CMakeLists.txt`, `test/CMakeLists.txt`, `src/mesh/mod_mesh_rotate.F90` (vector_r2g),
-`src/drivers/fesom_lifecycle_native_mr.F90`, plan, HANDOFF.
+`test/test_io_means.F90` (namelist parser), `tools/{run_zarrsmoke,run_meshdiag_gate,run_output_gate}.sh`,
+`tools/zarr_diff.py`, `config/namelist.io`; modified `CMakeLists.txt`, `test/CMakeLists.txt`,
+`src/mesh/mod_mesh_rotate.F90` (vector_r2g), `src/io/mod_io_{zarr,means}.F90` (Task 2.6: read-chunk + per-field
+events/knobs/namelist), `src/drivers/fesom_lifecycle_native_mr.F90` (list-driven output), plan, HANDOFF.
 
-**NEXT = Task 2.6 (full `namelist.io` knobs + float32/lz4/chunk-shape/n_writers/filesplit).** The remaining FIELD
-work is done (all field types — 2-D/3-D scalars + node vectors — emit, rotate, mask, partition-indep). 2.6 makes the
-output CONFIGURABLE instead of env-only:
-- **Parse `config/namelist.io`** (a documented TEMPLATE STUB now exists with the full schema — `&nml_general` knobs +
-  `&nml_list` rows; only `vec_frame`/`chunk_horiz`/`n_writers` are live via `FESOM3_*` env today). Stage it into the
-  rundir like the oracle namelists; `FESOM3_*` env stays an override. Mirror the FESOM2 `&diag_list`/`&nml_list` read.
-- **`&nml_list` rows** `'<var>',freq,'unit',precision,'mean|snap'` → drive `means_define_*` registration + per-field
-  `freq`/`unit` (the lifecycle currently registers a FIXED snapshot set + unod/vnod; make it list-driven). Per-field
-  precision (4|8) + mean|snap knobs already exist in `means_define_*` — just wire them from the list.
-- **`chunk_time>1`**: implement the partial-last-time-chunk **read-modify-write** append (deferred from 2.1's
-  chunk_time=1 fresh-chunk path). Gate `chunk_time={1,N}` produce value-identical stores.
-- **global knobs**: `compressor (none|lz4)` (lz4 codec EXISTS in `mod_io_zarr` from Task 0.3 — wire it through
-  `def_field_store`), `chunk_shape (time,vert,horiz)`, `filesplit_freq (y|m)`, **float32 default** (already the
-  `means_define_*` default). Gate: a run with `compressor=lz4` + custom `chunk_shape` + `n_writers` subset still
-  passes partition-independence + round-trip + `ushow` opens it.
-**THEN = Task 2.7 (ELEMENT-based output — the user explicitly asked for this 2026-06-28; do NOT forget).** The user
-needs element velocity **u, v** (`dyn%uv`) AND element scalars — notably **Av** (`dyn%work%Av`) — plus GM
-**bolus_u/bolus_v** (`dyn%fer_uv`). The element decomp ALREADY EXISTS (`mod_io_decomp` `DECOMP_ELEM`, used by
-meshdiag); 2.7 adds an element `t_io_decomp` + elem-centroid coords to `mod_io_means` + `means_define_elem2d/3d` +
-an elem variant of `means_define_vector3d`. ⚠️ FESOM2 `io_r2g` rotates elem vectors at the SIMPLE mean of the 3
-ROTATED node coords (`sum(coord_nod2D(1:2,elem2D_nodes(1:3,e)))/3`, flag_coord=0) — match that (NOT cyclic-aware
-`elem_center`, which is only for the embedded display centroid). Reuse the Task 2.5 gate machinery with elem coords.
+**Task 2.6 (namelist.io knobs + chunk_time/chunk_vert/lz4/n_writers/filesplit + per-field cadence) ✅ DONE** — see
+the Task 2.6 DONE bullet above + the plan. New/modified: `mod_io_zarr` (`zarr_read_chunk`), `mod_io_means` (per-field
+`means_output`/events/RMW/`means_read_namelist`), `fesom_lifecycle_native_mr` (list-driven), `fesom_outputsmoke` +
+`tools/{zarr_diff.py,run_output_gate.sh}`, `test/test_io_means.F90` (+`test/CMakeLists.txt`), `config/namelist.io`.
 
-Then **F1** (full no-regression + gate sweep, incl. the production MR lifecycle byte-gates `max|Δ|=0` both whichEVP +
-the deferred real-lifecycle output integration — a forced run with `FESOM3_OUTPUT` writes unod/vnod/temp/salt/…) +
-**F2** (docs + memory + move plan to `completed/` + tag `m9`).
+**Task 2.7 (ELEMENT output) DONE 2026-06-28** — see the Task 2.7 DONE bullet above + the plan (checkboxes ticked).
+New/modified: `mod_io_means` (element decomp `De` + elem-centroid coords + `means_define_elem2d/3d` +
+`means_define_vector3d_elem` + the shared `add_field` core + entity-context-resolving write path), `fesom_lifecycle_native_mr`
+(u/v/Av/bolus_u/v registration + accumulate), `fesom_outputsmoke` + `tools/{zarr_diff.py,run_output_gate.sh}` (elem
+gate: native==raw + geographic==numpy elem-centroid r2g + partition-indep, all `max|Δ|=0`/≈4.8e-13), `config/namelist.io`.
+
+**F1 (full no-regression + gate sweep) DONE 2026-06-28:** ctest 18/18 Intel+GNU; zarrsmoke + meshdiag + output gate
+(np 1/2/8, native+geographic, Task 2.6 knobs, ELEMENT) all GREEN; production MR lifecycle byte-gate
+(`run_lifecycle_fullynative_gate_multirank.sh`, CORE2 forced np=2) `max|Δ|=0` **both whichEVP** (130 records each,
+worst |Δ|=0) — element-output wiring proven inert/additive; **real-lifecycle output integration DONE** — the same np=2
+run with `FESOM3_OUTPUT`+`FESOM3_OUTPUT_EVERY=1` wrote all 14 default-set stores from the REAL loop (node
+ssh/sst/sss/a_ice/m_ice/m_snow/temp/salt/w/unod/vnod **+ element u/v/Av**), xarray opens each (dims, CF time, finite
+node+elem-centroid coords, 2 records, 244659 elem ≈ 2× node), bolus correctly absent (Fer_GM off).
+
+**NEXT = F2 (FINALIZE — needs the user's go-ahead to commit/tag).** The technical work + docs + memory are DONE; what
+remains is the git ritual: (1) `git add` the M9 Task 2.6+2.7 working tree (mod_io_zarr/mod_io_means/two drivers/
+config/namelist.io/tools{zarr_diff.py,run_output_gate.sh}/test{test_io_means.F90,CMakeLists.txt} + the docs) and commit
+(`feat(m9): Zarr output — Task 2.6 namelist/knobs + Task 2.7 ELEMENT output + F1 sweep`); (2) `git mv` this plan to
+`docs/plans/completed/`; (3) `git tag m9`. Then M9 = DONE; the remaining 1/14 plan box is the MANUAL `ushow` display
+smoke. After m9: **restart/checkpoint** (deferred from M9 brainstorm) or **M3+ physics** per the roadmap below.
 
 M0–M8 COMPLETE & tagged (m0…m8); forcing-perf ✅ RESOLVED (`708fdf4`/`ce2288a`/`1ef9516`; L133).
 

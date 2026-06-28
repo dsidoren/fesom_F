@@ -15,6 +15,7 @@ add_fesom_test(test_io_decomp 1)
 add_fesom_test(test_io_decomp 2)
 add_fesom_test(test_io_decomp 8)
 add_fesom_test(test_vector_rotate 1)
+add_fesom_test(test_io_means 1)
 
 # dump_diff.py self-check (pure python; no external data needed).
 add_test(NAME dump_diff_selftest

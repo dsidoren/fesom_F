@@ -65,7 +65,8 @@ program fesom_lifecycle_native_mr
     use mod_config,         only: use_sw_pene, which_ALE, &
                                   cfg_dt => dt, step_per_day, run_length, run_length_unit, &
                                   runid, RestartInPath, include_fleapyear
-    use mod_clock,          only: clock, clock_init, clock_nsteps, yearnew, daynew, timenew, month
+    use mod_clock,          only: clock, clock_init, clock_nsteps, yearnew, daynew, timenew, month, &
+                                  yearstart, ndpyr, day_in_month, fleapyear, num_day_in_month
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
     use oce_mixing_tke,     only: tke_init
     use oce_shortwave_pene, only: cal_shortwave_rad
@@ -90,9 +91,11 @@ program fesom_lifecycle_native_mr
     use oce_ssh_rhs,        only: init_stiff_mat_ale
     use mod_step_oce,       only: step_oce
     use mod_io_meshdiag,    only: meshdiag_write
-    use mod_io_means,       only: t_io_means, means_init, means_define_node2d, means_define_node3d, &
-                                  means_define_vector3d, means_accumulate, means_begin, means_write, &
-                                  means_finalize
+    use mod_io_means,       only: t_io_means, t_io_config, t_io_entry, t_means_clock, MEANS_MAXF, &
+                                  means_init, means_read_namelist, means_define_node2d, &
+                                  means_define_node3d, means_define_vector3d, means_define_elem2d, &
+                                  means_define_elem3d, means_define_vector3d_elem, means_accumulate, &
+                                  means_has, means_output, means_finalize
     use mod_dump,           only: dump_init, dump_finalize
     implicit none
 
@@ -108,11 +111,15 @@ program fesom_lifecycle_native_mr
     type(t_ic3d_config):: ic
     integer :: n, nz, nl, nzmin, nzmax, e, tr_num, nsteps, ios, env_len, nsw, whichevp
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF
-    ! M9 Stage 2: field output (mod_io_means), env-gated (FESOM3_OUTPUT / FESOM3_OUTPUT_EVERY).
-    type(t_io_means) :: oio
-    logical          :: do_output
-    integer          :: out_every
-    character(len=4096) :: out_env, out_dir_o
+    ! M9 Stage 2: field output (mod_io_means), env-gated (FESOM3_OUTPUT) + configured via namelist.io
+    ! (&nml_general knobs + &nml_list rows; Task 2.6). FESOM3_OUTPUT_EVERY is the no-namelist fallback.
+    type(t_io_means)    :: oio
+    type(t_io_config)   :: iocfg
+    type(t_io_entry)    :: iolist(MEANS_MAXF)
+    type(t_means_clock) :: oclk
+    logical          :: do_output, have_nml
+    integer          :: out_every, n_io, ii
+    character(len=4096) :: out_env, out_dir_o, nml_io_path
     ! M8a: model clock (cold start from FESOM3_START_CLOCK) + run-length driver
     integer            :: clk_d0, clk_y0, clk_unit, idx, ierr
     real(kind=WP)      :: clk_t0, dstat(6)   ! dstat: M8c Step-3 global per-step physical diagnostics
@@ -715,40 +722,43 @@ program fesom_lifecycle_native_mr
         end if
     end block
 
-    ! M9 Stage 2: register snapshot node-scalar output (ssh/sst/sss/a_ice/m_ice/m_snow), env-gated.
-    ! FESOM3_OUTPUT=<dir> turns it on; FESOM3_OUTPUT_EVERY=<k> writes every k steps (default 1).
-    do_output = .false.; out_every = 1
+    ! M9 Stage 2: register field output, env-gated by FESOM3_OUTPUT=<dir>. Configuration (the variable
+    ! list + global writer knobs) comes from namelist.io in the rundir (Task 2.6) when present; otherwise
+    ! the fixed default set at a FESOM3_OUTPUT_EVERY step cadence. FESOM3_* env overrides namelist knobs.
+    do_output = .false.; out_every = 1; have_nml = .false.; n_io = 0
     call get_environment_variable('FESOM3_OUTPUT', out_env)
     if (len_trim(out_env) > 0) then
         do_output = .true.
         out_dir_o = out_env
-        block
-            character(len=64) :: ev
-            integer :: ie
-            call get_environment_variable('FESOM3_OUTPUT_EVERY', ev)
-            if (len_trim(ev) > 0) then; read(ev,*,iostat=ie) out_every; if (ie /= 0) out_every = 1; end if
-            if (out_every < 1) out_every = 1
-        end block
-        call means_init(oio, trim(out_dir_o), mesh, partit, calendar=trim(forc_calendar))
-        call means_define_node2d(oio, 'ssh',    'sea surface elevation',     'm',   std='sea_surface_height_above_geoid')
-        call means_define_node2d(oio, 'sst',    'sea surface temperature',   'C',   std='sea_surface_temperature')
-        call means_define_node2d(oio, 'sss',    'sea surface salinity',      'psu')
-        call means_define_node2d(oio, 'a_ice',  'ice concentration',         '')
-        call means_define_node2d(oio, 'm_ice',  'effective ice thickness',   'm')
-        call means_define_node2d(oio, 'm_snow', 'effective snow thickness',  'm')
-        ! 3-D node fields: T/S on nl-1 layers (vdim nz1), w on nl levels (vdim nz). Below-bottom masked.
-        call means_define_node3d(oio, 'temp', 'sea water potential temperature', 'C', &
-                                 on_full_levels=.false., std='sea_water_potential_temperature')
-        call means_define_node3d(oio, 'salt', 'sea water salinity', 'psu', &
-                                 on_full_levels=.false., std='sea_water_salinity')
-        call means_define_node3d(oio, 'w',    'vertical velocity', 'm/s', on_full_levels=.true.)
-        ! node velocity vector pair unod/vnod (dyn%uvnode(1/2,:,:), nl-1 layers) = FESOM2's default
-        ! velocity output; r2g-rotated to geographic at write (FESOM3_VEC_FRAME=native keeps the
-        ! rotated-mesh components). Accumulated independently; rotated together in means_write.
-        call means_define_vector3d(oio, 'unod', 'vnod', 'zonal velocity at nodes', &
-                                   'meridional velocity at nodes', 'm/s', on_full_levels=.false.)
-        if (partit%mype == 0) write(*,'(a,i0,a)') 'M9: field output ON -> '//trim(out_dir_o)// &
-            ' (every ', out_every, ' steps)'
+        call get_environment_variable('FESOM3_OUTPUT_EVERY', env)
+        if (len_trim(env) > 0) then; read(env,*,iostat=ios) out_every; if (ios /= 0) out_every = 1; end if
+        if (out_every < 1) out_every = 1
+        ! namelist.io (rundir): &nml_general global knobs + &nml_list output variable rows.
+        call get_environment_variable('FESOM3_NAMELIST_IO', nml_io_path)
+        if (len_trim(nml_io_path) == 0) nml_io_path = 'namelist.io'
+        call means_read_namelist(trim(nml_io_path), iocfg, iolist, n_io, have_nml)
+        if (have_nml) then
+            call means_init(oio, trim(out_dir_o), mesh, partit, calendar=trim(forc_calendar), &
+                            chunk_horiz=iocfg%chunk_horiz, n_writers=iocfg%n_writers, &
+                            chunk_time=iocfg%chunk_time, chunk_vert=iocfg%chunk_vert, &
+                            compressor=trim(iocfg%compressor), filesplit_freq=iocfg%filesplit_freq, &
+                            vec_frame=trim(iocfg%vec_frame))
+            do ii = 1, n_io
+                call register_output_var(oio, iolist(ii))
+            end do
+        else
+            call means_init(oio, trim(out_dir_o), mesh, partit, calendar=trim(forc_calendar))
+            call register_default_outputs(oio, out_every)
+        end if
+        if (partit%mype == 0) then
+            if (have_nml) then
+                write(*,'(a,i0,a)') 'M9: field output ON -> '//trim(out_dir_o)//' (namelist.io: ', &
+                    n_io, ' streams)'
+            else
+                write(*,'(a,i0,a)') 'M9: field output ON -> '//trim(out_dir_o)// &
+                    ' (default set, every ', out_every, ' steps)'
+            end if
+        end if
     end if
 
     !===========================================================================
@@ -785,23 +795,32 @@ program fesom_lifecycle_native_mr
                       atm%real_salt_flux, is_nonlinfs, stress_surf, partit, &   ! M6a-4: native rsf (zstar)
                       stress_node_surf=atm%stress_node_surf)
         call timer_stop(TMR_STEP_OCE)
-        ! M9 Stage 2: snapshot field output (state is the step's final value; ABOVE the step_diag
-        ! cycle so production steps output too). time = seconds since year start (per-year store ref).
-        if (do_output .and. mod(n, out_every) == 0) then
-            ! all six are snapshot streams (count=1) -> accumulate the live value then write the record.
-            call means_accumulate(oio, 'ssh',    dyn%eta_n(1:nNodO))
-            call means_accumulate(oio, 'sst',    tracers%data(1)%values(1,1:nNodO))
-            call means_accumulate(oio, 'sss',    tracers%data(2)%values(1,1:nNodO))
-            call means_accumulate(oio, 'a_ice',  ice%data(1)%values(1:nNodO))
-            call means_accumulate(oio, 'm_ice',  ice%data(2)%values(1:nNodO))
-            call means_accumulate(oio, 'm_snow', ice%data(3)%values(1:nNodO))
-            call means_accumulate(oio, 'temp',   tracers%data(1)%values(1:nl-1, 1:nNodO))
-            call means_accumulate(oio, 'salt',   tracers%data(2)%values(1:nl-1, 1:nNodO))
-            call means_accumulate(oio, 'w',      dyn%w(1:nl, 1:nNodO))
-            call means_accumulate(oio, 'unod',   dyn%uvnode(1, 1:nl-1, 1:nNodO))
-            call means_accumulate(oio, 'vnod',   dyn%uvnode(2, 1:nl-1, 1:nNodO))
-            call means_begin(oio, yearnew, real(daynew-1,real64)*86400.0_real64 + real(timenew,real64))
-            call means_write(oio)
+        ! M9 Stage 2: field output. Accumulate the live (post-step_oce) state EVERY step (FESOM2
+        ! update_means) — snapshots overwrite (count=1), means sum — then means_output evaluates each
+        ! field's freq/unit event to decide which write now. ABOVE the step_diag cycle so production
+        ! steps output too. Only registered fields accumulate (means_has).
+        if (do_output) then
+            if (means_has(oio,'ssh'))    call means_accumulate(oio,'ssh',    dyn%eta_n(1:nNodO))
+            if (means_has(oio,'sst'))    call means_accumulate(oio,'sst',    tracers%data(1)%values(1,1:nNodO))
+            if (means_has(oio,'sss'))    call means_accumulate(oio,'sss',    tracers%data(2)%values(1,1:nNodO))
+            if (means_has(oio,'a_ice'))  call means_accumulate(oio,'a_ice',  ice%data(1)%values(1:nNodO))
+            if (means_has(oio,'m_ice'))  call means_accumulate(oio,'m_ice',  ice%data(2)%values(1:nNodO))
+            if (means_has(oio,'m_snow')) call means_accumulate(oio,'m_snow', ice%data(3)%values(1:nNodO))
+            if (means_has(oio,'temp'))   call means_accumulate(oio,'temp',   tracers%data(1)%values(1:nl-1, 1:nNodO))
+            if (means_has(oio,'salt'))   call means_accumulate(oio,'salt',   tracers%data(2)%values(1:nl-1, 1:nNodO))
+            if (means_has(oio,'w'))      call means_accumulate(oio,'w',      dyn%w(1:nl, 1:nNodO))
+            if (means_has(oio,'unod'))   call means_accumulate(oio,'unod',   dyn%uvnode(1, 1:nl-1, 1:nNodO))
+            if (means_has(oio,'vnod'))   call means_accumulate(oio,'vnod',   dyn%uvnode(2, 1:nl-1, 1:nNodO))
+            ! Task 2.7 ELEMENT fields (owned elements nElemO): u/v (dyn%uv), Av (full levels), GM bolus.
+            if (means_has(oio,'u'))      call means_accumulate(oio,'u',      dyn%uv(1, 1:nl-1, 1:nElemO))
+            if (means_has(oio,'v'))      call means_accumulate(oio,'v',      dyn%uv(2, 1:nl-1, 1:nElemO))
+            if (means_has(oio,'Av'))     call means_accumulate(oio,'Av',     dyn%work%Av(1:nl, 1:nElemO))
+            if (means_has(oio,'bolus_u')) call means_accumulate(oio,'bolus_u', dyn%fer_uv(1, 1:nl-1, 1:nElemO))
+            if (means_has(oio,'bolus_v')) call means_accumulate(oio,'bolus_v', dyn%fer_uv(2, 1:nl-1, 1:nElemO))
+            oclk%year = yearnew; oclk%yearstart = yearstart; oclk%daynew = daynew; oclk%ndpyr = ndpyr
+            oclk%month = month;  oclk%day_in_month = day_in_month
+            oclk%ndim_month = num_day_in_month(fleapyear, month); oclk%timenew = real(timenew, real64)
+            call means_output(oio, n, oclk)
         end if
         ! perf monitoring: periodic (cumulative) per-component timing report every mon_every steps.
         ! Collective (all ranks call it — placed before the step_diag cycle); 0 => only the final report.
@@ -839,6 +858,113 @@ program fesom_lifecycle_native_mr
     call par_ex(partit%MPI_COMM_FESOM, partit%mype)
 
 contains
+
+    ! M9 Task 2.6: register one output stream from a parsed namelist.io row (id + freq/unit/precision/
+    ! mean|snap), dispatching the FESOM3 field's fixed name/long_name/units/kind. Unknown ids warn+skip.
+    ! 'unod' registers the unod/vnod vector PAIR; a lone 'vnod' row is then a no-op.
+    subroutine register_output_var(io, e)
+        type(t_io_means), intent(inout) :: io
+        type(t_io_entry), intent(in)    :: e
+        character(len=8) :: prec
+        logical          :: ismean
+        integer          :: fr
+        character(len=1) :: un
+        prec = '<f4'; if (e%precision == 8) prec = '<f8'
+        ismean = (trim(e%op) == 'mean')
+        fr = e%freq; un = e%unit
+        select case (trim(e%id))
+        case ('ssh')
+            call means_define_node2d(io,'ssh','sea surface elevation','m', &
+                 std='sea_surface_height_above_geoid', precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('sst')
+            call means_define_node2d(io,'sst','sea surface temperature','C', &
+                 std='sea_surface_temperature', precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('sss')
+            call means_define_node2d(io,'sss','sea surface salinity','psu', &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('a_ice')
+            call means_define_node2d(io,'a_ice','ice concentration','', &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('m_ice')
+            call means_define_node2d(io,'m_ice','effective ice thickness','m', &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('m_snow')
+            call means_define_node2d(io,'m_snow','effective snow thickness','m', &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('temp')
+            call means_define_node3d(io,'temp','sea water potential temperature','C', &
+                 on_full_levels=.false., std='sea_water_potential_temperature', &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('salt')
+            call means_define_node3d(io,'salt','sea water salinity','psu', &
+                 on_full_levels=.false., std='sea_water_salinity', &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('w')
+            call means_define_node3d(io,'w','vertical velocity','m/s', &
+                 on_full_levels=.true., precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('unod')
+            call means_define_vector3d(io,'unod','vnod','zonal velocity at nodes', &
+                 'meridional velocity at nodes','m/s', on_full_levels=.false., &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('vnod')
+            continue   ! registered together with 'unod' (the vector pair)
+        ! Task 2.7 ELEMENT outputs (user-requested): element velocity u/v (dyn%uv), vertical viscosity
+        ! Av (dyn%work%Av, full levels), GM bolus u/v (dyn%fer_uv, Fer_GM only).
+        case ('u')
+            call means_define_vector3d_elem(io,'u','v','zonal velocity at elements', &
+                 'meridional velocity at elements','m/s', on_full_levels=.false., &
+                 precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('v')
+            continue   ! registered together with 'u' (the element vector pair)
+        case ('Av')
+            call means_define_elem3d(io,'Av','vertical viscosity (momentum)','m2/s', &
+                 on_full_levels=.true., precision=prec, mean=ismean, freq=fr, unit=un)
+        case ('bolus_u')
+            if (use_fer_gm) then
+                call means_define_vector3d_elem(io,'bolus_u','bolus_v','GM bolus velocity x', &
+                     'GM bolus velocity y','m/s', on_full_levels=.false., &
+                     precision=prec, mean=ismean, freq=fr, unit=un)
+            else if (partit%mype == 0) then
+                write(*,'(a)') 'M9 WARNING: bolus_u/bolus_v requested but Fer_GM off (skipped)'
+            end if
+        case ('bolus_v')
+            continue   ! registered together with 'bolus_u'
+        case default
+            if (partit%mype == 0) &
+                write(*,'(a)') 'M9 WARNING: unknown output var "'//trim(e%id)//'" (skipped)'
+        end select
+    end subroutine register_output_var
+
+    ! the no-namelist fallback default set (FESOM3_OUTPUT without a namelist.io): the snapshot fields
+    ! the env path always produced, on a per-step cadence (freq=every step, unit='s').
+    subroutine register_default_outputs(io, every)
+        type(t_io_means), intent(inout) :: io
+        integer,          intent(in)    :: every
+        call means_define_node2d(io,'ssh','sea surface elevation','m', &
+             std='sea_surface_height_above_geoid', freq=every, unit='s')
+        call means_define_node2d(io,'sst','sea surface temperature','C', &
+             std='sea_surface_temperature', freq=every, unit='s')
+        call means_define_node2d(io,'sss','sea surface salinity','psu', freq=every, unit='s')
+        call means_define_node2d(io,'a_ice','ice concentration','', freq=every, unit='s')
+        call means_define_node2d(io,'m_ice','effective ice thickness','m', freq=every, unit='s')
+        call means_define_node2d(io,'m_snow','effective snow thickness','m', freq=every, unit='s')
+        call means_define_node3d(io,'temp','sea water potential temperature','C', &
+             on_full_levels=.false., std='sea_water_potential_temperature', freq=every, unit='s')
+        call means_define_node3d(io,'salt','sea water salinity','psu', &
+             on_full_levels=.false., std='sea_water_salinity', freq=every, unit='s')
+        call means_define_node3d(io,'w','vertical velocity','m/s', on_full_levels=.true., &
+             freq=every, unit='s')
+        call means_define_vector3d(io,'unod','vnod','zonal velocity at nodes', &
+             'meridional velocity at nodes','m/s', on_full_levels=.false., freq=every, unit='s')
+        ! Task 2.7 element fields: u/v (dyn%uv) + Av (full levels); bolus only when Fer_GM is on.
+        call means_define_vector3d_elem(io,'u','v','zonal velocity at elements', &
+             'meridional velocity at elements','m/s', on_full_levels=.false., freq=every, unit='s')
+        call means_define_elem3d(io,'Av','vertical viscosity (momentum)','m2/s', &
+             on_full_levels=.true., freq=every, unit='s')
+        if (use_fer_gm) &
+            call means_define_vector3d_elem(io,'bolus_u','bolus_v','GM bolus velocity x', &
+                 'GM bolus velocity y','m/s', on_full_levels=.false., freq=every, unit='s')
+    end subroutine register_default_outputs
 
     ! compute the native CORE2 atmosphere over owned+halo (nNodL): the 8 NCAR fields
     ! (timeinterp at the per-step rdate) + the NCAR bulk (Ch/Ce, live srfoce) + stress_atmoce

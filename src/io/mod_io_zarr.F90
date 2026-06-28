@@ -58,6 +58,14 @@ module mod_io_zarr
             integer(c_int), value :: srcsz, dstcap
             integer(c_int)        :: r
         end function c_lz4_compress
+        ! int LZ4_decompress_safe(const char* src, char* dst, int compressedSize, int dstCapacity);
+        ! the inverse of LZ4_compress_default — decodes a chunk for the chunk_time>1 read-modify-write.
+        function c_lz4_decompress(src, dst, csize, dstcap) bind(C, name="LZ4_decompress_safe") result(r)
+            import :: c_ptr, c_int
+            type(c_ptr), value    :: src, dst
+            integer(c_int), value :: csize, dstcap
+            integer(c_int)        :: r
+        end function c_lz4_decompress
     end interface
 #endif
 
@@ -94,7 +102,7 @@ module mod_io_zarr
     public :: zarr_array_init, zarr_attrs_init
     public :: zattr_str, zattr_int, zattr_real
     public :: zattr_str_arr, zattr_int_arr, zattr_real_arr
-    public :: zarr_write_whole, zarr_write_chunk
+    public :: zarr_write_whole, zarr_write_chunk, zarr_read_chunk
     public :: zarr_check
 
     interface zarr_write_whole
@@ -107,6 +115,14 @@ module mod_io_zarr
                          zarr_write_chunk_3d_real, &
                          zarr_write_chunk_1d_int,  zarr_write_chunk_2d_int
     end interface zarr_write_chunk
+
+    ! Read a chunk file back into a FULL chunk-sized Fortran array (codec-decoded, C->Fortran
+    ! un-transpose). A missing file => the array filled with arr%fill. Used by mod_io_means for the
+    ! chunk_time>1 read-modify-write append (Task 2.6): the partial time-chunk already on disk is
+    ! read, the new time slot is overwritten, and the whole chunk is re-written.
+    interface zarr_read_chunk
+        module procedure zarr_read_chunk_1d_real, zarr_read_chunk_2d_real, zarr_read_chunk_3d_real
+    end interface zarr_read_chunk
 
 contains
 
@@ -628,6 +644,128 @@ contains
         end do
         call emit_i4(chunk_path(store, arr, cidx), bi, trim(arr%codec))
     end subroutine zarr_write_chunk_2d_int
+
+    ! ------------------------------------------------------------------ chunk readers (RMW append)
+
+    ! Read a chunk file into `raw` (nbytes decoded bytes), applying the codec inverse. Returns
+    ! exist=.false. (and leaves raw unallocated) when the chunk file is absent — the caller then
+    ! treats the chunk as all-fill (a fresh time-chunk). none => raw bytes verbatim; lz4 => strip the
+    ! 4-byte numcodecs length header and LZ4_decompress_safe the block.
+    subroutine read_chunk_bytes(path, nbytes, raw, exist, codec)
+        character(len=*), intent(in)                            :: path, codec
+        integer,          intent(in)                            :: nbytes
+        integer(int8),    intent(out), allocatable, target      :: raw(:)
+        logical,          intent(out)                           :: exist
+        integer(int8),    allocatable, target :: filebytes(:)
+        integer :: u, ios, fsz
+        exist = .false.
+        inquire(file=trim(path), exist=exist)
+        if (.not. exist) return
+        open(newunit=u, file=trim(path), status='old', action='read', &
+             form='unformatted', access='stream', iostat=ios)
+        call zarr_check(ios == 0, 'open(read chunk) '//trim(path))
+        inquire(unit=u, size=fsz)
+        allocate(filebytes(max(1,fsz)))
+        if (fsz > 0) read(u) filebytes(1:fsz)
+        close(u)
+        select case (trim(codec))
+        case ('none')
+            call zarr_check(fsz == nbytes, 'read_chunk(none) size mismatch '//trim(path))
+            raw = filebytes(1:nbytes)
+        case ('lz4')
+#ifdef HAVE_LZ4
+            block
+                integer(int32) :: declen
+                integer(c_int) :: r
+                call zarr_check(fsz >= 4, 'read_chunk(lz4) short header '//trim(path))
+                declen = transfer(filebytes(1:4), declen)
+                call zarr_check(int(declen) == nbytes, 'read_chunk(lz4) declen mismatch '//trim(path))
+                allocate(raw(nbytes))
+                r = c_lz4_decompress(c_loc(filebytes(5)), c_loc(raw(1)), &
+                                     int(fsz - 4, c_int), int(nbytes, c_int))
+                call zarr_check(int(r) == nbytes, 'LZ4_decompress_safe failed '//trim(path))
+            end block
+#else
+            call zarr_check(.false., 'lz4 chunk read but HAVE_LZ4 off (relink with liblz4)')
+#endif
+        case default
+            call zarr_check(.false., 'read_chunk unknown codec '//trim(codec))
+        end select
+    end subroutine read_chunk_bytes
+
+    ! 1-D real chunk -> out(1:c0) (WP). Missing file => out = fill. Used for the time coord.
+    subroutine zarr_read_chunk_1d_real(store, arr, cidx, out)
+        type(t_zarr_store), intent(in)  :: store
+        type(t_zarr_array), intent(in)  :: arr
+        integer,            intent(in)  :: cidx(:)
+        real(WP),           intent(out) :: out(:)
+        integer(int8), allocatable, target :: raw(:)
+        real(real64), allocatable :: b8(:)
+        real(real32), allocatable :: b4(:)
+        logical :: exist
+        integer :: c0, nb
+        c0 = arr%chunks(1)
+        if (trim(arr%dtype) == '<f8') then; nb = 8*c0; else; nb = 4*c0; end if
+        call read_chunk_bytes(chunk_path(store, arr, cidx), nb, raw, exist, trim(arr%codec))
+        if (.not. exist) then; out(1:c0) = real(arr%fill, WP); return; end if
+        if (trim(arr%dtype) == '<f8') then
+            b8 = transfer(raw, 0.0_real64, c0); out(1:c0) = real(b8, WP)
+        else
+            b4 = transfer(raw, 0.0_real32, c0); out(1:c0) = real(b4, WP)
+        end if
+    end subroutine zarr_read_chunk_1d_real
+
+    ! 2-D real chunk -> out(1:c0,1:c1) (WP), un-transposing C row-major. Missing => out = fill.
+    subroutine zarr_read_chunk_2d_real(store, arr, cidx, out)
+        type(t_zarr_store), intent(in)  :: store
+        type(t_zarr_array), intent(in)  :: arr
+        integer,            intent(in)  :: cidx(:)
+        real(WP),           intent(out) :: out(:,:)
+        integer(int8), allocatable, target :: raw(:)
+        real(real64), allocatable :: b8(:)
+        real(real32), allocatable :: b4(:)
+        logical :: exist
+        integer :: c0, c1, nb, i0, i1
+        c0 = arr%chunks(1); c1 = arr%chunks(2)
+        if (trim(arr%dtype) == '<f8') then; nb = 8*c0*c1; else; nb = 4*c0*c1; end if
+        call read_chunk_bytes(chunk_path(store, arr, cidx), nb, raw, exist, trim(arr%codec))
+        if (.not. exist) then; out(1:c0,1:c1) = real(arr%fill, WP); return; end if
+        if (trim(arr%dtype) == '<f8') then
+            b8 = transfer(raw, 0.0_real64, c0*c1)
+            do i0 = 1, c0; do i1 = 1, c1; out(i0,i1) = real(b8((i0-1)*c1 + i1), WP); end do; end do
+        else
+            b4 = transfer(raw, 0.0_real32, c0*c1)
+            do i0 = 1, c0; do i1 = 1, c1; out(i0,i1) = real(b4((i0-1)*c1 + i1), WP); end do; end do
+        end if
+    end subroutine zarr_read_chunk_2d_real
+
+    ! 3-D real chunk -> out(1:c0,1:c1,1:c2) (WP), un-transposing C row-major. Missing => out = fill.
+    subroutine zarr_read_chunk_3d_real(store, arr, cidx, out)
+        type(t_zarr_store), intent(in)  :: store
+        type(t_zarr_array), intent(in)  :: arr
+        integer,            intent(in)  :: cidx(:)
+        real(WP),           intent(out) :: out(:,:,:)
+        integer(int8), allocatable, target :: raw(:)
+        real(real64), allocatable :: b8(:)
+        real(real32), allocatable :: b4(:)
+        logical :: exist
+        integer :: c0, c1, c2, nb, i0, i1, i2
+        c0 = arr%chunks(1); c1 = arr%chunks(2); c2 = arr%chunks(3)
+        if (trim(arr%dtype) == '<f8') then; nb = 8*c0*c1*c2; else; nb = 4*c0*c1*c2; end if
+        call read_chunk_bytes(chunk_path(store, arr, cidx), nb, raw, exist, trim(arr%codec))
+        if (.not. exist) then; out(1:c0,1:c1,1:c2) = real(arr%fill, WP); return; end if
+        if (trim(arr%dtype) == '<f8') then
+            b8 = transfer(raw, 0.0_real64, c0*c1*c2)
+            do i0 = 1, c0; do i1 = 1, c1; do i2 = 1, c2
+                out(i0,i1,i2) = real(b8((i0-1)*c1*c2 + (i1-1)*c2 + i2), WP)
+            end do; end do; end do
+        else
+            b4 = transfer(raw, 0.0_real32, c0*c1*c2)
+            do i0 = 1, c0; do i1 = 1, c1; do i2 = 1, c2
+                out(i0,i1,i2) = real(b4((i0-1)*c1*c2 + (i1-1)*c2 + i2), WP)
+            end do; end do; end do
+        end if
+    end subroutine zarr_read_chunk_3d_real
 
     ! ------------------------------------------------------------------ whole-array writers
     ! Convenience for the 1-rank / single-writer path: write every chunk of a full in-memory array.

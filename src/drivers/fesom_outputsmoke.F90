@@ -28,10 +28,14 @@ program fesom_outputsmoke
     type(t_partit) :: partit
     type(t_mesh)   :: mesh
     type(t_io_means) :: io
+    type(t_means_clock) :: clk
     logical :: mr
     integer :: nsw, nrec, k, i, j, L, nl, ios, gid
-    integer :: nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF
-    real(WP), allocatable :: fld_a(:), fld_b(:), fld_m(:), fld_3(:,:), fld_u(:,:), fld_v(:,:)
+    integer :: nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF, ge
+    real(WP), allocatable :: fld_a(:), fld_b(:), fld_m(:), fld_3(:,:), fld_u(:,:), fld_v(:,:), fld_f2(:)
+    ! Task 2.7 ELEMENT fields: fld_e2 (2-D scalar), fld_e3 (3-D scalar, full levels nz), fld_eu/fld_ev
+    ! (3-D vector pair, nz1 layers) — exercise the element decomp + elem-centroid r2g + element mask.
+    real(WP), allocatable :: fld_e2(:), fld_e3(:,:), fld_eu(:,:), fld_ev(:,:)
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -67,9 +71,22 @@ program fesom_outputsmoke
     ! vector pairing + per-node rotation + that it stays partition-independent (canonical node coords).
     call means_define_vector3d(io, 'fld_u', 'fld_v', 'synthetic vector u', 'synthetic vector v', 'm/s', &
                                on_full_levels=.false., precision='double')
+    ! fld_f2: a 2-D snapshot on a freq=2 STEP cadence (Task 2.6) — written only when mod(istep,2)==0,
+    ! so it ends up with floor(nrec/2) records. Value = gid+1000 (k-independent) so the gate checks the
+    ! per-field step_event fired (record count) without needing the k->istep mapping.
+    call means_define_node2d(io, 'fld_f2', 'synthetic freq-2 snapshot', '1', freq=2, unit='s')
+    ! Task 2.7 ELEMENT streams (canonical elem id g): fld_e2 2-D scalar; fld_e3 3-D scalar on FULL levels
+    ! (nz, voff=0 — the element nlevels mask); fld_eu/fld_ev 3-D vector pair on nz1 layers, r2g-rotated at
+    ! the elem centroid (geographic) or raw (native), f8 so native is bit-exact + numpy reproduces the rot.
+    call means_define_elem2d(io, 'fld_e2', 'synthetic element scalar', '1')
+    call means_define_elem3d(io, 'fld_e3', 'synthetic element 3d (full levels)', 'X', on_full_levels=.true.)
+    call means_define_vector3d_elem(io, 'fld_eu', 'fld_ev', 'synthetic elem vector u', &
+                                    'synthetic elem vector v', 'm/s', on_full_levels=.false., precision='double')
 
     allocate(fld_a(max(1,nNodO)), fld_b(max(1,nNodO)), fld_m(max(1,nNodO)), fld_3(nl-1, max(1,nNodO)), &
-             fld_u(nl-1, max(1,nNodO)), fld_v(nl-1, max(1,nNodO)))
+             fld_u(nl-1, max(1,nNodO)), fld_v(nl-1, max(1,nNodO)), fld_f2(max(1,nNodO)), &
+             fld_e2(max(1,nElemO)), fld_e3(nl, max(1,nElemO)), &
+             fld_eu(nl-1, max(1,nElemO)), fld_ev(nl-1, max(1,nElemO)))
     do k = 0, nrec - 1
         ! mean stream: accumulate 3 sub-steps (g-1, g, g+1) -> mean = g
         do j = 1, 3
@@ -109,9 +126,38 @@ program fesom_outputsmoke
         end do
         call means_accumulate(io, 'fld_u', fld_u(1:nl-1, 1:nNodO))
         call means_accumulate(io, 'fld_v', fld_v(1:nl-1, 1:nNodO))
+        ! freq-2 field: snapshot value gid+1000 (constant in k)
+        do i = 1, nNodO
+            gid = i
+            if (mr) gid = partit%myList_nod2D(i)
+            fld_f2(i) = real(gid, WP) + 1000.0_WP
+        end do
+        call means_accumulate(io, 'fld_f2', fld_f2(1:nNodO))
+        ! ELEMENT fields (canonical elem id ge): e2=0.1*ge+500; e3(L)=ge+100*L (full levels nz);
+        ! eu(L)=0.001*ge+0.5*L, ev(L)=-0.002*ge+0.25*L+1 (same form as the node vector, at elem coords).
+        do i = 1, nElemO
+            ge = i
+            if (mr) ge = partit%myList_elem2D(i)
+            fld_e2(i) = real(ge, WP) + 500.0_WP        ! integer-valued => float32-exact (no round-off)
+            do L = 1, nl
+                fld_e3(L,i) = real(ge, WP) + real(L, WP)*100.0_WP
+            end do
+            do L = 1, nl-1
+                fld_eu(L,i) = real(ge,WP)*0.001_WP    + real(L,WP)*0.5_WP
+                fld_ev(L,i) = real(ge,WP)*(-0.002_WP) + real(L,WP)*0.25_WP + 1.0_WP
+            end do
+        end do
+        call means_accumulate(io, 'fld_e2', fld_e2(1:nElemO))
+        call means_accumulate(io, 'fld_e3', fld_e3(1:nl,   1:nElemO))
+        call means_accumulate(io, 'fld_eu', fld_eu(1:nl-1, 1:nElemO))
+        call means_accumulate(io, 'fld_ev', fld_ev(1:nl-1, 1:nElemO))
 
-        call means_begin(io, 2000, real(k, real64) * 3600.0_real64)
-        call means_write(io)
+        ! synthetic clock: year 2000, day 1, timenew = k*3600 -> time_sec = k*3600 (matches the gate).
+        ! istep = k+1 drives the per-field STEP events (fld_f2 freq=2 => due at even istep).
+        clk%year = 2000; clk%yearstart = 2000; clk%daynew = 1; clk%ndpyr = 365
+        clk%month = 1;   clk%day_in_month = 1; clk%ndim_month = 31
+        clk%timenew = real(k, real64) * 3600.0_real64
+        call means_output(io, k + 1, clk)
     end do
     call means_finalize(io)
 

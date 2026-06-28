@@ -349,19 +349,33 @@ rotation + `vec_frame`); `src/drivers/fesom_lifecycle_native_mr.F90` (register/a
       both frames; below-bottom masked. ctest 17/17 Intel+GNU. (vs-FESOM2 by transitivity: state byte-exact thru
       M8 + `vector_r2g` verbatim + round-trip ctest + writer self-consistency — no FESOM2 oracle, as 2.1–2.4.)
 
-#### Task 2.6: full namelist.io knobs + float32/lz4/chunk-shape/n_writers/filesplit
+#### Task 2.6: full namelist.io knobs + float32/lz4/chunk-shape/n_writers/filesplit ✅
 
 **Files:**
-- Modify: `src/io/mod_io_means.F90`, `config/namelist.io`
+- Modify: `src/io/mod_io_means.F90` (per-field cadence + global knobs + RMW + chunk_vert + filesplit +
+  `means_read_namelist`), `src/io/mod_io_zarr.F90` (`zarr_read_chunk` + lz4 decode), `config/namelist.io`,
+  `src/drivers/fesom_lifecycle_native_mr.F90` (list-driven registration + `means_output`),
+  `src/drivers/fesom_outputsmoke.F90` + `tools/{zarr_diff.py,run_output_gate.sh}` (knob-sweep gate),
+  `test/test_io_means.F90` (+ `test/CMakeLists.txt`) (namelist parser ctest).
 
-- [ ] expose all knobs: per-field `freq`/`unit`/`precision`/`mean|snap`/`frame`; global `n_writers`,
-      `chunk_shape (time,vert,horiz)`, `compressor (none|lz4)`, `filesplit_freq`; float32 default
-- [ ] `chunk_time>1`: implement the partial-last-time-chunk **read-modify-write** append path (deferred from
-      Task 2.1's `chunk_time=1`); gate that `chunk_time={1,N}` produce value-identical stores
-- [ ] **gate:** a run with `compressor=lz4` + custom `chunk_shape` + `n_writers` subset still passes
-      partition-independence + round-trip + `ushow` opens it
+- [x] expose all knobs: per-field `freq`/`unit`/`precision`/`mean|snap`/`frame`; global `n_writers`,
+      `chunk_shape (time,vert,horiz)`, `compressor (none|lz4)`, `filesplit_freq` (y|m); float32 default.
+      Per-field cadence drives FESOM2-ported events (`event_due`: annual/monthly/daily/hourly/step) — each
+      field keeps its OWN record counter `t` + period store; `means_begin`/`means_write` replaced by
+      `means_output(io, istep, t_means_clock)`. Lifecycle now LIST-DRIVEN from `namelist.io`
+      (`means_read_namelist` + `register_output_var` dispatch; env-fallback default set preserved).
+- [x] `chunk_time>1`: partial-last-time-chunk **read-modify-write** append (`zarr_read_chunk` 1d/2d/3d +
+      lz4 decode in `mod_io_zarr`; `emit_chunks_2d/3d` + `finish_record` do tc=t/ct, slot=mod(t,ct), RMW).
+      Gate `chunk_time={1,2,3}` value-identical to base `max|Δ|=0`.
+- [x] **gate:** `run_output_gate.sh` knob sweep (`fesom_outputsmoke`): `compressor=lz4` + custom
+      `chunk_shape` (chunk_time=3, chunk_vert=12, chunk_horiz=1000) + `n_writers=2` subset → round-trip
+      (`--output`) PASS + value-identical to base (`--output-cmp` `max|Δ|=0`) + partition-independence
+      WITH knobs on (combo np1 ≡ np2 `max|Δ|=0`). Per-field freq=2 (`fld_f2`) => floor(nrec/2) records.
+      `test_io_means` ctest pins the derived-type-array `&nml_list` parse on Intel+GNU. ctest 17→18
+      Intel+GNU; no regression (zarrsmoke + meshdiag GREEN). `ushow` = manual. (filesplit 'm' implemented;
+      live-lifecycle multi-cadence output exercised in F1.)
 
-#### Task 2.7: ELEMENT-based output (u/v vectors + Av + bolus) ➕ USER-REQUESTED (2026-06-28)
+#### Task 2.7: ELEMENT-based output (u/v vectors + Av + bolus) ✅ ➕ USER-REQUESTED (2026-06-28)
 
 The user explicitly needs **element output** in addition to the node fields: element velocity **u, v**
 (`dynamics%uv`), and element SCALARS — notably **Av** (vertical viscosity, `nl` levels, elem) — plus the GM
@@ -373,31 +387,43 @@ real FESOM2 outputs; this adds the element source. (FESOM2 element streams: `u`,
 coords), `src/io/mod_io_meshdiag.F90` (reuse elem-centroid `lon`/`lat`), `src/drivers/fesom_lifecycle_native_mr.F90`,
 `src/drivers/fesom_outputsmoke.F90` + `tools/{zarr_diff.py,run_output_gate.sh}` (elem gate).
 
-- [ ] add an ELEMENT decomp to `t_io_means` (a 2nd `t_io_decomp De` via `decomp_init_entity(.., DECOMP_ELEM, ..)`
-      — the selector ALREADY EXISTS, used by meshdiag) + cache elem-centroid `lon`/`lat` (geographic, for embed)
-      and the ROTATED centroid coords for r2g. ⚠️ FESOM2 `io_r2g` rotates element vectors at the **simple mean of
-      the 3 ROTATED node coords** `sum(coord_nod2D(1:2,elem2D_nodes(1:3,e)))/3` with `flag_coord=0` (NOT cyclic-
-      aware `elem_center`) — match that for byte-faithfulness; `elem_center(mesh,n,cx,cy)` (`mod_mesh_areas.F90:178`,
-      cyclic-aware) is fine for the EMBEDDED display centroid.
-- [ ] `means_define_elem2d`/`means_define_elem3d` (scalars: **Av** `nl`/elem; the `is_elem` flag routes
-      write_data_* through `De` instead of `Dn`) + an element variant of `means_define_vector3d` (u/v, bolus) using
-      the elem-centroid rotation. The mask is element `nlevels`-based (below-bottom → NC_FILL).
-- [ ] register **u, v** (`dyn%uv(1:2,:,:)`, nl-1), **Av** (`dyn%work%Av`, nl), **bolus_u/v** (`dyn%fer_uv`, Fer_GM
-      only) in the lifecycle; embed elem-centroid `lon`/`lat`.
-- [ ] **gate:** elem `native==raw` `max|Δ|=0` + `geographic==`numpy elem-centroid r2g reference + partition-indep
-      `dist_2≡dist_8`; reuse the Task 2.5 vector gate machinery with elem coords. (vs-FESOM2 by transitivity.)
+- [x] added the ELEMENT decomp `De` to `t_io_means` (`decomp_init_entity(De, .., DECOMP_ELEM, ..)`) + cached
+      owned elem-centroid coords: ROTATED centroid `relon/relat_owned = sum(coord_nod2D(1:2,elem2D_nodes(1:3,e)))/3`
+      (FESOM2 io_r2g:3004 VERBATIM, flag_coord=0) for the vector r2g, and the GEOGRAPHIC centroid `elon/elat_owned
+      = r2g(rotated centroid)` (deg) for the embed. `enlev_owned = mesh%nlevels(e)` for the 3-D mask.
+- [x] `means_define_elem2d`/`means_define_elem3d` + `means_define_vector3d_elem` (per-field `is_elem` flag routes
+      the write through `De`/elem coords/elem nlevels mask). Refactored the registration into a shared `add_field`
+      core + node/elem wrappers; the write path resolves the entity context (`D`/`nO`/`nlevown`/`rlon`/`rlat`) once
+      in `write_one_field` (pointer into the target `io`) and threads it through the scalar/vector writers +
+      `emit_chunks`/`put_static`/`open_field_store`. `def_field_store` uses per-field `hdim` ('nod2'|'elem').
+- [x] registered **u/v** (`dyn%uv`, nl-1 vector pair), **Av** (`dyn%work%Av`, nl full levels), **bolus_u/v**
+      (`dyn%fer_uv`, Fer_GM-guarded) in the lifecycle (`register_output_var` dispatch + `register_default_outputs`
+      + the runloop accumulate, all `means_has`-guarded); `config/namelist.io` gains u/v/Av rows.
+- [x] **gate (`run_output_gate.sh`, np 1/2/8):** elem `native==raw` `max|Δ|=0`; `geographic ==` INDEPENDENT numpy
+      elem-centroid r2g ref (`fld_eu/fld_ev` `max|Δ|≈4.8e-13` ≪ 1e-9, non-vacuous); elem scalars `fld_e2` (2-D) +
+      `fld_e3` (3-D full-levels mask) `max|Δ|=0`; **partition-indep `dist_2≡dist_8≡1-rank` `max|Δ|=0`** (output-cmp
+      includes the elem stores); element `nlevels` mask fires (460940 below-bottom). ctest 18/18 Intel+GNU; no
+      regression (zarrsmoke + meshdiag GREEN). (vs-FESOM2 by transitivity, as 2.1–2.5.)
 
 ### Final
 
-#### Task F1: Full no-regression + gate sweep
+#### Task F1: Full no-regression + gate sweep ✅ (2026-06-28)
 
-- [ ] `cd build_intel_dp && ctest --output-on-failure` → 17/17 (repeat GNU)
-- [ ] existing production MR byte-gates (`run_lifecycle_*_gate_multirank.sh`, both whichEVP) stay `max|Δ|=0`
-      (also the DEFERRED real-lifecycle output integration: a forced run with `FESOM3_OUTPUT` writes
-      unod/vnod/temp/salt/... and they read back sanely)
-- [ ] all new M9 gates green (Stage 0 round-trip; mesh.diag 1-rank + MR; fields 1-rank + MR + 3D + node vectors
-      + ELEMENT u/v/Av/bolus)
-- [ ] `ushow` smoke on a mesh.diag store + a field store + `ushow <field>.zarr -m fesom.mesh.diag.zarr`
+- [x] `cd build_intel_dp && ctest` → **18/18** Intel + **18/18** GNU.
+- [x] production MR byte-gate (`run_lifecycle_fullynative_gate_multirank.sh`, CORE2 forced np=2) stays `max|Δ|=0`
+      **both whichEVP** (whichEVP=0 + whichEVP=1: 130 records, worst |Δ|=0.000e+00 each) — the element-output
+      wiring is provably inert/additive (physics byte-unchanged). **DEFERRED real-lifecycle output integration
+      DONE:** the SAME forced np=2 run with `FESOM3_OUTPUT` + `FESOM3_OUTPUT_EVERY=1` wrote all 14 default-set
+      stores from the REAL timestep loop — node ssh/sst/sss/a_ice/m_ice/m_snow/temp/salt/w/unod/vnod **+ element
+      u/v/Av** — and xarray opens every one: correct dims (`time,[nz1|nz,]nod2|elem`), CF `time` (`seconds since…`),
+      finite embedded coords (node + **elem-centroid**), 2 records, 244659 elem ≈ 2× 126858 node; bolus correctly
+      ABSENT (Fer_GM off → the guard fires). Proves the registration + accumulate + `means_output` hooks fire in
+      production, partition-distributed (canonical order, no rank-0 gather).
+- [x] all new M9 gates green: Stage 0 round-trip; mesh.diag 1-rank + MR (`run_meshdiag_gate.sh`); `run_zarrsmoke.sh`;
+      fields 1-rank + MR + 3-D + node vectors + **ELEMENT u/v/Av** (`run_output_gate.sh` np 1/2/8, native+geographic,
+      Task 2.6 knob sweep, partition-indep — all `max|Δ|=0` / rotation ≈4.8e-13≪1e-9).
+- [ ] `ushow` smoke on a mesh.diag store + a field store + `ushow <field>.zarr -m fesom.mesh.diag.zarr` — **MANUAL**
+      (needs a display; the writer's xarray/zarr round-trip is the automated proxy).
 
 #### Task F2: Docs + memory
 

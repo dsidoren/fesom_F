@@ -215,6 +215,7 @@ def output(out_dir, frame="geographic"):
         return np.broadcast_to(gg[None, :], (nrec, N))  # fld_m
 
     coords = {}
+    nrec_full = None
     for v in ("fld_a", "fld_b", "fld_m"):
         sp = _find_store(out_dir, v)
         # decode_times=False: keep `time` as raw seconds (else xarray -> datetime64; the fact that it
@@ -226,6 +227,7 @@ def output(out_dir, frame="geographic"):
         if tuple(da.dims) != ("time", "nod2"):
             _fail(f"{v} dims {da.dims} != (time, nod2)")
         nrec, N = da.shape
+        nrec_full = nrec
         d = float(np.max(np.abs(da.values.astype(np.float64) - gen(v, nrec, N))))
         print(f"  {v:6s} shape=({nrec},{N}) dtype={da.dtype}  max|Δ|={d:.3e}")
         if d != 0.0:
@@ -282,22 +284,44 @@ def output(out_dir, frame="geographic"):
     if zc.shape != (nz1,) or not np.all(np.diff(zc) > 0):
         _fail(f"nz1 coord shape/monotonic check failed (shape={zc.shape})")
 
-    _output_vector(out_dir, frame)
+    _output_vector(out_dir, frame)                                    # node velocity vector
+    _output_vector(out_dir, frame, "fld_eu", "fld_ev", hdim="elem")   # Task 2.7 element vector
+    _check_freq2(out_dir, nrec_full)
+    _check_elem(out_dir)                                              # Task 2.7 element scalars
     print("OUTPUT PASS (max|Δ|=0)")
 
 
-def _output_vector(out_dir, frame, vtol=1e-9):
-    """fld_u/fld_v vector pair (3-D node, nl-1 layers). native => store == raw generator (max|Δ|=0);
-    geographic => store == numpy vector_r2g(raw) (|Δ| <= vtol, an independent reference) AND the
-    rotation is non-vacuous (it actually changed the components)."""
-    su = _find_store(out_dir, "fld_u"); sv = _find_store(out_dir, "fld_v")
+def _check_freq2(out_dir, nrec_full):
+    """fld_f2 (Task 2.6): a 2-D snapshot on a freq=2 STEP cadence. It must have floor(nrec_full/2)
+    records (proves the per-field step_event fired) and every value == gid+1000 (k-independent)."""
+    sp = _find_store(out_dir, "fld_f2")
+    ds = xr.open_zarr(sp, consolidated=False, mask_and_scale=False, decode_times=False)
+    if "fld_f2" not in ds:
+        _fail(f"fld_f2 not in {sp}")
+    da = ds["fld_f2"]
+    nrec, N = da.shape
+    exp = nrec_full // 2 if nrec_full else 0
+    if nrec != exp:
+        _fail(f"fld_f2 nrec={nrec} != floor(nrec_full/2)={exp} (per-field freq=2 step_event failed)")
+    gg = np.arange(1, N + 1, dtype=np.float64) + 1000.0
+    d = float(np.max(np.abs(da.values.astype(np.float64) - gg[None, :]))) if nrec else 0.0
+    print(f"  fld_f2 shape=({nrec},{N})  records=floor({nrec_full}/2)={exp}  max|Δ|={d:.3e}  (per-field freq=2)")
+    if d != 0.0:
+        _fail(f"fld_f2 values max|Δ|={d} != 0")
+
+
+def _output_vector(out_dir, frame, name_x="fld_u", name_y="fld_v", hdim="nod2", vtol=1e-9):
+    """A 3-D vector pair (nl-1 layers), node OR element. native => store == raw generator (max|Δ|=0);
+    geographic => store == numpy vector_r2g(raw) at the store's EMBEDDED lon/lat (node coords, or elem
+    centroid for elements) — |Δ| <= vtol, an independent reference — AND the rotation is non-vacuous."""
+    su = _find_store(out_dir, name_x); sv = _find_store(out_dir, name_y)
     du = xr.open_zarr(su, consolidated=False, mask_and_scale=True, decode_times=False)
     dv = xr.open_zarr(sv, consolidated=False, mask_and_scale=True, decode_times=False)
-    if "fld_u" not in du or "fld_v" not in dv:
-        _fail("fld_u/fld_v missing")
-    u, v = du["fld_u"], dv["fld_v"]
-    if tuple(u.dims) != ("time", "nz1", "nod2"):
-        _fail(f"fld_u dims {u.dims} != (time, nz1, nod2)")
+    if name_x not in du or name_y not in dv:
+        _fail(f"{name_x}/{name_y} missing")
+    u, v = du[name_x], dv[name_y]
+    if tuple(u.dims) != ("time", "nz1", hdim):
+        _fail(f"{name_x} dims {u.dims} != (time, nz1, {hdim})")
     nrec, nz1, N = u.shape
     uu = u.values.astype(np.float64); vv = v.values.astype(np.float64)
     # raw generator — MUST match src/drivers/fesom_outputsmoke.F90: u=0.001g+0.5L, v=-0.002g+0.25L+1
@@ -314,20 +338,60 @@ def _output_vector(out_dir, frame, vtol=1e-9):
         bar = vtol
         chg = float(max(np.max(np.abs(eu2 - u_raw)), np.max(np.abs(ev2 - v_raw))))
         if chg < 1e-3:
-            _fail(f"fld_u/v geographic rotation vacuous (max|rot-raw|={chg:.3e}) — not applied?")
+            _fail(f"{name_x}/{name_y} geographic rotation vacuous (max|rot-raw|={chg:.3e}) — not applied?")
     eu = np.broadcast_to(eu2, (nrec, nz1, N)); ev = np.broadcast_to(ev2, (nrec, nz1, N))
     finu = np.isfinite(uu)
     if not finu.any():
-        _fail("fld_u fully masked (no valid levels)")
+        _fail(f"{name_x} fully masked (no valid levels)")
     dU = float(np.max(np.abs(uu[finu] - eu[finu])))
     dV = float(np.max(np.abs(vv[finu] - ev[finu])))
     nan_below = int(np.count_nonzero(~finu))
-    print(f"  fld_u/v frame={frame:10s} shape=({nrec},{nz1},{N})  max|Δu|={dU:.3e} max|Δv|={dV:.3e}  "
-          f"masked(NaN)={nan_below}")
+    print(f"  {name_x}/{name_y} frame={frame:10s} shape=({nrec},{nz1},{N})  max|Δu|={dU:.3e} "
+          f"max|Δv|={dV:.3e}  masked(NaN)={nan_below}")
     if dU > bar or dV > bar:
-        _fail(f"fld_u/v frame={frame} max|Δ|=({dU:.3e},{dV:.3e}) > {bar:.0e} (rotation/pairing bug?)")
+        _fail(f"{name_x}/{name_y} frame={frame} max|Δ|=({dU:.3e},{dV:.3e}) > {bar:.0e} (rotation/pairing bug?)")
     if nan_below == 0:
-        _fail("fld_u no NaN -> below-bottom masking did not fire")
+        _fail(f"{name_x} no NaN -> below-bottom masking did not fire")
+
+
+def _check_elem(out_dir):
+    """Task 2.7 ELEMENT scalars: fld_e2 (2-D, value g+500 — integer-valued, float32-exact) + fld_e3
+    (3-D on FULL levels nz, value g+100*L at valid levels, below-bottom NaN). g = canonical elem id."""
+    sp = _find_store(out_dir, "fld_e2")
+    ds = xr.open_zarr(sp, consolidated=False, mask_and_scale=False, decode_times=False)
+    da = ds["fld_e2"]
+    if tuple(da.dims) != ("time", "elem"):
+        _fail(f"fld_e2 dims {da.dims} != (time, elem)")
+    nrec, N = da.shape
+    g = np.arange(1, N + 1, dtype=np.float64)
+    d = float(np.max(np.abs(da.values.astype(np.float64) - (g[None, :] + 500.0))))
+    print(f"  fld_e2 shape=({nrec},{N}) dtype={da.dtype}  max|Δ|={d:.3e}  (element 2-D)")
+    if d != 0.0:
+        _fail(f"fld_e2 values max|Δ|={d} != 0 (element decomp / coords bug?)")
+    # embedded elem-centroid lon/lat present + finite
+    for c in ("lon", "lat"):
+        if c not in ds or np.asarray(ds[c].values).shape != (N,) or not np.all(np.isfinite(ds[c].values)):
+            _fail(f"fld_e2 missing/!finite element coord {c}")
+
+    sp = _find_store(out_dir, "fld_e3")
+    ds = xr.open_zarr(sp, consolidated=False, mask_and_scale=True, decode_times=False)
+    da = ds["fld_e3"]
+    if tuple(da.dims) != ("time", "nz", "elem"):
+        _fail(f"fld_e3 dims {da.dims} != (time, nz, elem)")
+    nrec, nz, N = da.shape
+    vals = da.values.astype(np.float64)
+    Lz = np.arange(1, nz + 1, dtype=np.float64)[None, :, None]
+    gg = np.arange(1, N + 1, dtype=np.float64)[None, None, :]
+    expect = np.broadcast_to(gg + 100.0 * Lz, (nrec, nz, N))
+    fin = np.isfinite(vals)
+    d = float(np.max(np.abs(vals[fin] - expect[fin]))) if fin.any() else 0.0
+    nan_below = int(np.count_nonzero(~fin))
+    print(f"  fld_e3 shape=({nrec},{nz},{N})  valid max|Δ|={d:.3e}  masked(NaN)={nan_below}  "
+          f"(element 3-D, full-levels mask)")
+    if d != 0.0:
+        _fail(f"fld_e3 valid max|Δ|={d} != 0")
+    if nan_below == 0:
+        _fail("fld_e3 no NaN -> element below-bottom masking did not fire")
 
 
 def output_cmp(d1, d2):
