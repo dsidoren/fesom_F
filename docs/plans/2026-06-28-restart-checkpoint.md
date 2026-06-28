@@ -180,16 +180,31 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
 ### Stage 3 — `mod_io_restart` WRITE path
 *Per-field M9-shape snapshot stores inside an immutable, atomically-finalized checkpoint folder.*
 
-#### Task 3.1: C filesystem shims — `rename` / `unlink` / `fsync` (`bind(C)`)
+#### Task 3.1 ✅: C filesystem shims — `rename` / `unlink` / `fsync` (`bind(C)`)
 
 **Files:**
-- Modify: `src/io/mod_io_zarr.F90` (or a small new `src/io/mod_io_posix.F90`)
+- Create: `src/io/mod_io_posix.F90` (new dedicated POSIX-fs module; auto-built by the `src/io/*.F90` GLOB)
+- Modify: `src/io/mod_io_zarr.F90` (export `zarr_mkdir` — the shared mkdir -p the gate/`mod_io_restart` reuse)
+- Create: `test/test_io_posix.F90`
+- Modify: `test/CMakeLists.txt`
 
-- [ ] add `bind(C)` shims for `rename(2)`, `unlink(2)`/`rmdir(2)`, `fsync(2)` mirroring the existing `c_mkdir`
+- [x] add `bind(C)` shims for `rename(2)`, `unlink(2)`/`rmdir(2)`, `fsync(2)` mirroring the existing `c_mkdir`
       (`mod_io_zarr.F90:38`) — do **NOT** use `execute_command_line('mv'/'rm')`, which forks and **segfaults after
-      MPI_Init** (the M9 lesson that forced `c_mkdir`)
-- [ ] a recursive-delete helper for a multi-file Zarr tree (used by tmp-cleanup + keep-N prune) on top of the shims
-- [ ] **GATE:** a tiny driver test creates a dir tree, `rename`s it, recursively `unlink`s it — no segfault, exit 0
+      MPI_Init** (the M9 lesson that forced `c_mkdir`). New `mod_io_posix.F90` binds libc `rename`/`unlink`/`rmdir`/
+      `open`/`fsync`/`close` **directly via `iso_c_binding`** (SAME mechanism as `c_mkdir` — the repo compiles **zero**
+      `.c` files); public thin wrappers `posix_rename`/`posix_unlink`/`posix_rmdir`/`posix_fsync_dir` each take a
+      `character(len=*)`, append `c_null_char`, return the C int status. `posix_fsync_dir` = `open(O_RDONLY)`+`fsync`+
+      `close` (directory durability before rename)
+- [x] a recursive-delete helper for a multi-file Zarr tree (used by tmp-cleanup + keep-N prune) on top of the shims —
+      `posix_rmtree(path)` binds libc `nftw(3)` with `FTW_DEPTH|FTW_PHYS` (post-order) and a `bind(C)` Fortran callback
+      passed via `c_funloc` that `remove()`s each entry bottom-up (no `.c` file, no `execute_command_line`); returns 0
+      only if `nftw` AND every `remove()` succeeded (module-`save` failure counter, serial rank-0 use)
+- [x] **GATE:** a tiny driver test creates a dir tree, `rename`s it, recursively `unlink`s it — no segfault, exit 0 —
+      **PASS** (Intel dp, worktree `build_intel_dp`): `test/test_io_posix.F90` builds `scratch/top/a/b/c.bin`+sibling,
+      `posix_fsync_dir`→`posix_rename`(top→renamed)→`posix_rmtree`(renamed)+unlink/rmdir round-trip, all shims return 0,
+      old path gone after rename, tree gone after rmtree (re-rmtree→ENOENT confirms), no scratch dir left behind.
+      `ctest -R io_posix` GREEN (`test_io_posix_np1 ... Passed`, ctest exit 0); direct driver prints
+      `ALL PASS (rename/unlink/rmdir/fsync/rmtree, no fork, exit 0)`, **exit code 0** (no segfault)
 
 #### Task 3.2: Writer mechanism — one field end-to-end + folder + `checkpoint.json`
 

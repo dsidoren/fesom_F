@@ -103,7 +103,7 @@ module mod_io_zarr
     public :: zattr_str, zattr_int, zattr_real
     public :: zattr_str_arr, zattr_int_arr, zattr_real_arr
     public :: zarr_write_whole, zarr_write_chunk, zarr_read_chunk
-    public :: zarr_check
+    public :: zarr_check, zarr_mkdir
 
     interface zarr_write_whole
         module procedure zarr_write_whole_1d_real, zarr_write_whole_2d_real, &
