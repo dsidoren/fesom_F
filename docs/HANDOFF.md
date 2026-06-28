@@ -130,12 +130,17 @@ Full pre-M2.12 milestone detail + the per-gate recipes live in [`HANDOFF-archive
   full no-regression green (ctest 13/13 Intel+GNU + production MR gate both whichEVP `max|Δ|=0`) after
   backing out the fw_ bisect scaffolding from both codes. **netCDF output + restart (incl. `tke`
   serialization) = M9.**
-  **→ PERF side-investigation (2026-06-28, OPEN): added a permanent per-component timer (`mod_timer`,
-  `FESOM2`-style breakdown). dist_512 finding — F3 is at parity/faster everywhere EXCEPT surface
-  forcing, which is `2.24×` FESOM2 (`+8.7 ms/step`); overall just `1.08×`. Read-location is NOT the cause
-  (a byte-exact rank-0-read+`MPI_Bcast` change regressed and was reverted). Next = measure (sub-time
-  open/read/interp in `forcing_getcoeffld`) at dist_512, then match F2's persistent handle + double-buffer
-  slice cache. Full fresh-session handoff: `docs/plans/2026-06-28-forcing-perf-investigation.md` (L52).**
+  **→ PERF side-investigation (2026-06-28, ✅ RESOLVED): F3 was at parity/faster everywhere EXCEPT
+  surface forcing (`2.24×` F2, `+8.7 ms/step`). Root cause (measured via `mod_timer` sub-timers +
+  microbench): the JRA55-do files are DEFLATE-compressed netCDF-4/HDF5 (one slice/chunk), and the legacy
+  `forcing_getcoeffld` did `nc_open` (HDF5 metadata re-parse) + read BOTH brackets (~800 KB inflate each) +
+  `nc_close` every crossing on every rank. FIX = FESOM2's persistent handle + double-buffer (reopen only on
+  year change; reuse the cached `t_indx` slice, read only the new `t_indx_p1`) — `src/forcing/mod_forcing_read.F90`,
+  toggle `FESOM3_FORCING_PERSIST` (default ON). dist_512: forcing `17.7→5.78 ms/step` (3.07×), open→0, read
+  halved; **5.78 < F2's 7.03 ⇒ F3 now beats F2 on forcing AND overall** (LOOP `58.3→44.5`). Byte-exact
+  (`…jra55_gate_multirank.sh 8 {12,48}` ⇒ `|Δ|=0`; `ctest` 13/13). Why all-ranks-read beats F2's
+  rank-0+`Bcast`: the Levante broadcast is slow (two-copy vader, KNEM off) — confirms the "do NOT broadcast"
+  call. Full writeup: `docs/plans/2026-06-28-forcing-perf-investigation.md` (RESOLVED section at top).**
   **M8a (clock + run-length driver) ✅ COMPLETE 2026-06-25 (first try):** ported `src/infra/mod_clock.F90`
   (`g_clock` VERBATIM — `clock`/`clock_init`/`check_fleapyr`/`is_fleapyr` + `clock_nsteps`=`get_run_steps`;
   `r_restart` rehomed to `mod_clock`; `clock_finish`/`clock_newyear`/`use_transit` deferred to M9) and wired

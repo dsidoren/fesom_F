@@ -2,6 +2,51 @@
 
 **Created 2026-06-28. Self-contained: a fresh session with no memory of the prior chat can pick this up.**
 
+---
+
+## ✅ RESOLVED 2026-06-28 — forcing is now FASTER than FESOM2
+
+**Root cause (MEASURED, not guessed).** The JRA55-do files are **DEFLATE-compressed netCDF-4/HDF5**,
+chunked **one (lat,lon) slice per chunk** (`uas`: chunk (1,320,640), deflate level 1). So per crossing
+the legacy code (a) re-parsed HDF5 metadata in `nc_open` and (b) re-inflated ~800 KB/slice — and it read
+**both** brackets and did this **on every rank**. A login-node microbench on the real files split the
+per-crossing cost as open≈37% + double-read(inflate)≈63%, interp≈0; the in-code sub-timers (added this
+session, `TMR_FRC_OPEN/READ/INTRP2`) confirmed it at scale.
+
+**Fix (byte-exact, FESOM2-faithful).** `forcing_getcoeffld` now keeps a **persistent file handle**
+(reopen only on year change) and a **double-buffer** (`sbc_a`/`sbc_b` + `ia_indx`/`ib_indx`): it reuses
+whichever buffer already holds `t_indx` (slot1) and reads only the genuinely-new `t_indx_p1` (slot2),
+exactly mirroring FESOM2 getcoeffld:866-898. Toggle `FESOM3_FORCING_PERSIST` (default ON; `0`=legacy).
+Reused bytes are identical to a re-read ⇒ **byte-exact**.
+
+**Result — dist_512 A/B (steady-state, two-point [100,600]), F2 ref = 7.03 ms/step:**
+
+| component | F2 | F3 legacy | **F3 fix** | fix/legacy | fix − F2 |
+|-----------|---:|----------:|-----------:|-----------:|---------:|
+| **forcing** | **7.03** | 17.71 | **5.78** | **3.07×** | **−1.25** |
+| open/reopen | — | 6.96 | ~0.0001 | eliminated | |
+| read+inflate | — | 10.40 | 5.41 | 1.92× (halved) | |
+| LOOP TOTAL | 47.81 | 58.26 | 44.49 | −13.8 ms/step | |
+
+F3 forcing (5.78) is now **below F2 (7.03)** — F3's all-ranks read beats F2's rank-0-read+`MPI_Bcast`
+(the broadcast is slow on Levante: two-copy vader, KNEM disabled in env.sh). This vindicates the
+"do NOT broadcast" call (the prior broadcast experiment was a true dead end). Forcing was the ONLY
+F3-slower component (+8.71 ms/step); now −1.25 ⇒ **F3 is faster than F2 overall.**
+
+**Verification.** Byte-gate `tools/run_lifecycle_jra55_gate_multirank.sh 8 {12,48}` ⇒ `worst |Δ|=0`
+(exercises cold-start + full ping-pong reuse: fld=1 brackets 1/2→2/3→…→8/9). `ctest` 13/13. dist_128
+A/B (`tools/run_ab_forcing_persist_dist128.sbatch`, interactive): forcing 31.78→12.59 (2.52×), open→0,
+read 1.61×.
+
+**Code:** `src/forcing/mod_forcing_read.F90` (t_ffile ncid/sbc_a/sbc_b/ia_indx/ib_indx; getcoeffld
+rewrite; sbc_do year-rollover buffer invalidation), `src/infra/mod_timer.F90` (3 sub-timers, NTIMER 15→18).
+**Data:** `/scratch/a/a270088/ab_persist_d512_p{0,1}_n{100,600}/log`, `…d128…`; aggregate job logs
+`/scratch/a/a270088/ab_persist_d{512,128}_ab_slurm.out`. **Scripts:** `tools/run_ab_forcing_persist_dist{128,512}.sbatch`.
+
+Everything below is the original (pre-fix) investigation handoff, kept for provenance.
+
+---
+
 ## Mission
 
 FESOM3's surface **forcing** is the ONLY component materially slower than FESOM2: **2.24× (+8.7 ms/step)**
