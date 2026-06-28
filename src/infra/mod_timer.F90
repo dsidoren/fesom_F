@@ -26,31 +26,37 @@ module mod_timer
     integer, parameter, public :: TMR_OCEAN2ICE   =  1   ! top-level driver components
     integer, parameter, public :: TMR_FORCING     =  2
     integer, parameter, public :: TMR_FRC_SBC     =  3   ! forcing sub-steps (children of FORCING)
-    integer, parameter, public :: TMR_FRC_INTERP  =  4
-    integer, parameter, public :: TMR_FRC_BULK    =  5
-    integer, parameter, public :: TMR_FRC_STRESS  =  6
-    integer, parameter, public :: TMR_ICE         =  7
-    integer, parameter, public :: TMR_FLUXES      =  8
-    integer, parameter, public :: TMR_STEP_OCE    =  9   ! umbrella: whole ocean step
-    integer, parameter, public :: TMR_OCE_MIXPRES = 10   ! ocean sub-steps (children of STEP_OCE)
-    integer, parameter, public :: TMR_OCE_DYN     = 11
-    integer, parameter, public :: TMR_OCE_SSH     = 12
-    integer, parameter, public :: TMR_OCE_SOLVE   = 13   ! SUBSET of SSH (the CG solve) — not summed
-    integer, parameter, public :: TMR_OCE_GMREDI  = 14
-    integer, parameter, public :: TMR_OCE_TRACER  = 15
-    integer, parameter, public :: NTIMER          = 15
+    integer, parameter, public :: TMR_FRC_OPEN    =  4   ! crossing read split (children of FRC_SBC)
+    integer, parameter, public :: TMR_FRC_READ    =  5   !   nc slice read + DEFLATE inflate + halo
+    integer, parameter, public :: TMR_FRC_INTRP2  =  6   !   spatial bilinear coeff build (do ii)
+    integer, parameter, public :: TMR_FRC_INTERP  =  7
+    integer, parameter, public :: TMR_FRC_BULK    =  8
+    integer, parameter, public :: TMR_FRC_STRESS  =  9
+    integer, parameter, public :: TMR_ICE         = 10
+    integer, parameter, public :: TMR_FLUXES      = 11
+    integer, parameter, public :: TMR_STEP_OCE    = 12   ! umbrella: whole ocean step
+    integer, parameter, public :: TMR_OCE_MIXPRES = 13   ! ocean sub-steps (children of STEP_OCE)
+    integer, parameter, public :: TMR_OCE_DYN     = 14
+    integer, parameter, public :: TMR_OCE_SSH     = 15
+    integer, parameter, public :: TMR_OCE_SOLVE   = 16   ! SUBSET of SSH (the CG solve) — not summed
+    integer, parameter, public :: TMR_OCE_GMREDI  = 17
+    integer, parameter, public :: TMR_OCE_TRACER  = 18
+    integer, parameter, public :: NTIMER          = 18
 
     character(len=20), parameter :: TNAME(NTIMER) = [character(len=20) :: &
-        'ocean2ice', 'forcing', 'sbc / crossing', 'time-interp', 'bulk NCAR', 'wind/ice stress', &
+        'ocean2ice', 'forcing', 'sbc / crossing', 'open/reopen', 'read+inflate', 'interp loop', &
+        'time-interp', 'bulk NCAR', 'wind/ice stress', &
         'ice', 'oce_fluxes', 'step_oce (ocean)', &
         'mix, pres, EOS', 'dynamics u,v,w', 'dynamics ssh', '(of which) ssh solve', &
         'GM / Redi', 'tracer' ]
     ! parent id for the indented report (0 = top-level component)
-    integer, parameter :: TPARENT(NTIMER) = [ 0, 0, TMR_FORCING, TMR_FORCING, TMR_FORCING, TMR_FORCING, &
+    integer, parameter :: TPARENT(NTIMER) = [ 0, 0, TMR_FORCING, TMR_FRC_SBC, TMR_FRC_SBC, TMR_FRC_SBC, &
+        TMR_FORCING, TMR_FORCING, TMR_FORCING, &
         0, 0, 0, &
         TMR_STEP_OCE, TMR_STEP_OCE, TMR_STEP_OCE, TMR_OCE_SSH, TMR_STEP_OCE, TMR_STEP_OCE ]
     ! .true. => this timer is a subset of its parent (don't add to the parent's child-sum check)
-    logical, parameter :: TSUBSET(NTIMER) = [ .false.,.false.,.false.,.false.,.false.,.false., &
+    logical, parameter :: TSUBSET(NTIMER) = [ .false.,.false.,.false., .true.,.true.,.true., &
+        .false.,.false.,.false., &
         .false.,.false.,.false., &
         .false.,.false.,.false., .true., .false.,.false. ]
 
