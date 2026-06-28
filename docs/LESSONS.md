@@ -2219,3 +2219,28 @@ origin with a windowed all-owned-node `FESOM_DUMP_ALL` (`tools/onset_allnode.py`
   short gates passed, suspect (a) a near-zero field crossing a branch — dump the *integrand/inputs upstream
   of the global reduction* (all 5 probes lighting at once = a global scalar) — AND (b) a runtime FP-mode
   mismatch: probe `ieee_get_underflow_mode`/MXCSR on BOTH processes, not just the source.
+
+## L52 — Chasing the "F3 is ~1.5× slower" perf gap: I guessed twice and was wrong twice; the only real gap is FORCING (2.2×), ocean+ice are at parity/faster, and the blunders were a units misread + validating at the wrong scale
+
+The story is fully captured in `docs/plans/2026-06-28-forcing-perf-investigation.md` (fresh-session handoff).
+The transferable lessons:
+- **MEASURE, DON'T GUESS — and convert units before comparing two codes.** I "diagnosed" the forcing read
+  pattern and shipped a byte-exact rank-0-read+`MPI_Bcast` "fix" before measuring it. The A/B then showed it
+  **+60% WORSE at dist_128** and **neutral at dist_512** → reverted (`83615d7`→`d8ad992`). Then I compared
+  FESOM2's `runtime ocean: 18.14` against FESOM3's `28.66` and "found" a broad 2× ocean slowdown — but F2's
+  block is **seconds for the whole run**, F3's timer is **ms/step**: `18.14 s / 600 = 30.24 ms/step`, so F3
+  ocean is actually *faster*. ALWAYS `/nsteps*1000` the F2 numbers first. With correct units the picture is
+  simple and matches the user's memory: ocean/ice parity-or-faster, **forcing alone is 2.24× (+8.7 ms/step)**.
+- **Validate perf at the SCALE the gap lives.** dist_128 on one node masks I/O via the OS page cache (all
+  ranks read from cache after the first); the forcing read cost is a multi-node phenomenon. A single-node A/B
+  sent me the wrong way. Trust dist_512; treat dist_128 as a smoke test only.
+- **The page cache beats a "redundant-read elimination" broadcast on-node**, and the ~800 KB slice broadcast
+  is slow two-copy vader anyway (KNEM single-copy disabled in env.sh for the corruption bug). Moving *where*
+  the read happens was neutral at scale → the forcing cost is NOT the per-rank read transfer; the real
+  suspects are F2's persistent file handle + double-buffer slice cache (read 1 slice/crossing, F3 reads 2 +
+  reopens every crossing) — but that too must be measured (sub-time open/read/interp) before fixing.
+- **Byte-gating needs no compute partition** (login-node `run_lifecycle_jra55_gate_multirank.sh`); only the
+  *perf measurement* needs scale. So correctness work can proceed during a Levante maintenance window; the
+  speed confirmation waits for `compute`.
+- **The permanent `mod_timer` breakdown (L-infra) is what made this legible** — it localizes the gap to one
+  component and is directly comparable to F2's `rtime_*` (after the unit conversion).
