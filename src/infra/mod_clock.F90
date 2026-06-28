@@ -11,10 +11,11 @@ module mod_clock
     !     run_length / run_length_unit / step_per_day.
     !   * r_restart lives HERE (g_clock read it from g_config); the output-file creation that
     !     consumes it is M9, so mod_config stays edit-free.
-    !   * clock_finish / clock_newyear (the .clock WRITE on restart) and the use_transit lines
-    !     are OMITTED — both are M9 / out of scope.
+    !   * clock_finish / clock_newyear (the .clock WRITE on restart + the in-memory year
+    !     rollover used for checkpoint-folder naming) are PORTED VERBATIM (restart milestone,
+    !     Task 0.1); only the use_transit lines remain OMITTED (transient tracers, out of scope).
     use mod_precision, only: WP
-    use mod_config,    only: dt, include_fleapyear, runid, RestartInPath, &
+    use mod_config,    only: dt, include_fleapyear, runid, RestartInPath, RestartOutPath, &
                              run_length, run_length_unit, step_per_day
     use mod_partit,    only: t_partit
     use, intrinsic :: iso_fortran_env, only: error_unit
@@ -175,6 +176,59 @@ contains
         end if
 
     end subroutine clock_init
+    !
+    !-------------------------------------------------------------------------------
+    !
+    subroutine clock_finish
+        ! Write RestartOutPath//runid//'.clock' at end-of-segment (and per checkpoint write):
+        ! line 1 = old time (timeold dayold yearold), line 2 = new time (timenew daynew yearnew),
+        ! with the year-rollover normalization — if the clock sits at the last instant of the year
+        ! (daynew==ndpyr .and. timenew==86400) line 2 is written as 0.0 / 1 / yearold+1 so the next
+        ! segment's clock_init reads a clean day-1 start. g_clock::clock_finish VERBATIM.
+        implicit none
+        real(kind=WP)                         :: dum_timenew   ! time in a day, unit: sec
+        integer                               :: dum_daynew    ! day in a year
+        integer                               :: dum_yearnew   ! year
+        integer                               :: ierr
+        integer                               :: file_unit
+        character(512)                        :: errmsg
+
+        dum_timenew = timenew
+        dum_daynew  = daynew
+        dum_yearnew = yearnew
+        if ((dum_daynew==ndpyr) .and. (dum_timenew==86400._WP)) then
+           dum_timenew=0.0_WP
+           dum_daynew=1
+           dum_yearnew=yearold+1
+        endif
+
+        open(newunit=file_unit, file=trim(RestartOutPath)//trim(runid)//'.clock', action='write', &
+            status='unknown', iostat=ierr, iomsg=errmsg)
+        if (ierr /= 0) then
+          write (unit=error_unit, fmt='(3A)') &
+            '### error: can not open file ', trim(RestartOutPath)//trim(runid)//'.clock', &
+            ', error: ' // trim(errmsg)
+          call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+        end if
+        write(unit=file_unit, fmt=*) timeold, dayold, yearold
+        write(unit=file_unit, fmt=*) dum_timenew, dum_daynew, dum_yearnew
+        close(unit=file_unit)
+    end subroutine clock_finish
+    !
+    !----------------------------------------------------------------------------
+    !
+    subroutine clock_newyear
+        ! In-memory year rollover used for output/checkpoint folder naming: if the clock sits at
+        ! the very last instant of the year (daynew>=ndpyr .and. timenew==86400) advance it to
+        ! 0.0 / day 1 / yearold+1 and refresh cyearnew. g_clock::clock_newyear VERBATIM.
+        implicit none
+        if ((daynew>=ndpyr).and.(timenew==86400._WP)) then
+           timenew=0.0_WP
+           daynew=1
+           yearnew=yearold+1
+           write(cyearnew,'(i4)') yearnew
+        endif
+    end subroutine clock_newyear
     !
     !-------------------------------------------------------------------------------
     !

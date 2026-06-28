@@ -19,11 +19,12 @@ program fesom_clocktest
     use mpi
     use mod_precision,    only: WP
     use mod_config,       only: dt, step_per_day, include_fleapyear, runid, RestartInPath, &
-                                run_length, run_length_unit
+                                RestartOutPath, run_length, run_length_unit
     use mod_partit,       only: t_partit
     use mod_partitioning, only: par_init, par_ex
-    use mod_clock,        only: clock, clock_init, clock_nsteps, &
-                                timenew, daynew, yearnew, month, day_in_month, ndpyr, fleapyear, r_restart
+    use mod_clock,        only: clock, clock_init, clock_finish, clock_nsteps, &
+                                timeold, timenew, dayold, daynew, yearold, yearnew, &
+                                month, day_in_month, ndpyr, fleapyear, r_restart
     implicit none
 
     type(t_partit) :: partit
@@ -39,7 +40,8 @@ program fesom_clocktest
     runid             = 'test1'
     call get_environment_variable('FESOM3_RESTART_IN', rin)
     if (len_trim(rin) == 0) rin = './'
-    RestartInPath = trim(rin)
+    RestartInPath  = trim(rin)
+    RestartOutPath = trim(rin)   ! clock_finish writes here; clock_init reads RestartInPath (same dir)
 
     nfail = 0
 
@@ -95,10 +97,58 @@ program fesom_clocktest
         end select
     end do
 
+    ! ============================================================================
+    ! clock_finish -> clock_init round-trip + r_restart detection + year rollover.
+    ! RestartOutPath == RestartInPath, so clock_finish writes the .clock that
+    ! clock_init reads straight back. List-directed (fmt=*) real I/O round-trips
+    ! exactly here only because every timenew is a clean multiple of dt / 0 / 86400.
+    ! ============================================================================
+    if (partit%mype == 0) write(*,'(a)') '--- clock_finish -> clock_init round-trip ---'
+
+    ! (A) RESTART: differing old/new lines, mid-year (rollover branch NOT taken) =>
+    !     both lines round-trip verbatim and r_restart=.true.
+    call roundtrip(1800.0_WP, 5, 1948,  3600.0_WP, 5, 1948,  365)
+    if (partit%mype == 0) then
+        write(*,'(a)') '  (A) restart, differing lines'
+        call check_r('A timeold',   timeold,   1800.0_WP)
+        call check_i('A dayold',    dayold,    5)
+        call check_i('A yearold',   yearold,   1948)
+        call check_r('A timenew',   timenew,   3600.0_WP)
+        call check_i('A daynew',    daynew,    5)
+        call check_i('A yearnew',   yearnew,   1948)
+        call check_l('A r_restart', r_restart, .true.)
+    end if
+
+    ! (B) COLD: identical old/new lines => r_restart=.false. (clock_init then forces
+    !     yearold=yearnew-1, so assert the detection + the new-time line, not yearold).
+    call roundtrip(0.0_WP, 1, 1948,  0.0_WP, 1, 1948,  365)
+    if (partit%mype == 0) then
+        write(*,'(a)') '  (B) cold, identical lines'
+        call check_r('B timenew',   timenew,   0.0_WP)
+        call check_i('B daynew',    daynew,    1)
+        call check_i('B yearnew',   yearnew,   1948)
+        call check_l('B r_restart', r_restart, .false.)
+    end if
+
+    ! (C) YEAR ROLLOVER in clock_finish: last instant of the year
+    !     (daynew==ndpyr .and. timenew==86400) => line 2 written as 0.0 / 1 / yearold+1;
+    !     clock_init reads a clean new-year day-1 restart.
+    call roundtrip(84600.0_WP, 365, 1948,  86400.0_WP, 365, 1948,  365)
+    if (partit%mype == 0) then
+        write(*,'(a)') '  (C) year rollover in clock_finish'
+        call check_r('C timeold',   timeold,   84600.0_WP)
+        call check_i('C dayold',    dayold,    365)
+        call check_i('C yearold',   yearold,   1948)
+        call check_r('C timenew',   timenew,   0.0_WP)
+        call check_i('C daynew',    daynew,    1)
+        call check_i('C yearnew',   yearnew,   1949)
+        call check_l('C r_restart', r_restart, .true.)
+    end if
+
     if (partit%mype == 0) then
         write(*,*)
         if (nfail == 0) then
-            write(*,'(a)') 'fesom_clocktest: PASS (all milestones + clock_nsteps max|Δ|=0)'
+            write(*,'(a)') 'fesom_clocktest: PASS (milestones + clock_nsteps + clock_finish round-trip max|Δ|=0)'
         else
             write(*,'(a,i0,a)') 'fesom_clocktest: FAIL (', nfail, ' mismatches)'
         end if
@@ -131,6 +181,33 @@ contains
             nfail = nfail + 1
         end if
     end subroutine check_r
+
+    subroutine check_l(label, got, want)
+        character(len=*), intent(in) :: label
+        logical,          intent(in) :: got, want
+        if (got .eqv. want) then
+            write(*,'(a,a,a,l1)') '  ok   ', label, ' = ', got
+        else
+            write(*,'(a,a,a,l1,a,l1)') '  FAIL ', label, ' got ', got, ' want ', want
+            nfail = nfail + 1
+        end if
+    end subroutine check_l
+
+    subroutine roundtrip(t_o, d_o, y_o, t_n, d_n, y_n, ndp)
+        ! Load the in-memory clock, clock_finish it to RestartOutPath (rank 0 writes the
+        ! single .clock), then clock_init reads it straight back on every rank.
+        real(kind=WP), intent(in) :: t_o, t_n
+        integer,       intent(in) :: d_o, y_o, d_n, y_n, ndp
+        integer :: ie
+        if (partit%mype == 0) then
+            timeold = t_o; dayold = d_o; yearold = y_o
+            timenew = t_n; daynew = d_n; yearnew = y_n
+            ndpyr   = ndp
+            call clock_finish
+        end if
+        call MPI_Barrier(partit%MPI_COMM_FESOM, ie)
+        call clock_init(partit)
+    end subroutine roundtrip
 
     subroutine milestone(k, t, d, y, mo, dim)
         integer,       intent(in) :: k, d, y, mo, dim

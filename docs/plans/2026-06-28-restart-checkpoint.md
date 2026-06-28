@@ -105,26 +105,29 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
 ### Stage 0 — Clock write (F-E) + `RestartOutPath`
 *Smallest, independent piece; unblocks the `.clock` write that drives restart detection.*
 
-#### Task 0.1: Port `clock_finish`/`clock_newyear`, add `RestartOutPath`, gate via `run_clocktest`
+#### Task 0.1 ✅: Port `clock_finish`/`clock_newyear`, add `RestartOutPath`, gate via `run_clocktest`
 
 **Files:**
 - Modify: `src/infra/mod_clock.F90`
-- Modify: `src/params/mod_config.F90`
+- Modify: `src/params/mod_config.F90` (no change needed — `RestartOutPath` already present at `:30`/`:33`)
 - Modify: `tools/run_clocktest.sh`
+- Modify: `src/drivers/fesom_clocktest.F90` (➕ the round-trip assertions must live in the Fortran driver that
+      `run_clocktest.sh` runs — `clock_finish`/`clock_init` are module procedures, not shell-callable)
 
-- [ ] `RestartOutPath` **already exists** (`mod_config.F90:30`, in the `/paths/` namelist `:33`) — just add it to
+- [x] `RestartOutPath` **already exists** (`mod_config.F90:30`, in the `/paths/` namelist `:33`) — just add it to
       `mod_clock`'s `use mod_config` list (`mod_clock.F90:17` currently imports only `RestartInPath`); the lifecycle
       sets it from `FESOM3_RESTART=<dir>` in Stage 5
-- [ ] port `clock_finish` into `mod_clock` **verbatim** from `gen_modules_clock.F90:170-200`: write
+- [x] port `clock_finish` into `mod_clock` **verbatim** from `gen_modules_clock.F90:170-200`: write
       `RestartOutPath//runid//'.clock'`, two lines (`timeold dayold yearold` / `dum_timenew dum_daynew dum_yearnew`)
       with the year-rollover normalization (`daynew==ndpyr .and. timenew==86400` → `0.0 / 1 / yearold+1`)
-- [ ] port `clock_newyear` (`:204-213`, in-memory rollover used for folder naming)
-- [ ] drop the "OMITTED / deferred" note at `mod_clock.F90:14-15`
-- [ ] extend `tools/run_clocktest.sh`: `clock_finish` write → `clock_init` read round-trips **exactly** (both lines;
+- [x] port `clock_newyear` (`:204-213`, in-memory rollover used for folder naming)
+- [x] drop the "OMITTED / deferred" note at `mod_clock.F90:14-15`
+- [x] extend `tools/run_clocktest.sh`: `clock_finish` write → `clock_init` read round-trips **exactly** (both lines;
       explicitly exercise the year-rollover branch `daynew==ndpyr .and. timenew==86400`); equal lines ⇒ cold
       (`r_restart=.false.`), differing ⇒ restart. (List-directed `fmt=*` real I/O round-trips here only because
       `timenew` is a clean multiple of `dt` — note the dependence.)
-- [ ] **GATE:** `run_clocktest.sh` GREEN (write→read round-trip exact; `r_restart` detection both ways)
+- [x] **GATE:** `run_clocktest.sh` GREEN (write→read round-trip exact; `r_restart` detection both ways) — PASS
+      np=1 **and** np=2 (Intel dp, worktree build); cases A/B/C all `max|Δ|=0`, year-rollover branch fired (C)
 
 ### Stage 1 — `decomp_gather` (the inverse redistribution)
 *The one genuinely new MPI routine; it is the literal transpose of the proven `decomp_redistribute`.*
