@@ -426,10 +426,16 @@ node+elem-centroid coords, 2 records, 244659 elem ≈ 2× node), bolus correctly
 only open M9 item is the MANUAL `ushow` display smoke (the xarray/zarr round-trip is the automated proxy).
 
 **NEXT MILESTONE = restart/checkpoint.** The M9 brainstorm deliberately split restart OUT (output-first); it is now the
-next piece. Port `io_restart.F90` write/read (state serialization — the M8 `tke` restart precedent + the `r_restart`/
-`clock_finish`/`clock_newyear`/`use_transit` items rehomed to `mod_clock` and deferred here); gate =
-restart-reproducibility `max|Δ|=0` straight-through vs split-restart (see the M8/M9 roadmap §below, lines ~741-750).
-Alternative if restart waits: **M3+ physics** per the roadmap. Either way M0–M9 are byte-exact & tagged (`m0…m9`).
+next piece. **➡️ Detailed brainstorm-prep handoff: `docs/plans/2026-06-28-restart-handoff.md`** — grounded oracle→FESOM3
+state inventory, what's already in place (the `write_t_dyn`/`read_t_dyn`/`write_t_mesh`/`write_t_tracer_data` dump
+primitives, `r_restart`, `RestartInPath`), and the **design forks to brainstorm WITH the user first** (F-A file
+format/backend: reuse M9 Zarr vs port FESOM2 netCDF-gather vs raw per-rank Fortran; F-B partition portability; F-C the
+EVP `sigma` fork — it carries across steps but FESOM2 omits it from the restart, which shapes whether the gate is
+`max|Δ|=0` on ice; F-D cadence; F-E clock write; F-F prognostic-vs-recompute). Port FESOM2 `io_restart.F90` write/read
+(M8 `tke` precedent + the `clock_finish`/`clock_newyear`/`use_transit` items rehomed to `mod_clock` and deferred here);
+gate = restart-reproducibility `max|Δ|=0` straight-through vs split-restart (+ optional cross-partition). **Run the
+brainstorm THEN write the plan THEN implement** (the M9 pattern). Alternative if restart waits: **M3+ physics** per the
+roadmap. Either way M0–M9 are byte-exact & tagged (`m0…m9`).
 
 M0–M8 COMPLETE & tagged (m0…m8); forcing-perf ✅ RESOLVED (`708fdf4`/`ce2288a`/`1ef9516`; L133).
 
