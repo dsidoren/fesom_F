@@ -50,9 +50,10 @@ module mod_io_means
     use mod_mesh,        only: t_mesh
     use mod_partit,      only: t_partit
     use mod_part_bounds, only: is_multirank, local_dims
-    use mod_mesh_rotate, only: vector_r2g, r2g
+    use mod_mesh_rotate, only: vector_r2g
     use mod_io_zarr
     use mod_io_decomp
+    use mod_io_coords    ! shared lon/lat + _ARRAY_DIMENSIONS + UGRID-attr embedding (Task 2.1)
     implicit none
     private
     public :: t_io_means, t_io_config, t_io_entry, t_means_clock
@@ -264,31 +265,16 @@ contains
         allocate(io%lon_owned(max(1,io%nNodO)),  io%lat_owned(max(1,io%nNodO)), &
                  io%rlon_owned(max(1,io%nNodO)), io%rlat_owned(max(1,io%nNodO)), &
                  io%nlev_owned(max(1,io%nNodO)))
-        do i = 1, io%nNodO
-            io%lon_owned(i)  = real(mesh%geo_coord_nod2D(1,i)/rad, WP)
-            io%lat_owned(i)  = real(mesh%geo_coord_nod2D(2,i)/rad, WP)
-            io%rlon_owned(i) = real(mesh%coord_nod2D(1,i), WP)
-            io%rlat_owned(i) = real(mesh%coord_nod2D(2,i), WP)
-            io%nlev_owned(i) = mesh%nlevels_nod2D(i)
-        end do
+        call io_coords_compute(DECOMP_NODE, mesh, io%nNodO, io%lon_owned, io%lat_owned, &
+                               io%rlon_owned, io%rlat_owned, io%nlev_owned)
         ! Task 2.7: owned ELEMENT-centroid coords. ROTATED centroid = simple mean of the 3 rotated node
         ! coords (FESOM2 io_r2g:3004 sum(coord_nod2D(1:2,elem2D_nodes(1:3,e)))/3); embedded GEOGRAPHIC
         ! centroid = its r2g image (deg). Element nlevels drives the 3-D below-bottom mask.
         allocate(io%elon_owned(max(1,io%nElemO)),  io%elat_owned(max(1,io%nElemO)), &
                  io%relon_owned(max(1,io%nElemO)), io%relat_owned(max(1,io%nElemO)), &
                  io%enlev_owned(max(1,io%nElemO)))
-        block
-            real(WP) :: rcx, rcy, gcx, gcy
-            integer  :: e
-            do e = 1, io%nElemO
-                rcx = sum(mesh%coord_nod2D(1, mesh%elem2D_nodes(1:3,e))) / 3.0_WP
-                rcy = sum(mesh%coord_nod2D(2, mesh%elem2D_nodes(1:3,e))) / 3.0_WP
-                io%relon_owned(e) = rcx; io%relat_owned(e) = rcy
-                call r2g(gcx, gcy, rcx, rcy)               ! rotated centroid -> geographic (rad)
-                io%elon_owned(e) = real(gcx/rad, WP); io%elat_owned(e) = real(gcy/rad, WP)
-                io%enlev_owned(e) = mesh%nlevels(e)
-            end do
-        end block
+        call io_coords_compute(DECOMP_ELEM, mesh, io%nElemO, io%elon_owned, io%elat_owned, &
+                               io%relon_owned, io%relat_owned, io%enlev_owned)
         ! vertical coords (CF positive-down depths): nz = -zbar(1:nl), nz1 = -Z(1:nl-1)
         allocate(io%depth_nz(io%nl), io%depth_nz1(io%nl-1))
         do i = 1, io%nl;   io%depth_nz(i)  = real(-mesh%zbar(i), WP); end do
@@ -817,8 +803,8 @@ contains
         call def_field_store(io%f(k), D%N, D%C, io%mype, tunits, trim(io%calendar), &
                              io%chunk_time, vchunk_eff(io%chunk_vert, io%f(k)%nlev), trim(io%compressor))
         if (io%mr) call MPI_Barrier(io%comm, ierr)
-        call put_static(io, D, io%f(k)%store, io%f(k)%a_lon, own_lon)
-        call put_static(io, D, io%f(k)%store, io%f(k)%a_lat, own_lat)
+        call io_coords_put(D, io%f(k)%store, io%f(k)%a_lon, own_lon)
+        call io_coords_put(D, io%f(k)%store, io%f(k)%a_lat, own_lat)
         ! vertical coord is global/replicated -> rank 0 writes it whole (like mesh.diag nz/nz1)
         if (io%mype == 0 .and. io%f(k)%ndim == 3) then
             if (trim(io%f(k)%vdim) == 'nz') then
@@ -891,8 +877,7 @@ contains
             call zarr_array_init(f%a_vert, trim(f%vdim), [f%nlev], [f%nlev], '<f8', has_fill=.false.)
         end if
         call zarr_array_init(f%a_time, 'time', [0], [chunk_time], '<f8', has_fill=.false.)
-        call zarr_array_init(f%a_lon,  'lon',  [N], [C], '<f8', has_fill=.false.)
-        call zarr_array_init(f%a_lat,  'lat',  [N], [C], '<f8', has_fill=.false.)
+        call io_coords_init_lonlat(f%a_lon, f%a_lat, N, C)
         if (mype /= 0) return
         call zarr_attrs_init(gat)
         call zattr_str(gat, 'Conventions', 'CF-1.8')
@@ -930,36 +915,9 @@ contains
         call zattr_str(at, 'units', tunits)
         call zattr_str(at, 'calendar', calendar)
         call zarr_define_array(f%store, f%a_time, at)
-        ! lon / lat entity coords (node or element-centroid, dim = f%hdim)
-        call zarr_attrs_init(at)
-        call zattr_str_arr(at, '_ARRAY_DIMENSIONS', [character(len=8) :: f%hdim])
-        call zattr_str(at, 'long_name', 'longitude'); call zattr_str(at, 'units', 'degrees_east')
-        call zattr_str(at, 'standard_name', 'longitude')
-        call zarr_define_array(f%store, f%a_lon, at)
-        call zarr_attrs_init(at)
-        call zattr_str_arr(at, '_ARRAY_DIMENSIONS', [character(len=8) :: f%hdim])
-        call zattr_str(at, 'long_name', 'latitude'); call zattr_str(at, 'units', 'degrees_north')
-        call zattr_str(at, 'standard_name', 'latitude')
-        call zarr_define_array(f%store, f%a_lat, at)
+        ! lon / lat entity coords (node or element-centroid, dim = f%hdim) — shared embedding
+        call io_coords_define_lonlat(f%store, f%a_lon, f%a_lat, f%hdim)
     end subroutine def_field_store
-
-    ! Redistribute a static 1-D entity field (node or element) and let each writer write its chunks [c]
-    ! (lon/lat embed). D = the field's entity decomp.
-    subroutine put_static(io, D, store, arr, owned)
-        type(t_io_means),   intent(in) :: io
-        type(t_io_decomp),  intent(in) :: D
-        type(t_zarr_store), intent(in) :: store
-        type(t_zarr_array), intent(in) :: arr
-        real(WP),           intent(in) :: owned(:)
-        real(WP), allocatable :: buf(:)
-        integer :: c, lo
-        allocate(buf(max(1, D%w_nbuf)))
-        call decomp_redistribute(D, owned, buf, 0.0_WP)
-        do c = D%w_first_chunk, D%w_last_chunk
-            lo = (c - D%w_first_chunk)*D%C + 1
-            call zarr_write_chunk(store, arr, [c], buf(lo:lo + D%C - 1))
-        end do
-    end subroutine put_static
 
     ! ----------------------------------------------------------------- small helpers
 

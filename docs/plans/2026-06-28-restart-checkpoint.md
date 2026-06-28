@@ -154,17 +154,28 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
 ### Stage 2 — Shared coord/attr helper (DRY)
 *Factor the ushow-viewability embedding so restart stores are byte-identical in shape to M9 output stores.*
 
-#### Task 2.1: Extract the coord + `_ARRAY_DIMENSIONS` + UGRID-attr embedding from `mod_io_means`
+#### Task 2.1 ✅: Extract the coord + `_ARRAY_DIMENSIONS` + UGRID-attr embedding from `mod_io_means`
 
 **Files:**
 - Create: `src/io/mod_io_coords.F90`
 - Modify: `src/io/mod_io_means.F90`
 
-- [ ] extract the per-store `lon`/`lat` + `_ARRAY_DIMENSIONS` + UGRID-attr embedding (incl. the elem-centroid
-      coordinate path) into a shared routine `(store, entity, mesh, partit, decomp)` → writes coords + attrs
-- [ ] `mod_io_means` calls the shared helper (pure refactor, no behavior change)
-- [ ] **GATE:** `run_output_gate.sh` + `run_meshdiag_gate.sh` + `run_zarrsmoke.sh` stay byte-identical
-      (`zarr_diff.py` `max|Δ|=0`); `ctest` unchanged GREEN
+- [x] extract the per-store `lon`/`lat` + `_ARRAY_DIMENSIONS` + UGRID-attr embedding (incl. the elem-centroid
+      coordinate path) into a shared routine `(store, entity, mesh, partit, decomp)` → writes coords + attrs —
+      4 VERBATIM routines in `mod_io_coords`: `io_coords_compute(entity,mesh,nO,lon,lat,rlon,rlat,nlev)` (node coords
+      AND elem-centroid r2g path), `io_coords_init_lonlat(a_lon,a_lat,N,C)`, `io_coords_define_lonlat(store,a_lon,a_lat,hdim)`
+      (the `_ARRAY_DIMENSIONS`+CF attrs), `io_coords_put(D,store,arr,owned)` (redistribute+write the coord chunks).
+      `nO` is the caller's partit-derived local count; `partit` info enters via `nO`/`decomp`. (auto-built by the
+      `src/io/*.F90` GLOB; Fortran scanner orders `mod_io_coords` before `mod_io_means`.)
+- [x] `mod_io_means` calls the shared helper (pure refactor, no behavior change) — `means_init` calls `io_coords_compute`
+      ×2 (node+elem), `def_field_store` calls `io_coords_init_lonlat`+`io_coords_define_lonlat`, `open_field_store`
+      calls `io_coords_put` ×2; the old `put_static` + inline coord/attr blocks removed; unused `r2g` import dropped
+- [x] **GATE:** `run_output_gate.sh` + `run_meshdiag_gate.sh` + `run_zarrsmoke.sh` stay byte-identical
+      (`zarr_diff.py` `max|Δ|=0`); `ctest` unchanged GREEN — ALL GREEN (Intel dp, worktree build): zarrsmoke
+      max|Δ|=0; meshdiag np=1 lon/lat max|Δ|=0 (18 vars, 0 failures); output np 1/2/8 + Task-2.6 knob sweep all
+      max|Δ|=0 + partition-independent. **Plus a direct byte-diff: pre-refactor `main` build vs post-refactor
+      worktree build of `fesom_outputsmoke` → BYTE-IDENTICAL store trees at np=1 AND np=2** (raw chunk bytes +
+      `.zarray`/`.zattrs` + lon/lat/time coords). ctest 20/20 PASS (incl. `test_io_means_np1`)
 
 ### Stage 3 — `mod_io_restart` WRITE path
 *Per-field M9-shape snapshot stores inside an immutable, atomically-finalized checkpoint folder.*
