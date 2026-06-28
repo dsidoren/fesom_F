@@ -320,42 +320,40 @@ The live "Oracle" section above + the "M2.12 entry notes" below cover what the c
 
 ## Next task
 
-### ⏭️ M9 (netCDF output + restart) — NEXT. **START WITH A BRAINSTORM, do NOT jump to implementation.**
+### ⏭️ M9 (Zarr OUTPUT) — brainstorm + plan DONE (2026-06-28). **NEXT SESSION: IMPLEMENT, start at Task 0.1.**
 
-**Current state (2026-06-28):** M0–M8 COMPLETE & tagged (m0…m8). The **forcing-perf side-investigation is
-✅ RESOLVED & COMMITTED** (`708fdf4`/`ce2288a`/`1ef9516` on `main`): persistent HDF5 handle + double-buffer
-in `forcing_getcoeffld` ⇒ F3 forcing `17.7→5.78 ms/step` at dist_512, now *faster* than F2 (7.03); F3 beats
-F2 overall. Byte-exact (12/48-step + year-rollover gates `max|Δ|=0`, ctest 13/13). See the RESOLVED note at
-L133 + `docs/plans/2026-06-28-forcing-perf-investigation.md`.
+**Plan:** `docs/plans/2026-06-28-m9-zarr-output.md` — brainstormed WITH the user (this session) + plan-review-revised;
+the design is **SETTLED** (do not re-open it). **Restart is split OUT to its own LATER milestone** (the user chose
+output-first). M0–M8 COMPLETE & tagged (m0…m8); forcing-perf side-investigation ✅ RESOLVED & committed
+(`708fdf4`/`ce2288a`/`1ef9516`; RESOLVED note at L133).
 
-**⚠️ Process directive from the user (2026-06-28):** M9 is where the **model-harness architecture** gets
-decided, and **the user wants to control those decisions**. So the **next session MUST begin by
-brainstorming an M9 plan WITH the user** (use `brainstorm:do` / `planning:make`) — present options and
-trade-offs, let the user choose, *then* write the plan, *then* implement. Do **not** start coding M9 from a
-guessed design.
+**M9 = model OUTPUT as hand-rolled Zarr v2** — xarray-readable, openable by the user's `ushow` (`/home/a/a270088/ushow`),
+UGRID-1.0, + a `fesom.mesh.diag.zarr` analog. **Settled design:**
+- **Write engine:** canonical global-id ordering (partition-INDEPENDENT files) + uniform chunks (configurable
+  `time/vert/horiz`) + **distributed chunk-writers** (configurable `n_writers` subset; one `MPI_Alltoallv` redistributes
+  compute→canonical-chunk layout, level-by-level for 3D; **NO single-rank gather**) + pluggable codec (`none` default,
+  **lz4** first). Hand-rolled (NCZarr exists on Levante but we chose control/parallelism). The user explicitly rejected
+  BOTH gather-to-root AND partition-dependent files → the distributed-writer redistribution is the resolution.
+- **4 modules** (`src/io/mod_io_*`, dwarf-aligned, auto-GLOB-built): `mod_io_zarr` (v2 writer: JSON + C-order chunks +
+  codec), `mod_io_decomp` (the Alltoallv redistribution + writer subset), `mod_io_meshdiag` (UGRID mesh.diag),
+  `mod_io_means` (def_stream registry + accumulate/average + interval write). Driver gets 2 hooks (meshdiag at setup;
+  `output(istep)` **after `step_oce` ~line 730, ABOVE the `if(.not.step_diag) cycle` at line 740**); physics untouched.
+- **On disk:** per-variable-per-year stores (`temp.fesom.1964.zarr`, … — pyfesom/ushow-compatible) + separate
+  `fesom.mesh.diag.zarr`; coords embedded, connectivity in mesh.diag; yearly split (configurable).
+- **Fields (v1):** node `T,S,ssh,sst,sss,a_ice,m_ice,m_snow` + element `u,v` + node `w`; mean+snapshot per-var; per-var
+  freq; float32 default; vectors default **geographic** (must **port `vector_r2g`** — only `vector_g2r` exists), knob to native.
+- **Gates:** (1) mesh.diag vs FESOM2 `fesom.mesh.diag.nc`; (2) field values vs FESOM2 output **chasing `max|Δ|=0`** via
+  byte-aligned averaging; (3) partition-independence `dist_2 ≡ dist_8`; (4) python round-trip; (5) ushow smoke. Python
+  gate env: `/work/ab0995/a270088/mambaforge/bin/python3` (xarray/zarr/numpy).
 
-**M9 scope (to be refined in the brainstorm):** netCDF **output** (diagnostics/mean fields) + **restart**
-(write/read model state incl. `tke` serialization for cvmix, and the ALE/ice/GM state) with bit-reproducible
-restart→continue (restarted run byte-exact vs an uninterrupted run).
+**Build order:** Task 0.1 (`mod_io_zarr` scaffold) → 0.2 (chunk write + round-trip) → 0.3 (lz4) → Stage 1 (mesh.diag
+1.2a/1.2b → MR 1.3) → Stage 2 (fields 2.1→2.6). **1-rank gate FIRST then multi-rank, every stage** (optional-`partit`).
+Plan-review caught: `gradient_vec` is unbuilt in F3 (deferred from mesh.diag); no invertible `vector_r2g` (port it from
+FESOM2 `gen_modules_rotate_grid.F90`); the line-740 `cycle` would skip output (hook goes above it); CF `time:calendar`
+needed (L49-sensitive); pin `chunk_time=1` for v1.
 
-**Decision axes to put to the user in the brainstorm (each is a "harness" choice the user wants to own):**
-1. **Harness structure** — keep the monolithic `src/drivers/fesom_lifecycle_native_mr.F90` as the production
-   driver, or refactor into a cleaner model/IO separation before output/restart land? Where does I/O plug in?
-2. **Output format & schema** — FESOM2-compatible netCDF (so existing post-processing/`pyfesom`/diag tools
-   work) vs a fresh schema? Which fields, averaging/snapshot, output frequency, mesh+metadata embedding.
-3. **Parallel I/O strategy** — gather-to-root + serial write (simple, proven) vs per-rank files vs parallel
-   netCDF/HDF5 collective. Note the forcing-perf lesson: on Levante the `MPI_Bcast` path is slow (two-copy
-   vader, KNEM off), so gather/scatter collectives need measuring, not assuming.
-4. **Restart format & reproducibility** — FESOM2-compatible raw/netCDF restart vs native; exact state list
-   (T/S/u/v/w/ssh + ALE thickness/zbar + ice EVP + cvmix `tke`/`tdiss` + GM); the **byte-exact
-   restart-continue gate** recipe (analogous to the existing `max|Δ|=0` oracle gates).
-5. **Byte-identity target** — does output/restart need to byte-match FESOM2's *files*, or only preserve the
-   model state byte-exactly across a restart? (The project bar so far is `max|Δ|=0` vs the FESOM2 oracle.)
-
-**Pointers for the brainstorm:** the current driver already emits `fesom_raw_restart`/`fesom_bin_restart`/
-`fesom.clock` stubs in the gate rundirs (see what they actually write). FESOM2 reference: `io_restart` +
-`gen_modules_read_NetCDF`/`io_meandata` in `/home/a/a270088/port2/fesom2/src`. Memory:
-[[project-fesom3-implementation-state]], [[stay-close-to-fortran]], [[project-levante-mpi-knem-gotcha]].
+**Memory:** [[project-fesom3-implementation-state]], [[stay-close-to-fortran]], [[project-levante-mpi-knem-gotcha]],
+[[project-forcing-is-jra55-not-core2]] (calendar sensitivity for the CF `time` coord).
 
 ---
 
