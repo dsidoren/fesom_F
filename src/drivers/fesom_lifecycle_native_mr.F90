@@ -89,6 +89,10 @@ program fesom_lifecycle_native_mr
     use oce_muscl_adv,      only: muscl_adv_init
     use oce_ssh_rhs,        only: init_stiff_mat_ale
     use mod_step_oce,       only: step_oce
+    use mod_io_meshdiag,    only: meshdiag_write
+    use mod_io_means,       only: t_io_means, means_init, means_define_node2d, means_define_node3d, &
+                                  means_define_vector3d, means_accumulate, means_begin, means_write, &
+                                  means_finalize
     use mod_dump,           only: dump_init, dump_finalize
     implicit none
 
@@ -104,6 +108,11 @@ program fesom_lifecycle_native_mr
     type(t_ic3d_config):: ic
     integer :: n, nz, nl, nzmin, nzmax, e, tr_num, nsteps, ios, env_len, nsw, whichevp
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF
+    ! M9 Stage 2: field output (mod_io_means), env-gated (FESOM3_OUTPUT / FESOM3_OUTPUT_EVERY).
+    type(t_io_means) :: oio
+    logical          :: do_output
+    integer          :: out_every
+    character(len=4096) :: out_env, out_dir_o
     ! M8a: model clock (cold start from FESOM3_START_CLOCK) + run-length driver
     integer            :: clk_d0, clk_y0, clk_unit, idx, ierr
     real(kind=WP)      :: clk_t0, dstat(6)   ! dstat: M8c Step-3 global per-step physical diagnostics
@@ -694,6 +703,54 @@ program fesom_lifecycle_native_mr
         call dump_init(partit%mype, nNodO, partit%myList_nod2D, nElemO, partit%myList_elem2D)
     end if
 
+    ! M9 Stage 1: emit fesom.mesh.diag.zarr after setup (mesh + zbar_e_bot ready), env-gated.
+    block
+        character(len=4096) :: md_env, md_out
+        call get_environment_variable('FESOM3_MESHDIAG', md_env)
+        if (len_trim(md_env) > 0) then
+            call get_environment_variable('FESOM3_MESHDIAG_OUT', md_out)
+            if (len_trim(md_out) == 0) md_out = 'fesom.mesh.diag.zarr'
+            call meshdiag_write(trim(md_out), mesh, partit)
+            if (partit%mype == 0) write(*,'(a)') 'M9: wrote '//trim(md_out)
+        end if
+    end block
+
+    ! M9 Stage 2: register snapshot node-scalar output (ssh/sst/sss/a_ice/m_ice/m_snow), env-gated.
+    ! FESOM3_OUTPUT=<dir> turns it on; FESOM3_OUTPUT_EVERY=<k> writes every k steps (default 1).
+    do_output = .false.; out_every = 1
+    call get_environment_variable('FESOM3_OUTPUT', out_env)
+    if (len_trim(out_env) > 0) then
+        do_output = .true.
+        out_dir_o = out_env
+        block
+            character(len=64) :: ev
+            integer :: ie
+            call get_environment_variable('FESOM3_OUTPUT_EVERY', ev)
+            if (len_trim(ev) > 0) then; read(ev,*,iostat=ie) out_every; if (ie /= 0) out_every = 1; end if
+            if (out_every < 1) out_every = 1
+        end block
+        call means_init(oio, trim(out_dir_o), mesh, partit, calendar=trim(forc_calendar))
+        call means_define_node2d(oio, 'ssh',    'sea surface elevation',     'm',   std='sea_surface_height_above_geoid')
+        call means_define_node2d(oio, 'sst',    'sea surface temperature',   'C',   std='sea_surface_temperature')
+        call means_define_node2d(oio, 'sss',    'sea surface salinity',      'psu')
+        call means_define_node2d(oio, 'a_ice',  'ice concentration',         '')
+        call means_define_node2d(oio, 'm_ice',  'effective ice thickness',   'm')
+        call means_define_node2d(oio, 'm_snow', 'effective snow thickness',  'm')
+        ! 3-D node fields: T/S on nl-1 layers (vdim nz1), w on nl levels (vdim nz). Below-bottom masked.
+        call means_define_node3d(oio, 'temp', 'sea water potential temperature', 'C', &
+                                 on_full_levels=.false., std='sea_water_potential_temperature')
+        call means_define_node3d(oio, 'salt', 'sea water salinity', 'psu', &
+                                 on_full_levels=.false., std='sea_water_salinity')
+        call means_define_node3d(oio, 'w',    'vertical velocity', 'm/s', on_full_levels=.true.)
+        ! node velocity vector pair unod/vnod (dyn%uvnode(1/2,:,:), nl-1 layers) = FESOM2's default
+        ! velocity output; r2g-rotated to geographic at write (FESOM3_VEC_FRAME=native keeps the
+        ! rotated-mesh components). Accumulated independently; rotated together in means_write.
+        call means_define_vector3d(oio, 'unod', 'vnod', 'zonal velocity at nodes', &
+                                   'meridional velocity at nodes', 'm/s', on_full_levels=.false.)
+        if (partit%mype == 0) write(*,'(a,i0,a)') 'M9: field output ON -> '//trim(out_dir_o)// &
+            ' (every ', out_every, ' steps)'
+    end if
+
     !===========================================================================
     ! runloop: ocean2ice -> [native atm] -> ice_timestep -> oce_fluxes_mom -> oce_fluxes ->
     ! step_oce (the FESOM2 runloop order; update_atm_forcing replaced by apply_native_forcing).
@@ -728,6 +785,24 @@ program fesom_lifecycle_native_mr
                       atm%real_salt_flux, is_nonlinfs, stress_surf, partit, &   ! M6a-4: native rsf (zstar)
                       stress_node_surf=atm%stress_node_surf)
         call timer_stop(TMR_STEP_OCE)
+        ! M9 Stage 2: snapshot field output (state is the step's final value; ABOVE the step_diag
+        ! cycle so production steps output too). time = seconds since year start (per-year store ref).
+        if (do_output .and. mod(n, out_every) == 0) then
+            ! all six are snapshot streams (count=1) -> accumulate the live value then write the record.
+            call means_accumulate(oio, 'ssh',    dyn%eta_n(1:nNodO))
+            call means_accumulate(oio, 'sst',    tracers%data(1)%values(1,1:nNodO))
+            call means_accumulate(oio, 'sss',    tracers%data(2)%values(1,1:nNodO))
+            call means_accumulate(oio, 'a_ice',  ice%data(1)%values(1:nNodO))
+            call means_accumulate(oio, 'm_ice',  ice%data(2)%values(1:nNodO))
+            call means_accumulate(oio, 'm_snow', ice%data(3)%values(1:nNodO))
+            call means_accumulate(oio, 'temp',   tracers%data(1)%values(1:nl-1, 1:nNodO))
+            call means_accumulate(oio, 'salt',   tracers%data(2)%values(1:nl-1, 1:nNodO))
+            call means_accumulate(oio, 'w',      dyn%w(1:nl, 1:nNodO))
+            call means_accumulate(oio, 'unod',   dyn%uvnode(1, 1:nl-1, 1:nNodO))
+            call means_accumulate(oio, 'vnod',   dyn%uvnode(2, 1:nl-1, 1:nNodO))
+            call means_begin(oio, yearnew, real(daynew-1,real64)*86400.0_real64 + real(timenew,real64))
+            call means_write(oio)
+        end if
         ! perf monitoring: periodic (cumulative) per-component timing report every mon_every steps.
         ! Collective (all ranks call it — placed before the step_diag cycle); 0 => only the final report.
         if (mon_every > 0 .and. mod(n, mon_every) == 0) &
@@ -751,6 +826,10 @@ program fesom_lifecycle_native_mr
                 '  a_ice=', dstat(3), '  m_ice=', dstat(4), &
                 '  Tmax=', dstat(5), '  Smax=', dstat(6)
     end do
+    if (do_output) then
+        call means_finalize(oio)
+        if (partit%mype == 0) write(*,'(a)') 'M9: field output finalized.'
+    end if
     ! permanent end-of-run per-component diagnostics (mean/min/max ms/step + % of loop, ocean broken down)
     call timer_report(partit%MPI_COMM_FESOM, partit%mype, partit%npes, nsteps, 'FINAL')
 

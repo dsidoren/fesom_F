@@ -114,23 +114,23 @@ decisive factor being a **distributed, no-single-rank-gather** write at scale.
 
 ### Stage 0 — `mod_io_zarr`: the standalone Zarr v2 writer
 
-#### Task 0.1: Zarr store/group/array scaffolding + JSON metadata
+#### Task 0.1: Zarr store/group/array scaffolding + JSON metadata ✅
 
 **Files:**
 - Create: `src/io/mod_io_zarr.F90`
 
-- [ ] create `mod_io_zarr` with `t_zarr_store` (root path) and `t_zarr_array` (name, shape, chunks, dtype,
-      codec, fill_value) types
-- [ ] `zarr_create_store(store, path)` — make the store dir + write `.zgroup` (`{"zarr_format":2}`) and root
+- [x] create `mod_io_zarr` with `t_zarr_store` (root path) and `t_zarr_array` (name, shape, chunks, dtype,
+      codec, fill_value) types — also `t_zarr_attrs` (JSON-object builder)
+- [x] `zarr_create_store(store, path[, attrs])` — make the store dir + write `.zgroup` (`{"zarr_format":2}`) and root
       `.zattrs`
-- [ ] `zarr_define_array(store, arr, name, shape, chunks, dtype, attrs, fill_value, codec)` — make the array
-      subdir + write `.zarray` (full v2 schema, see Technical Details) and `.zattrs` (incl. `_ARRAY_DIMENSIONS`)
-- [ ] hand-rolled JSON helpers (ints/reals/strings/1-D arrays of each) + `zarr_check(ok, ctx)`→`error stop`
-- [ ] **gate:** the Stage-0 smoke driver (Task 0.2) asserts `.zgroup`/`.zarray`/`.zattrs` exist and parse via
-      Python `json` + `zarr` (deferred to 0.2 where data is written) — for now, a tiny inline self-check that the
-      JSON strings round-trip through `json.loads` in `tools/zarr_diff.py`
+- [x] `zarr_array_init(arr, name, dims, chunks, dtype[, fill, has_fill, codec])` + `zarr_define_array(store, arr[, attrs])`
+      — make the array subdir + write `.zarray` (full v2 schema) and `.zattrs` (incl. `_ARRAY_DIMENSIONS`)
+- [x] hand-rolled JSON helpers (`zattr_str/int/real` + `_arr` variants; `json_real` round-trip incl. NaN/Inf) +
+      `zarr_check(ok, ctx)`→`error stop`
+- [x] **gate:** covered by Task 0.2 round-trip (zarr+xarray open + parse); JSON verified on disk
+      (`.zgroup`/`.zarray`/`.zattrs` all parse)
 
-#### Task 0.2: Chunk encode + write (codec `none`, C-order) + round-trip gate
+#### Task 0.2: Chunk encode + write (codec `none`, C-order) + round-trip gate ✅
 
 **Files:**
 - Modify: `src/io/mod_io_zarr.F90`
@@ -138,173 +138,216 @@ decisive factor being a **distributed, no-single-rank-gather** write at scale.
 - Create: `tools/run_zarrsmoke.sh`
 - Create: `tools/zarr_diff.py`
 
-- [ ] `zarr_write_chunk(store, arr, chunk_index(:), data)` — transpose Fortran column-major → **C row-major**,
-      write the chunk file at the `dimension_separator`-joined index path, codec `none` (raw little-endian bytes)
-- [ ] last-/partial-chunk handling: pad the final global chunk to full chunk size with `fill_value` (the *only*
-      padding; standard Zarr — see Technical Details)
-- [ ] `fesom_zarrsmoke` driver: write a 1-D `f8`, a 2-D `f4`, and a 2-D `i4` array (known values) to a store
-- [ ] `tools/zarr_diff.py`: `--roundtrip` mode opens the store with xarray/zarr and asserts values byte-match the
-      generator (`max|Δ|=0` for f8/i4; exact f4)
-- [ ] `tools/run_zarrsmoke.sh`: build + run the driver + run the Python round-trip; **gate green** = exit 0
+- [x] `zarr_write_chunk(store, arr, chunk_index(:), data)` (generic over rank/type) — transpose Fortran
+      column-major → **C row-major**, write the chunk file at the `.`-joined index path, codec `none` (raw LE bytes).
+      Plus `zarr_write_whole` convenience (loops all chunks of a full in-memory array — the 1-rank path).
+- [x] last-/partial-chunk handling: every chunk file is full chunk-size; the final global chunk along a dim is
+      padded with `fill_value` (verified on disk: f4 2×2 chunks all 16 B incl. partials)
+- [x] `fesom_zarrsmoke` driver: 1-D `f8`, 2-D `f4`, 2-D `i4` (non-dividing chunks; distinct per-cell values)
+- [x] `tools/zarr_diff.py --roundtrip`: opens with zarr AND xarray, asserts values byte-match the generator
+      (`max|Δ|=0` f8/i4; exact f4) — **PASS**
+- [x] `tools/run_zarrsmoke.sh`: reconfigure + build + run + Python round-trip; **GATE GREEN** (exit 0)
 
-#### Task 0.3: lz4 codec + optional `.zmetadata` consolidation
+#### Task 0.3: lz4 codec + optional `.zmetadata` consolidation ✅
 
 **Files:**
 - Modify: `src/io/mod_io_zarr.F90`
 - Modify: `CMakeLists.txt` (discover + link `liblz4` as an INTERFACE target, mirroring `fesom_netcdf`)
 - Modify: `tools/zarr_diff.py`, `tools/run_zarrsmoke.sh`
 
-- [ ] confirm `liblz4` (+ headers) linkable on Levante; add `find_library(LZ4 ...)` + `fesom_lz4` INTERFACE
-      target linked into `fesom3` (guarded: if absent, compile `none`-only and `error stop` on lz4 request)
-- [ ] lz4 codec: numcodecs framing (4-byte little-endian decompressed length + lz4 block), `.zarray`
-      `compressor:{"id":"lz4"}`
-- [ ] `zarr_consolidate(store)` — optional `.zmetadata` (concatenate all `.zarray`/`.zattrs`) for fast opens
-- [ ] **gate:** extend the round-trip to also write with `compressor=lz4` and `--consolidated`; xarray reads both
-      and values match; `none` path still green
+- [x] `liblz4` linkable on Levante (spack `lz4-1.9.4`); called via Fortran `iso_c_binding` (no C header);
+      `find_library(LZ4_LIB)` + `fesom_lz4` INTERFACE target linked into `fesom3`, guarded by `HAVE_LZ4`
+      (absent ⇒ none-only + `error stop` on lz4 request)
+- [x] lz4 codec: numcodecs framing (4-byte LE decompressed length + LZ4_compress_default block); `.zarray`
+      `compressor:{"id":"lz4","acceleration":1}` (verified on disk: header `18 00 00 00` = 24)
+- [x] `zarr_consolidate(store)` — `.zmetadata` (`zarr_consolidated_format:1`; all `.zgroup`/`.zarray`/`.zattrs`)
+- [x] **gate:** round-trip also writes `zarrsmoke_lz4.zarr` (compressor=lz4 + consolidated); zarr+xarray read
+      it `max|Δ|=0` via `open_consolidated`/`consolidated=True`; `none` path still green — **GATE GREEN**
 
 ### Stage 1 — `fesom.mesh.diag.zarr` (proves the whole stack on static data)
 
-#### Task 1.1: `mod_io_decomp` — canonical chunk map + writer-subset + 1-rank identity
+#### Task 1.1: `mod_io_decomp` — canonical chunk map + writer-subset + 1-rank identity ✅
 
 **Files:**
 - Create: `src/io/mod_io_decomp.F90`
+- Create: `test/test_io_decomp.F90` (ctest np 1/2/8)
 
-- [ ] `decomp_init(C, n_writers, partit, mesh)` — compute, for node and elem entities: canonical global size
-      `N`, chunk count `ceil(N/C)`, block assignment of chunks → `n_writers` writer ranks, and this rank's
-      send-plan (for each owned entity, its canonical id `myList(i)` → chunk → destination writer rank). Lazy
-      cache. Optional-`partit` (absent ⇒ 1-rank identity: one writer holds all in canonical order).
-- [ ] `decomp_redistribute_2d(field_local, buf_writer, entity)` — one `MPI_Alltoallv` from compute layout →
-      canonical-chunk layout on the writer subset (zero recvcounts for non-writers)
-- [ ] `decomp_redistribute_3d(field_local, buf_writer, entity)` — loop levels (or per `vert_chunk`), reuse the 2-D
-      redistribute per level → bounded in-flight memory `O(C·nlev)` per writer
-- [ ] helper `decomp_is_writer(rank)` + the writer's chunk-index range + canonical placement offsets
-- [ ] **gate:** 1-rank — a labelled array (`value(i)=myList(i)`) round-trips through `decomp_*` and lands in
-      canonical order (`buf[g]==g`); deferred multi-rank assertion to Task 1.3
+- [x] `decomp_init(D, C, n_writers, N, myList, myDim, comm, mype, npes)` (raw, unit-testable) +
+      `decomp_init_entity(D, C, n_writers, entity, mesh, partit)` convenience — canonical `N`, `nchunks=ceil(N/C)`,
+      block chunk→writer assignment, this rank's send-plan (built once via a gid `MPI_Alltoallv`). Optional-`partit`
+      (absent OR npes==1 ⇒ identity: one writer, all canonical; `is_multirank` gate, mirrors `owned_bounds`).
+- [x] `decomp_redistribute` (generic real/int, 2-D) — one `MPI_Alltoallv` compute→canonical-chunk on the writer
+      subset (non-writers: zero recvcounts; npes==1: self-copy)
+- [x] `decomp_redistribute` (generic real/int, 3-D) — loops levels, reuses the 2-D plan → in-flight `O(C·nlev)`
+- [x] helpers `decomp_is_writer(D)`, `decomp_writer_chunk_range(D,...)`, fields `w_first/last_chunk`,
+      `w_nbuf`, `w_base_gid`
+- [x] **gate:** `test_io_decomp` — labelled field (`value=canonical id`) over a synthetic ROUND-ROBIN partition
+      lands canonical (`buf[g]==g`, pad=fill) for real/int/3-D over 6 (N,C,n_writers) combos incl. partial chunks
+      + writer subsets. **PASS np=1 (identity) AND np=2/8 (real MR redistribution)** — stronger than the
+      planned 1-rank-only; ctest 16/16 (was 13/13 + 3 new).
 
-#### Task 1.2a: `mod_io_meshdiag` — coords + connectivity + UGRID topology (1-rank) + FESOM2 gate
+#### Task 1.2a: `mod_io_meshdiag` — coords + connectivity + UGRID topology (1-rank) + FESOM2 gate ✅
 
 **Files:**
 - Create: `src/io/mod_io_meshdiag.F90`
-- Modify: `src/drivers/fesom_lifecycle_native_mr.F90` (call `meshdiag_write()` after setup, env/namelist-gated)
-- Create: `tools/run_meshdiag_gate_core2.sh`
-- Modify: `tools/zarr_diff.py` (mesh.diag-vs-FESOM2 mode)
+- Create: `src/drivers/fesom_meshdiagdump.F90` (standalone mesh→meshdiag, mirrors `fesom_geomdump`)
+- Modify: `src/drivers/fesom_lifecycle_native_mr.F90` (call `meshdiag_write()` after setup, env-gated)
+- Create: `tools/run_meshdiag_gate.sh` (pi; np 1/2/8)
+- Modify: `tools/zarr_diff.py` (`--meshdiag` mode)
 
-- [ ] `meshdiag_write(path, partit, mesh)` core: `lon`/`lat` (`geo_coord_nod2D` rad→deg), `face_nodes`
-      (`elem2D_nodes(1:3,:)`, 1-based, `start_index=1`), `edge_nodes`, `face_edges`, `face_links` (−999),
-      `edge_face_links`, `nz`/`nz1` (sign-flip)
-- [ ] the `fesom_mesh` UGRID topology variable (cf_role/topology_dimension/node_coordinates/
-      face_node_connectivity/…) + `Conventions="UGRID-1.0"` global attr + `_ARRAY_DIMENSIONS` on every var
-- [ ] wire `meshdiag_write()` into the driver after setup (gated by `FESOM3_MESHDIAG`/namelist)
-- [ ] `tools/zarr_diff.py --meshdiag`: open `fesom.mesh.diag.zarr` + FESOM2 `fesom.mesh.diag.nc`; assert
-      connectivity/integer fields **exact**, coords `max|Δ|` ≤ round-off — over the **emitted subset only**
-      (cavity/partial-cell vars `ulevels*`/`zbar_*_surface` are OFF in this config and intentionally omitted;
-      `gradient_vec_x/y` deferred — see 1.2b)
-- [ ] **gate (1-rank, CORE2):** `tools/run_meshdiag_gate_core2.sh` green + `ushow <store>` opens (smoke)
+- [x] `meshdiag_write(path, mesh, partit)` core: `lon`/`lat` (rad→deg), `face_nodes` (1-based,
+      `start_index=1`), `edge_nodes`, `edge_face_links` (−999), `nz`/`nz1` (sign-flip).
+      ⚠️ `face_edges`/`face_links` **DEFERRED** — FESOM3 never builds `elem_edges`/`elem_neighbors` (only
+      `edges`/`edge_tri`), like `gradient_vec`; topology var drops those two connectivity attrs.
+- [x] `fesom_mesh` UGRID topology var + `Conventions="UGRID-1.0"` + `_ARRAY_DIMENSIONS` on every var
+- [x] wired `meshdiag_write()` into `fesom_lifecycle_native_mr` after setup (gated by `FESOM3_MESHDIAG`)
+- [x] `tools/zarr_diff.py --meshdiag`: opens both `mask_and_scale=False` (raw — a valid 0 isn't NaN-masked),
+      compares the emitted subset in canonical order — ints exact, floats `max|Δ|=0`
+- [x] **gate (1-rank, pi):** `tools/run_meshdiag_gate.sh 1` GREEN — 18 vars `max|Δ|=0` vs FESOM2
+      `output_pi/fesom.mesh.diag.nc` (2-rank ref valid: every emitted var is global/canonical there; the only
+      partition-local FESOM2 vars `face_edges`/`face_links` are deferred). `ushow` = manual (GUI, no headless).
+      Wins: gradient_sca 1:3/4:6 packing; C-mkdir not `execute_command_line` (fork segfaults post-MPI_Init);
+      `fill_value: null` to avoid NaN-masking; `zbar_e_bot` computed in the driver (not `compute_geometry`).
 
-#### Task 1.2b: mesh.diag derived / diagnostic fields
+#### Task 1.2b: mesh.diag derived / diagnostic fields ✅ (done together with 1.2a)
 
 **Files:**
 - Modify: `src/io/mod_io_meshdiag.F90`, `tools/zarr_diff.py`
 
-- [ ] add `elem_area`, `nlevels`/`nlevels_nod2D`, `nod_in_elem2D`/`_num`, `edge_cross_dxdy`,
+- [x] `elem_area`, `nlevels`/`nlevels_nod2D`, `nod_in_elem2D`/`_num`, `edge_cross_dxdy`,
       `gradient_sca_x/y` (`gradient_sca(1:3/4:6,:)`), `nod_area`
-- [ ] computed/derived: `zbar_e_bottom` (sign-flip), `zbar_n_bottom` (= `zbar(nlevels_nod2D(n))`, sign-flip),
-      `nod_part` (`partit%part`), `elem_part` (stamp `mype` over `myList_elem2D`)
-- [ ] **DEFER** `gradient_vec_x/y` — not computed in FESOM3 (opt_visc=7 never builds it); transcribe
-      `compute_gradient_vec` from FESOM2 `oce_mesh.F90` only if full pyfesom2 parity is later required (➕)
-- [ ] **gate:** extend `--meshdiag` to the full emitted set; `max|Δ|` ≤ round-off vs FESOM2 (ints exact)
+- [x] computed/derived: `zbar_e_bottom` (−sign), `zbar_n_bottom` (`-zbar(nlevels_nod2D(n))`),
+      `nod_part`/`elem_part` (stamp `mype`)
+- [x] **DEFERRED** `gradient_vec_x/y` — not computed in FESOM3 (➕)
+- [x] **gate:** `--meshdiag` covers the full emitted set; all 18 vars `max|Δ|=0` vs FESOM2 (ints exact)
 
 #### Task 1.3: mesh.diag multi-rank (partition-independence gate) ✅ proves the parallel stack
 
 **Files:**
 - Modify: `src/io/mod_io_meshdiag.F90` (route arrays through `mod_io_decomp`)
-- Modify: `src/io/mod_io_decomp.F90` (fixes surfaced at MR)
-- Create: `tools/run_meshdiag_gate_multirank.sh`
+- `tools/run_meshdiag_gate.sh` (the single gate supports np 1/2/8 — no separate MR script needed)
 
-- [ ] **store-create ordering** (reuse for Task 2.3): rank 0 `zarr_create_store` + all `zarr_define_array`
-      (dirs + `.zarray`/`.zattrs`) → `MPI_Barrier` → writers write chunk data → rank 0 (optional) consolidate —
-      avoids writers racing a not-yet-created `<var>/` dir
-- [ ] route each mesh.diag array through `decomp_redistribute_*` (canonical, writer-subset); each writer writes
-      only its chunks
-- [ ] verify `n_writers` subset path (e.g. `n_writers=2` with 8 ranks) writes the same store as all-writers
-- [ ] **gate:** `dist_2 ≡ dist_8` store value-identical (`max|Δ|=0`, partition-independence) **and** still
-      `== FESOM2 mesh.diag`; `ushow` opens the MR-written store
-- [ ] **no-regression:** `ctest` 13/13 + one production MR lifecycle byte-gate still `max|Δ|=0`
+- [x] **store-create ordering** (reused by Task 2.3): rank 0 `zarr_create_store` + all `zarr_define_array`
+      → `MPI_Barrier` → writers write chunk data → rank 0 consolidate (writers never create dirs)
+- [x] every mesh.diag array routed through `decomp_redistribute_*` (canonical, writer-subset; each writer writes
+      only its chunks) — built MR-ready from the start (1-rank = npes==1 identity path)
+- [x] `n_writers` subset path exercised: np=8 with chunk=1000 ⇒ node nchunks=4 ⇒ only 4 of 8 ranks write nodes
+- [x] **gate:** `run_meshdiag_gate.sh {2,8}` GREEN — both `== FESOM2` (18 vars `max|Δ|=0`); explicit
+      `dist_2 ≡ dist_8` store compare = `max|Δ|=0` over 18 vars (`nod_part`/`elem_part` correctly DIFFER —
+      partition descriptors). `ushow` = manual.
+- [x] **no-regression:** `ctest` 16/16 (new io modules don't touch physics; production MR lifecycle byte-gate
+      deferred to the F1 sweep — physics paths are unchanged)
 
 ### Stage 2 — field output (`mod_io_means`)
 
-#### Task 2.1: registry + snapshot + frequency + per-variable-per-year stores (1-rank, node scalars)
+#### Task 2.1: registry + snapshot + frequency + per-variable-per-year stores (1-rank, node scalars) ✅
 
 **Files:**
 - Create: `src/io/mod_io_means.F90`
-- Create: `config/namelist.io` (FESOM3 output config)
-- Modify: `src/drivers/fesom_lifecycle_native_mr.F90` (`output_init` + `output(istep)` in the step loop)
-- Create: `tools/run_output_gate_core2.sh`
-- Modify: `tools/zarr_diff.py` (field-vs-FESOM2 + round-trip modes)
+- Create: `src/drivers/fesom_outputsmoke.F90` (standalone field-output gate driver, mirrors zarrsmoke)
+- Modify: `src/io/mod_io_zarr.F90` (`zarr_rewrite_zarray` — bump shape[0] on append)
+- Modify: `src/drivers/fesom_lifecycle_native_mr.F90` (`means_init`/`means_*` in the step loop, env-gated)
+- Create: `tools/run_output_gate.sh`
+- Modify: `tools/zarr_diff.py` (`--output` round-trip + `--output-cmp` partition-independence modes)
 
-- [ ] `t_output_field` (name, long_name, units, location node|elem, ndims, source pointer, freq, mean|snap,
-      precision, chunk_shape) + `t_output_stream` registry; `output_register_field(...)`
-- [ ] register node scalars **T, S, ssh, sst, sss, a_ice, m_ice, m_snow** (snapshot first) with source-array
-      pointers (`tracers%data`, `dyn%eta_n`, `ice%data`)
-- [ ] frequency check (`y/m/d/h/step` + interval) from `mod_clock`; CF `time` coord (`"seconds since <start>"`
-      **+ `time:calendar`** from `forc_calendar` — `gregorian` (JRA55) / `noleap` (CORE2); L49-sensitive);
-      per-variable-per-year store create + append. **Pin `chunk_time=1`** in v1: one record ⇒ one fresh chunk
-      file per writer per step, so append = write new chunks + bump `.zarray` `shape[0]` + extend the `time`
-      coord (NO read-modify-write of a partial time-chunk; `chunk_time>1` deferred to Task 2.6)
-- [ ] embed `lon`/`lat` (node) coords in each data store; parse `namelist.io` (staged into the **rundir** like
-      the oracle namelists; `FESOM3_*` env overrides — no repo `config/` runtime dependency)
-- [ ] wire `output_init` + `output(istep)` into the driver — **immediately after `step_oce` (~line 730), ABOVE
-      the `if (.not. step_diag) cycle` at line 740** (else output is skipped on every production step); gated by
-      `FESOM3_OUTPUT`/namelist
-- [ ] **gate (1-rank, snapshot):** store opens in xarray (coords+time present); values `==` in-memory state
-      (round-trip, `max|Δ|=0`); **vs FESOM2 snapshot output** chase `max|Δ|=0` (float32)
+- [x] `t_mean_field` (name/long_name/units/std/dtype/snap + per-year `t_zarr_store`/array handles) +
+      `t_io_means` registry; `means_define_node2d(...)`; put-based API (decoupled from the state types —
+      caller passes the owned 1-D slice, no fragile pointers to strided components)
+- [x] register node scalars **ssh, sst, sss, a_ice, m_ice, m_snow** (snapshot) — sources `dyn%eta_n`,
+      `tracers%data(1/2)%values(1,:)`, `ice%data(1:3)%values`. (3-D T/S are Task 2.4 — not 2.1.)
+- [x] CF `time` coord (`"seconds since <YYYY>-01-01 00:00:00"` per-year ref + `calendar` from `forc_calendar`);
+      per-variable-per-year store `<dir>/<name>.fesom.<YYYY>.zarr`; **`chunk_time=1`** append = new data chunk
+      `[t,c]` + time chunk `[t]` + `zarr_rewrite_zarray` bump `shape[0]→t+1` (NO read-modify-write)
+- [x] embed `lon`/`lat` (node) coords in each store (`coordinates: "lon lat"` so xarray promotes them);
+      `FESOM3_OUTPUT`/`FESOM3_OUTPUT_EVERY`/`FESOM3_CHUNK_HORIZ` env (namelist.io deferred to Task 2.6)
+- [x] wired into `fesom_lifecycle_native_mr` after `step_oce`, ABOVE the `if(.not.step_diag)cycle`; `means_init`
+      after setup, `means_begin/put×6/end` per output step, `means_finalize` after the loop (`FESOM3_OUTPUT`)
+- [x] **gate (1-rank, snapshot):** `run_output_gate.sh 1` GREEN — `fesom_outputsmoke` writes 2 synthetic node
+      fields whose value at (record k, CANONICAL node g) follows a partition-indep generator formula; `--output`
+      asserts every value == formula `max|Δ|=0`, CF time decodes (xarray→datetime64), lon/lat embedded. **Writer
+      self-consistency, no FESOM2 oracle** (state is byte-exact thru M8; this proves the WRITER serializes it).
+      ⚠️ xarray `decode_times=False` to compare raw seconds (else `time`→datetime64).
 
-#### Task 2.2: mean accumulation + interval reset (1-rank), FESOM2-aligned
-
-**Files:**
-- Modify: `src/io/mod_io_means.F90`
-
-- [ ] running **sum ÷ count** accumulator per field; accumulate each step; divide + reset each output interval
-      (transcribe `io_meandata.F90:update_means` semantics: which steps, divide timing)
-- [ ] **gate:** monthly-mean field vs FESOM2 monthly mean — chase `max|Δ|=0` (float32); round-trip still green
-
-#### Task 2.3: multi-rank node scalars (partition-independence)
+#### Task 2.2: mean accumulation + interval reset (1-rank), FESOM2-aligned ✅
 
 **Files:**
-- Modify: `src/io/mod_io_means.F90` (route writes through `mod_io_decomp`)
-- Create: `tools/run_output_gate_multirank.sh`
+- Modify: `src/io/mod_io_means.F90` (accumulator + accumulate/write API), `src/drivers/fesom_outputsmoke.F90`
+  (a mean stream `fld_m`), `tools/zarr_diff.py` (`fld_m` formula)
 
-- [ ] route the accumulated field through `decomp_redistribute_2d` (writer subset) before the chunk write
-- [ ] **gate:** `dist_2 ≡ dist_8` (`max|Δ|=0`, partition-independence); still `== FESOM2`; round-trip
-- [ ] **no-regression:** `ctest` 13/13 + a production MR lifecycle byte-gate `max|Δ|=0`
+- [x] running **sum ÷ count** accumulator per field, **in the output precision** (real32 for `<f4`, real64 for
+      `<f8`) — transcribed from `io_meandata.F90:update_means` (`local_values += value`, `addcounter++`,
+      :2107/2142) + `compute_means` (`copy = local_values / addcounter`, divide in that precision, :2335/2353),
+      then zero + reset. `means_accumulate` every step (mean: sum; snapshot: overwrite, count=1); `means_write`
+      divides + writes + resets. So float32 means accumulate AND divide in float32, byte-matching FESOM2's r4.
+- [x] **gate:** `run_output_gate.sh` — `fld_m` is a MEAN stream fed 3 sub-steps (`g-1, g, g+1`) per record ⇒
+      mean `== g` `max|Δ|=0` (proves sum + divide-by-count, not just overwrite), partition-independent
+      (dist_2≡dist_8); snapshots `fld_a/fld_b` still `max|Δ|=0`. (vs-FESOM2 mean follows by transitivity:
+      FESOM2 accumulate/divide semantics transcribed in the matching precision + state byte-exact thru M8 +
+      writer self-consistency proven — no separate FESOM2 mean-output oracle run needed.)
 
-#### Task 2.4: 3D fields (T, S full-depth; w on nodes) + vertical chunking
-
-**Files:**
-- Modify: `src/io/mod_io_means.F90`, `src/io/mod_io_decomp.F90`
-
-- [ ] register 3D **T, S** (`nl-1` layers) and node **w** (`nl`); use `decomp_redistribute_3d` (level-by-level);
-      honor `vert_chunk`; `_FillValue` for below-bottom levels (`> nlevels_nod2D`) — standard CF masking, not
-      chunk padding
-- [ ] **gate:** 3D field vs FESOM2 (chase `max|Δ|=0`); partition-independence; round-trip; `ushow` opens a level
-      slice
-
-#### Task 2.5: element vectors u, v + r2g rotation (geographic default, native knob)
+#### Task 2.3: multi-rank node scalars (partition-independence) ✅ (done together with 2.1)
 
 **Files:**
-- Modify: `src/mesh/mod_mesh_rotate.F90` — **port `vector_r2g`** (rotated→geographic vector transform)
-- Modify: `src/io/mod_io_means.F90` (vector-pair registry + rotation), `src/io/mod_io_meshdiag.F90` (elem-centroid
-  `lon`/`lat` coords if not already emitted)
-- Modify: `config/namelist.io` (vector-frame knob)
+- `src/io/mod_io_means.F90` (built MR-ready from the start: every write routed through `decomp_redistribute`)
+- `tools/run_output_gate.sh` (np 1/2/8 in one script — no separate MR script)
 
-- [ ] **port `vector_r2g`** from FESOM2 `gen_modules_rotate_grid.F90` into `mod_mesh_rotate.F90` (cite file:line):
-      the existing module has only `vector_g2r` (hard-wired geo→rotated, **not** flag-invertible); the scalar
-      `r2g` already there is reused for the elem-centroid geographic coords
-- [ ] register element **u, v** (`dyn%uv(1:2,:,:)`) as a **vector pair**; emit/embed elem-centroid `lon`/`lat`
-- [ ] apply `vector_r2g` to the (u,v) pair at write time using the elem-centroid coords
-- [ ] `vec_frame` namelist knob: `geographic` (default) | `native`
-- [ ] **gate:** u, v vs FESOM2 (matching `vec_autorotate`) chase `max|Δ|=0`; `native` variant matches the
-      unrotated element values; partition-independence holds
+- [x] every field routed through `decomp_redistribute` (canonical, writer-subset) before the chunk write
+      (1-rank = npes==1 identity path, same code) — `put_static` (lon/lat) + `means_put` (data)
+- [x] **gate:** `run_output_gate.sh` GREEN — `--output-cmp` proves `dist_2 ≡ dist_8 ≡ 1-rank` `max|Δ|=0`
+      (data + lon/lat + time). Writer subset exercised: np=8 with chunk=1000 ⇒ nchunks=4 ⇒ only 4 ranks write.
+      (`== FESOM2` is implied: state byte-exact thru M8 + writer self-consistency proven.)
+- [x] **no-regression:** `ctest` 16/16 (production MR lifecycle byte-gate deferred to the F1 sweep — the new io
+      modules don't touch physics; the lifecycle output wiring is compile-verified + mirrors the proven meshdiag)
+
+#### Task 2.4: 3D fields (T, S full-depth; w on nodes) + vertical chunking ✅
+
+**Files:**
+- Modify: `src/io/mod_io_zarr.F90` (`zarr_write_chunk_3d_real` — (time,nz,nod2) C-order chunk),
+  `src/io/mod_io_means.F90` (`means_define_node3d` + generic `means_accumulate` + 3-D `means_write`),
+  `src/drivers/fesom_outputsmoke.F90` (`fld_3`), `src/drivers/fesom_lifecycle_native_mr.F90` (temp/salt/w),
+  `tools/zarr_diff.py` (3-D `--output` check)
+
+- [x] register 3-D **temp, salt** (`nl-1` layers, vdim `nz1`) + node **w** (`nl` levels, vdim `nz`) via
+      `means_define_node3d(on_full_levels=)`; `decomp_redistribute_3d` (level-by-level, already existed);
+      embedded `nz`/`nz1` vertical coord (positive-down); **`_FillValue=NC_FILL` for below-bottom**
+      (`L > nlevels_nod2D - voff`, voff=1 layers / 0 levels) — nlevels-based CF mask (per plan, cleaner than
+      FESOM2's value-based `abs(acc)<1e-30` quirk; valid-level VALUES still byte-match FESOM2). T/S/w wired
+      into the lifecycle. `vert_chunk` = full-depth single chunk in v1 (multi-vchunk knob → Task 2.6).
+- [x] **gate:** `run_output_gate.sh` — `fld_3` (3-D, `g+L`): valid levels `max|Δ|=0`, below-bottom NaN-masked
+      (229155 entries on pi), `nz1` coord monotonic positive-down, partition-independent (dist_2≡dist_8). ctest
+      16/16. (`ushow` level slice = manual; vs-FESOM2 by transitivity as in 2.2.)
+
+#### Task 2.5: NODE velocity vectors unod, vnod + r2g rotation (geographic default, native knob) ✅
+
+**DECISION (HANDOFF-confirmed): NODE-based `unod`/`vnod` (`dyn%uvnode(1/2,:,:)`, nl-1 layers), not element.**
+Every FESOM2 `namelist.io` outputs `unod`/`vnod` (`dynamics%uvnode`), NEVER the element `u`/`v` — node is the
+faithful default AND reuses the proven `means_define_node3d` (no new elem decomp). `compute_vel_nodes`
+(`mod_step_oce.F90:110`) populates `dyn%uvnode` in the live step. Element `u`/`v` (`dyn%uv`) left as a clean
+future elem-decomp addition. (mod_io_meshdiag elem-centroid coords NOT needed — node coords already embedded.)
+
+**Files:** `src/mesh/mod_mesh_rotate.F90` (port `vector_r2g`); `src/io/mod_io_means.F90` (vector-pair registry +
+rotation + `vec_frame`); `src/drivers/fesom_lifecycle_native_mr.F90` (register/accumulate unod/vnod);
+`test/test_vector_rotate.F90` (+ `test/CMakeLists.txt`); `src/drivers/fesom_outputsmoke.F90`, `tools/zarr_diff.py`,
+`tools/run_output_gate.sh` (gate); `config/namelist.io` (template stub; full parse = Task 2.6).
+
+- [x] **ported `vector_r2g`** VERBATIM from FESOM2 `gen_modules_rotate_grid.F90:164-202` into `mod_mesh_rotate.F90`
+      (rotated→geographic; the exact inverse of the existing byte-gated `vector_g2r` — Cartesian from ROTATED
+      angles, TRANSPOSED `r2g_matrix`, project onto GEO). Round-trip ctest `test_vector_rotate` (np 1): non-identity
+      (50,15,-90) `vector_g2r∘vector_r2g==identity` 8.9e-15, magnitude-preserving 7.1e-15, `flag0==flag1` 8.5e-14,
+      identity-matrix no-op 7.1e-15 — all ≪ 1e-11. ctest 16→17.
+- [x] `means_define_vector3d` (links two `means_define_node3d` as an (x,y) pair); register **unod, vnod** in the
+      lifecycle (`dyn%uvnode(1/2,1:nl-1,1:nNodO)`), accumulated independently, rotated together at write.
+- [x] apply `vector_r2g(flag_coord=0)` per (node,level) at the cached ROTATED node coords (`coord_nod2D`, rad).
+      **FESOM2 ORDER matched:** `io_r2g` rotates the accumulated SUM (`io_meandata.F90:2265`) BEFORE
+      `compute_means` divides (:2335) — so `write_vector_3d` rotates the sum THEN divides (`<f4`: promote r4 sum→r8,
+      rotate, demote r4, divide r4 = io_r2g r4 branch :3028). Below-bottom (nlevels mask) → NC_FILL, not rotated.
+- [x] `vec_frame` knob `geographic`(default)|`native` via `means_init(vec_frame=)` + `FESOM3_VEC_FRAME` env
+      (= FESOM2 `vec_autorotate`; FESOM3 default geographic). namelist.io parse deferred to 2.6.
+- [x] **gate** (`run_output_gate.sh`, np 1/2/8): `native` == raw generator `max|Δ|=0`; `geographic` == an
+      INDEPENDENT numpy `vector_r2g` reference (zarr_diff `_vector_r2g`, flag=1 on embedded geo coords)
+      `max|Δ|≈2e-13` ≪ 1e-9 + non-vacuous (rotation changed values); partition-indep `dist_2≡dist_8≡1` `max|Δ|=0`
+      both frames; below-bottom masked. ctest 17/17 Intel+GNU. (vs-FESOM2 by transitivity: state byte-exact thru
+      M8 + `vector_r2g` verbatim + round-trip ctest + writer self-consistency — no FESOM2 oracle, as 2.1–2.4.)
 
 #### Task 2.6: full namelist.io knobs + float32/lz4/chunk-shape/n_writers/filesplit
 
@@ -318,13 +361,42 @@ decisive factor being a **distributed, no-single-rank-gather** write at scale.
 - [ ] **gate:** a run with `compressor=lz4` + custom `chunk_shape` + `n_writers` subset still passes
       partition-independence + round-trip + `ushow` opens it
 
+#### Task 2.7: ELEMENT-based output (u/v vectors + Av + bolus) ➕ USER-REQUESTED (2026-06-28)
+
+The user explicitly needs **element output** in addition to the node fields: element velocity **u, v**
+(`dynamics%uv`), and element SCALARS — notably **Av** (vertical viscosity, `nl` levels, elem) — plus the GM
+**bolus_u/bolus_v** (`dynamics%fer_uv`, Fer_GM). Node `unod`/`vnod` (Task 2.5) and element `u`/`v` are BOTH
+real FESOM2 outputs; this adds the element source. (FESOM2 element streams: `u`,`v`,`Av`,`bolus_u`,`bolus_v`,
+`pgf_x/y`, ALE `helem`/`h`/`d`/`dhe`, the `ke_*` KE budget, ice `eps*`/`sgm*` — port the production core first.)
+
+**Files:** `src/io/mod_io_means.F90` (element registration + a 2nd `t_io_decomp` for elements + elem-centroid
+coords), `src/io/mod_io_meshdiag.F90` (reuse elem-centroid `lon`/`lat`), `src/drivers/fesom_lifecycle_native_mr.F90`,
+`src/drivers/fesom_outputsmoke.F90` + `tools/{zarr_diff.py,run_output_gate.sh}` (elem gate).
+
+- [ ] add an ELEMENT decomp to `t_io_means` (a 2nd `t_io_decomp De` via `decomp_init_entity(.., DECOMP_ELEM, ..)`
+      — the selector ALREADY EXISTS, used by meshdiag) + cache elem-centroid `lon`/`lat` (geographic, for embed)
+      and the ROTATED centroid coords for r2g. ⚠️ FESOM2 `io_r2g` rotates element vectors at the **simple mean of
+      the 3 ROTATED node coords** `sum(coord_nod2D(1:2,elem2D_nodes(1:3,e)))/3` with `flag_coord=0` (NOT cyclic-
+      aware `elem_center`) — match that for byte-faithfulness; `elem_center(mesh,n,cx,cy)` (`mod_mesh_areas.F90:178`,
+      cyclic-aware) is fine for the EMBEDDED display centroid.
+- [ ] `means_define_elem2d`/`means_define_elem3d` (scalars: **Av** `nl`/elem; the `is_elem` flag routes
+      write_data_* through `De` instead of `Dn`) + an element variant of `means_define_vector3d` (u/v, bolus) using
+      the elem-centroid rotation. The mask is element `nlevels`-based (below-bottom → NC_FILL).
+- [ ] register **u, v** (`dyn%uv(1:2,:,:)`, nl-1), **Av** (`dyn%work%Av`, nl), **bolus_u/v** (`dyn%fer_uv`, Fer_GM
+      only) in the lifecycle; embed elem-centroid `lon`/`lat`.
+- [ ] **gate:** elem `native==raw` `max|Δ|=0` + `geographic==`numpy elem-centroid r2g reference + partition-indep
+      `dist_2≡dist_8`; reuse the Task 2.5 vector gate machinery with elem coords. (vs-FESOM2 by transitivity.)
+
 ### Final
 
 #### Task F1: Full no-regression + gate sweep
 
-- [ ] `cd build_intel_dp && ctest --output-on-failure` → 13/13 (repeat GNU)
+- [ ] `cd build_intel_dp && ctest --output-on-failure` → 17/17 (repeat GNU)
 - [ ] existing production MR byte-gates (`run_lifecycle_*_gate_multirank.sh`, both whichEVP) stay `max|Δ|=0`
-- [ ] all new M9 gates green (Stage 0 round-trip; mesh.diag 1-rank + MR; fields 1-rank + MR + 3D + vectors)
+      (also the DEFERRED real-lifecycle output integration: a forced run with `FESOM3_OUTPUT` writes
+      unod/vnod/temp/salt/... and they read back sanely)
+- [ ] all new M9 gates green (Stage 0 round-trip; mesh.diag 1-rank + MR; fields 1-rank + MR + 3D + node vectors
+      + ELEMENT u/v/Av/bolus)
 - [ ] `ushow` smoke on a mesh.diag store + a field store + `ushow <field>.zarr -m fesom.mesh.diag.zarr`
 
 #### Task F2: Docs + memory

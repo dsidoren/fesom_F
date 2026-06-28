@@ -66,6 +66,29 @@ foreach(_rp ${NETCDF_RPATH})
     target_link_options(fesom_netcdf INTERFACE "-Wl,-rpath,${_rp}")
 endforeach()
 
+# ----------------------------------------------------------------------
+# liblz4 (OPTIONAL) — the first Zarr output compressor (M9, Task 0.3). We call LZ4 via Fortran
+# iso_c_binding (our own interfaces, no C header), so only the LINK library matters. The runtime
+# soname liblz4.so.1 is a system lib (/lib64); the dev symlink liblz4.so lives in spack. Discover
+# it; if absent, build none-codec-only (mod_io_zarr error-stops on an lz4 request — HAVE_LZ4 guard).
+# Exposed as the INTERFACE target `fesom_lz4`, mirroring `fesom_netcdf`.
+# ----------------------------------------------------------------------
+find_library(LZ4_LIB NAMES lz4
+    HINTS
+        /sw/spack-levante/lz4-1.9.4-fhvgx6/lib
+        /sw/spack-levante/lz4-1.9.4-jjx6m3/lib
+        /sw/spack-levante/lz4-1.9.4-htgmak/lib
+        /usr/lib64 /lib64)
+if(LZ4_LIB)
+    message(STATUS "FESOM3 lz4: ${LZ4_LIB} (HAVE_LZ4)")
+    add_library(fesom_lz4 INTERFACE)
+    target_link_libraries(fesom_lz4 INTERFACE ${LZ4_LIB})
+    get_filename_component(_lz4_dir ${LZ4_LIB} DIRECTORY)
+    target_link_options(fesom_lz4 INTERFACE "-Wl,-rpath,${_lz4_dir}")
+else()
+    message(STATUS "FESOM3 lz4: NOT FOUND — building none-codec-only (no HAVE_LZ4)")
+endif()
+
 # Put .mod files in a private dir so the scanner resolves USE across subdirs.
 set(CMAKE_Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/module)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -88,6 +111,10 @@ endforeach()
 add_library(fesom3 STATIC ${fesom3_lib_sources})
 apply_fesom_compile_flags(fesom3)
 target_link_libraries(fesom3 PUBLIC MPI::MPI_Fortran fesom_netcdf)
+if(LZ4_LIB)
+    target_link_libraries(fesom3 PUBLIC fesom_lz4)
+    target_compile_definitions(fesom3 PRIVATE HAVE_LZ4)
+endif()
 set_target_properties(fesom3 PROPERTIES LINKER_LANGUAGE Fortran)
 
 # ----------------------------------------------------------------------

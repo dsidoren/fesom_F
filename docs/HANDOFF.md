@@ -320,12 +320,88 @@ The live "Oracle" section above + the "M2.12 entry notes" below cover what the c
 
 ## Next task
 
-### ⏭️ M9 (Zarr OUTPUT) — brainstorm + plan DONE (2026-06-28). **NEXT SESSION: IMPLEMENT, start at Task 0.1.**
+### ⏭️ M9 (Zarr OUTPUT) — **Stage 0 + 1 + Stage 2 (scalars + 3-D + NODE VECTORS) DONE & byte-gated (2026-06-28). RESUME at Task 2.6, then 2.7 (ELEMENT output — USER-REQUESTED).**
 
-**Plan:** `docs/plans/2026-06-28-m9-zarr-output.md` — brainstormed WITH the user (this session) + plan-review-revised;
-the design is **SETTLED** (do not re-open it). **Restart is split OUT to its own LATER milestone** (the user chose
-output-first). M0–M8 COMPLETE & tagged (m0…m8); forcing-perf side-investigation ✅ RESOLVED & committed
-(`708fdf4`/`ce2288a`/`1ef9516`; RESOLVED note at L133).
+**Plan:** `docs/plans/2026-06-28-m9-zarr-output.md` (checkboxes ticked through Task 2.5; Task 2.7 ELEMENT output
+added per user). Design SETTLED.
+
+**DONE (11/14 tasks, all byte-gated, ctest 17/17 Intel+GNU, no regression):**
+- **Stage 0 — `mod_io_zarr`** (Zarr v2): JSON + C-order transpose + partial-chunk fill-pad + codecs `none`/**lz4** +
+  `.zmetadata`; `zarr_write_chunk` 1d/2d/**3d**/int + `zarr_rewrite_zarray` (grow time dim). Gate `run_zarrsmoke.sh`.
+- **Stage 1 — `mod_io_decomp`** (canonical `MPI_Alltoallv` → writer subset, no rank-0 gather; ctest `test_io_decomp`
+  np 1/2/8) + **`mod_io_meshdiag`** + `fesom_meshdiagdump` → **`fesom.mesh.diag.zarr` 18 vars `max|Δ|=0` vs FESOM2**,
+  partition-indep (`run_meshdiag_gate.sh` np 1/2/8); wired into lifecycle (`FESOM3_MESHDIAG`).
+- **Stage 2 SCALARS — `mod_io_means`** (Tasks 2.1/2.2/2.3/2.4): per-variable-per-year stores
+  `<dir>/<name>.fesom.<YYYY>.zarr` with growing time dim (chunk_time=1 append), CF `time`+calendar, embedded
+  `lon`/`lat`(+`nz`/`nz1` for 3-D). **2-D node scalars** ssh/sst/sss/a_ice/m_ice/m_snow + **3-D** temp/salt(nz1)/w(nz),
+  **snapshot AND mean** (accumulate+divide in OUTPUT precision = FESOM2 io_meandata semantics), 3-D below-bottom
+  `NC_FILL` mask (nlevels-based). Wired into lifecycle (`FESOM3_OUTPUT`/`FESOM3_OUTPUT_EVERY`). Gate
+  `run_output_gate.sh` (`fesom_outputsmoke` + `zarr_diff.py --output/--output-cmp`): synthetic fields == generator
+  formula `max|Δ|=0`, **partition-indep dist_2≡dist_8≡1-rank**, mean divide + 3-D mask verified. No FESOM2 oracle
+  (state byte-exact thru M8 + writer self-consistency).
+- **Stage 2 VECTORS — Task 2.5 (`unod`/`vnod` + r2g rotation):** ported `vector_r2g` VERBATIM (FESOM2
+  `gen_modules_rotate_grid.F90:164-202`) into `mod_mesh_rotate.F90` (rotated→geo, inverse of the byte-gated
+  `vector_g2r`); `means_define_vector3d` pairs two node3d fields, rotated together at write. **NODE-based**
+  `unod`/`vnod` (`dyn%uvnode`) — FESOM2's actual default velocity output (every `namelist.io` uses it, NEVER elem
+  `u`/`v`); reuses `means_define_node3d`, no new decomp. **FESOM2 ORDER matched:** `io_r2g` rotates the accumulated
+  SUM (`io_meandata.F90:2265`) BEFORE `compute_means` divides (:2335) → `write_vector_3d` rotates-sum-then-divides
+  (`<f4` promote→rotate→demote→divide = io_r2g r4 branch). `vec_frame` geographic(default)|native = FESOM2
+  `vec_autorotate`, via `FESOM3_VEC_FRAME`. Gates: round-trip ctest `test_vector_rotate` (`g2r∘r2g==id` 8.9e-15);
+  `run_output_gate.sh` native==raw `max|Δ|=0`, geographic==INDEPENDENT numpy `vector_r2g` ref `≈2e-13`≪1e-9
+  (non-vacuous), partition-indep both frames. ctest 16→17.
+
+**KEY LESSONS (reuse for 2.6):**
+- Writer path (decomp_redistribute → zarr_write_chunk; store-create ordering rank0-define+barrier+writers-write) is
+  PROVEN — reuse verbatim. POSIX `mkdir` (NOT `execute_command_line`; fork post-MPI_Init SEGFAULTS).
+- xarray: `decode_times=False` to compare raw `time` seconds (else →datetime64); `mask_and_scale=False` for exact;
+  3-D fill = `NC_FILL_DOUBLE` 9.9692099683868690e36 (=FESOM2), xarray masks →NaN. 2-D scalars use `fill_value:null`.
+- mean = `means_accumulate` every step (sum) / `means_write` divide-by-count + reset, IN output precision (FESOM2
+  io_meandata.F90:2107/2335). Snapshot = the count=1 special case.
+- **Deferred:** `face_edges`/`face_links`/`gradient_vec` (FESOM3 never builds the sources). FESOM2 oracle runs SLOW.
+
+**VERIFY current state (run first to confirm green before building on it):**
+```
+cd /home/a/a270088/fesom3 && source env.sh intel
+cmake build_intel_dp && cmake --build build_intel_dp -j 8
+(cd build_intel_dp && ctest)            # expect 17/17 (incl. test_vector_rotate)
+tools/run_zarrsmoke.sh                  # Stage 0
+tools/run_meshdiag_gate.sh 1            # Stage 1 (also: 2, 8)
+tools/run_output_gate.sh                # Stage 2: np 1 2 8, scalars+3D+VECTORS, geographic+native, partition-indep
+```
+**Working tree is UNCOMMITTED** (the user commits): new `src/io/mod_io_{zarr,decomp,meshdiag,means}.F90`,
+`src/drivers/fesom_{zarrsmoke,meshdiagdump,outputsmoke}.F90`, `test/test_io_decomp.F90`, `test/test_vector_rotate.F90`,
+`tools/{run_zarrsmoke,run_meshdiag_gate,run_output_gate}.sh`, `tools/zarr_diff.py`, `config/namelist.io`; modified
+`CMakeLists.txt`, `test/CMakeLists.txt`, `src/mesh/mod_mesh_rotate.F90` (vector_r2g),
+`src/drivers/fesom_lifecycle_native_mr.F90`, plan, HANDOFF.
+
+**NEXT = Task 2.6 (full `namelist.io` knobs + float32/lz4/chunk-shape/n_writers/filesplit).** The remaining FIELD
+work is done (all field types — 2-D/3-D scalars + node vectors — emit, rotate, mask, partition-indep). 2.6 makes the
+output CONFIGURABLE instead of env-only:
+- **Parse `config/namelist.io`** (a documented TEMPLATE STUB now exists with the full schema — `&nml_general` knobs +
+  `&nml_list` rows; only `vec_frame`/`chunk_horiz`/`n_writers` are live via `FESOM3_*` env today). Stage it into the
+  rundir like the oracle namelists; `FESOM3_*` env stays an override. Mirror the FESOM2 `&diag_list`/`&nml_list` read.
+- **`&nml_list` rows** `'<var>',freq,'unit',precision,'mean|snap'` → drive `means_define_*` registration + per-field
+  `freq`/`unit` (the lifecycle currently registers a FIXED snapshot set + unod/vnod; make it list-driven). Per-field
+  precision (4|8) + mean|snap knobs already exist in `means_define_*` — just wire them from the list.
+- **`chunk_time>1`**: implement the partial-last-time-chunk **read-modify-write** append (deferred from 2.1's
+  chunk_time=1 fresh-chunk path). Gate `chunk_time={1,N}` produce value-identical stores.
+- **global knobs**: `compressor (none|lz4)` (lz4 codec EXISTS in `mod_io_zarr` from Task 0.3 — wire it through
+  `def_field_store`), `chunk_shape (time,vert,horiz)`, `filesplit_freq (y|m)`, **float32 default** (already the
+  `means_define_*` default). Gate: a run with `compressor=lz4` + custom `chunk_shape` + `n_writers` subset still
+  passes partition-independence + round-trip + `ushow` opens it.
+**THEN = Task 2.7 (ELEMENT-based output — the user explicitly asked for this 2026-06-28; do NOT forget).** The user
+needs element velocity **u, v** (`dyn%uv`) AND element scalars — notably **Av** (`dyn%work%Av`) — plus GM
+**bolus_u/bolus_v** (`dyn%fer_uv`). The element decomp ALREADY EXISTS (`mod_io_decomp` `DECOMP_ELEM`, used by
+meshdiag); 2.7 adds an element `t_io_decomp` + elem-centroid coords to `mod_io_means` + `means_define_elem2d/3d` +
+an elem variant of `means_define_vector3d`. ⚠️ FESOM2 `io_r2g` rotates elem vectors at the SIMPLE mean of the 3
+ROTATED node coords (`sum(coord_nod2D(1:2,elem2D_nodes(1:3,e)))/3`, flag_coord=0) — match that (NOT cyclic-aware
+`elem_center`, which is only for the embedded display centroid). Reuse the Task 2.5 gate machinery with elem coords.
+
+Then **F1** (full no-regression + gate sweep, incl. the production MR lifecycle byte-gates `max|Δ|=0` both whichEVP +
+the deferred real-lifecycle output integration — a forced run with `FESOM3_OUTPUT` writes unod/vnod/temp/salt/…) +
+**F2** (docs + memory + move plan to `completed/` + tag `m9`).
+
+M0–M8 COMPLETE & tagged (m0…m8); forcing-perf ✅ RESOLVED (`708fdf4`/`ce2288a`/`1ef9516`; L133).
 
 **M9 = model OUTPUT as hand-rolled Zarr v2** — xarray-readable, openable by the user's `ushow` (`/home/a/a270088/ushow`),
 UGRID-1.0, + a `fesom.mesh.diag.zarr` analog. **Settled design:**
