@@ -451,6 +451,120 @@ def restart(ckpt_root):
     print("RESTART PASS (max|Δ|=0, snapshot store opens + checkpoint.json parses)")
 
 
+def restart_state(ckpt_root, ab_order=2, tke=True):
+    """Restart Stage 3 (Task 3.4) full-state verify: a checkpoint written by restart_register_state must
+    contain EVERY expected oce+ice store (incl. EVP sigma + the real(MP) hbar/hnode) with the right
+    entity x level-kind shape, embedded finite lon/lat, finite data, element stores ~2x the node count,
+    and each store's value matches its class formula (g for 2-D, g+0.5*L for 3-D; L 1-based) — so the
+    MP->WP staging of hbar/hnode is proven lossless. Self-consistency — no FESOM2 oracle."""
+    import json
+    print(f"[restart-state] root = {ckpt_root}  ab_order={ab_order}  tke={tke}")
+    folders = sorted(d for d in os.listdir(ckpt_root)
+                     if d.startswith("fesom.") and os.path.isdir(os.path.join(ckpt_root, d))
+                     and not d.endswith(".tmp"))
+    if not folders:
+        _fail(f"no fesom.<YYYY>.<DDD>.<SSSSS> checkpoint folder in {ckpt_root}")
+    ck = os.path.join(ckpt_root, folders[-1])
+    print(f"  checkpoint folder = {folders[-1]}")
+
+    # expected stores: name -> (entity 'nod2'|'elem', kind '2d'|'nz1'|'nz')
+    exp = {}
+    for n in ("eta_n", "hbar", "ssh_rhs_old", "area", "hice", "hsnow", "uice", "vice"):
+        exp[n] = ("nod2", "2d")
+    exp["hnode"] = ("nod2", "nz1")
+    for tr in ("temp", "salt"):
+        exp[tr] = ("nod2", "nz1"); exp[tr + "_AB"] = ("nod2", "nz1"); exp[tr + "_M1"] = ("nod2", "nz1")
+        if ab_order == 3:
+            exp[tr + "_M2"] = ("nod2", "nz1")
+    for n in ("w", "w_expl", "w_impl"):
+        exp[n] = ("nod2", "nz")
+    if tke:
+        exp["tke"] = ("nod2", "nz")
+    for n in ("u", "v", "urhs_AB", "vrhs_AB"):
+        exp[n] = ("elem", "nz1")
+    if ab_order == 3:
+        exp["urhs_AB3"] = ("elem", "nz1"); exp["vrhs_AB3"] = ("elem", "nz1")
+    for n in ("sigma11", "sigma12", "sigma22"):
+        exp[n] = ("elem", "2d")
+
+    on_disk = sorted(s[:-5] for s in os.listdir(ck) if s.endswith(".zarr"))
+    miss = sorted(set(exp) - set(on_disk))
+    extra = sorted(set(on_disk) - set(exp))
+    if miss:
+        _fail(f"checkpoint missing expected stores: {miss}")
+    if extra:
+        _fail(f"checkpoint has unexpected stores: {extra}")
+    print(f"  {len(on_disk)} stores present, all expected ({len(exp)} required)")
+
+    n_node = {}
+    n_elem = {}
+    nfail = 0
+    for name in sorted(exp):
+        entity, kind = exp[name]
+        sp = os.path.join(ck, name + ".zarr")
+        # raw _ARRAY_DIMENSIONS straight off disk (the ushow/xarray contract: (vdim, hdim) order)
+        with open(os.path.join(sp, name, ".zattrs")) as fh:
+            ad = json.load(fh).get("_ARRAY_DIMENSIONS")
+        ds = xr.open_zarr(sp, consolidated=False, mask_and_scale=False)
+        da = ds[name]
+        if kind == "2d":
+            want_dims = (entity,)
+        else:
+            want_dims = (kind, entity)
+        if tuple(da.dims) != want_dims or list(ad) != list(want_dims):
+            print(f"  ! {name:12s} dims {tuple(da.dims)} / _ARRAY_DIMENSIONS {ad} != {want_dims}")
+            nfail += 1
+            continue
+        # value formula: g (2-D) or g+0.5*L (3-D), g & L 1-based canonical
+        if kind == "2d":
+            (N,) = da.shape
+            g = np.arange(1, N + 1, dtype=np.float64)
+            d = float(np.max(np.abs(da.values.astype(np.float64) - g)))
+            nlev = None
+        else:
+            nlev, N = da.shape
+            g = np.arange(1, N + 1, dtype=np.float64)[None, :]
+            Lz = np.arange(1, nlev + 1, dtype=np.float64)[:, None]
+            d = float(np.max(np.abs(da.values.astype(np.float64) - (g + 0.5 * Lz))))
+        finite = bool(np.all(np.isfinite(da.values)))
+        # embedded lon/lat sized to the entity, all finite
+        coord_ok = True
+        for c in ("lon", "lat"):
+            arr = np.asarray(ds[c].values) if c in ds else np.array([])
+            if arr.shape != (N,) or not np.all(np.isfinite(arr)):
+                coord_ok = False
+        # vertical coord present + monotonic positive-down for 3-D
+        vert_ok = True
+        if kind != "2d":
+            if kind not in ds:
+                vert_ok = False
+            else:
+                zc = np.asarray(ds[kind].values)
+                vert_ok = (zc.shape == (nlev,) and bool(np.all(np.diff(zc) > 0)))
+        ok = (d == 0.0) and finite and coord_ok and vert_ok
+        shp = f"({N},)" if kind == "2d" else f"({nlev},{N})"
+        print(f"  {'ok ' if ok else 'BAD'} {name:12s} {entity}/{kind:3s} shape={shp:13s} "
+              f"max|Δ|={d:.1e} finite={finite} coords={coord_ok} vcoord={vert_ok}")
+        if not ok:
+            nfail += 1
+        (n_node if entity == "nod2" else n_elem)[name] = N
+
+    # partition-/entity-count sanity: element stores ~2x the node count (triangular mesh, as in M9)
+    Nn = max(n_node.values()); Ne = max(n_elem.values())
+    ratio = Ne / Nn
+    print(f"  node count={Nn}  elem count={Ne}  elem/node={ratio:.3f}  (expect ~2x)")
+    if not (1.7 <= ratio <= 2.3):
+        _fail(f"elem/node ratio {ratio:.3f} outside [1.7, 2.3] (entity decomp wrong?)")
+    if len(set(n_node.values())) != 1:
+        _fail(f"node stores disagree on horizontal size: {sorted(set(n_node.values()))}")
+    if len(set(n_elem.values())) != 1:
+        _fail(f"element stores disagree on horizontal size: {sorted(set(n_elem.values()))}")
+
+    if nfail:
+        _fail(f"restart-state: {nfail} store(s) failed shape/value/coord checks")
+    print("RESTART-STATE PASS (all stores present, shapes+levels+values+coords OK, elem~2x node)")
+
+
 def output_cmp(d1, d2):
     """Partition-independence (Task 2.3): two output dirs (e.g. dist_2 vs dist_8) must hold
     value-identical stores — every variable max|Δ|=0."""
@@ -487,6 +601,12 @@ def main():
                     help="compare mesh.diag Zarr store vs FESOM2 fesom.mesh.diag.nc")
     ap.add_argument("--output", metavar="DIR", help="Stage-2 fesom_outputsmoke store verify (formula)")
     ap.add_argument("--restart", metavar="DIR", help="Stage-3 restart checkpoint verify (snapshot + json)")
+    ap.add_argument("--restart-state", metavar="DIR", dest="restart_state",
+                    help="Stage-3 Task 3.4 full-state checkpoint verify (all oce+ice stores)")
+    ap.add_argument("--ab-order", type=int, default=2, dest="ab_order",
+                    help="Adams-Bashforth order for --restart-state expected set (2 or 3; default 2)")
+    ap.add_argument("--no-tke", action="store_true", dest="no_tke",
+                    help="--restart-state: do NOT expect the optional tke store")
     ap.add_argument("--output-cmp", nargs=2, metavar=("DIR1", "DIR2"), dest="output_cmp",
                     help="compare two output dirs (partition-independence)")
     ap.add_argument("--frame", choices=("geographic", "native"), default="geographic",
@@ -504,10 +624,13 @@ def main():
         output(args.output, frame=args.frame)
     elif args.restart:
         restart(args.restart)
+    elif args.restart_state:
+        restart_state(args.restart_state, ab_order=args.ab_order, tke=not args.no_tke)
     elif args.output_cmp:
         output_cmp(args.output_cmp[0], args.output_cmp[1])
     else:
-        ap.error("no mode selected (use --roundtrip / --lz4 / --meshdiag / --output / --output-cmp / --restart)")
+        ap.error("no mode selected (use --roundtrip / --lz4 / --meshdiag / --output / --output-cmp / "
+                 "--restart / --restart-state)")
 
 
 if __name__ == "__main__":

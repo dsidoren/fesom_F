@@ -273,22 +273,50 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
       listing after = `{05000.tmp, 07200, 09000, restart.latest}` (C1 gone). Runner: `tools/run_restartcrash.sh`.
       No-regression: `run_restartsmoke.sh` still GREEN (same final folder, max|Δ|=0); `ctest -R io_` 7/7 PASS.
 
-#### Task 3.4: Register the full field set (oce + ice incl. sigma)
+#### Task 3.4 ✅: Register the full field set (oce + ice incl. sigma)
 
 **Files:**
 - Modify: `src/io/mod_io_restart.F90`
+- Create: `src/drivers/fesom_restartstate.F90` (➕ the Task-3.4 GATE driver; allocates correctly-shaped REAL
+      `t_dyn`/`t_tracer`/`t_ice` + `mesh%hbar`/`hnode`, fills owned slots with a partition-independent formula,
+      registers via `restart_register_state`, writes one full checkpoint)
+- Modify: `tools/zarr_diff.py` (➕ `--restart-state` mode: verify the full oce+ice store set — shapes/levels/coords/
+      values + elem≈2× node)
+- Create: `tools/run_restartstate.sh` (➕ the gate runner; AB2+AB3 × np1/np2 + partition-independence compare;
+      `F3`/`BUILD`/`RUN` overridable for worktree runs)
 
-- [ ] oce node: `eta_n`, `hbar`, `ssh_rhs_old`, `hnode` (`nl-1`); `w`/`w_e`/`w_i` (**full levels `nl`** — the M9
-      `on_full_levels` distinction; wrong level count breaks the shape/gate)
-- [ ] tracers `temp`/`salt`(+passive): `values`, `valuesAB`, **`valuesold` M1 mandatory** (`valuesold(1,:,:)`, AB2
-      history — oracle serializes it unconditionally `io_restart.F90:224`); **M2 only `if AB_order==3`** (`:225-226`;
-      this driver hardcodes `AB_order=2`, so M2 is dead but the conditional must be there)
-- [ ] oce element: `uv`→`u`/`v`, `uv_rhsAB`→`urhs_AB`/`vrhs_AB` (+`urhs_AB3`/`vrhs_AB3` if `AB_order==3`)
-- [ ] optional `tke` (`dyn%work%tke`, when `mix_scheme==5`) — guarded
-- [ ] ice node: `area`/`hice`/`hsnow` (`ice%data(1:3)%values`), `uice`, `vice`; ice element: `sigma11`/`sigma12`/`sigma22`
-      (`ice%work%`) — **F-C**
-- [ ] **GATE (smoke):** a checkpoint contains all expected stores; xarray shapes match `nod2D`/`elem2D` × correct
-      level count; element stores ≈ 2× node count (as in M9)
+- [x] oce node: `eta_n`, `hbar`, `ssh_rhs_old`, `hnode` (`nl-1`); `w`/`w_e`/`w_i` (**full levels `nl`** — the M9
+      `on_full_levels` distinction; wrong level count breaks the shape/gate). `hbar`/`hnode` are `real(MP)` (see
+      below); registered via `restart_register_field_mp` (lossless MP→WP staging). Store names per the plan
+      field-set table (`eta_n`, not the oracle's `ssh`; `w`/`w_expl`/`w_impl`).
+- [x] tracers `temp`/`salt`(+passive): `values`, `valuesAB`, **`valuesold` M1 mandatory** (`valuesold(1,:,:)`, AB2
+      history — oracle serializes it unconditionally `io_restart.F90:224`); **M2 only `if tracers%data(j)%AB_order==3`**
+      (`:225-226`). Names from a `tracer_name(id,j)` helper == the oracle `ini_ocean_io` CASE (1=temp, 2=salt, passive
+      by ID, default `tra<j>`). M2 gated by the AB-order driver run (`FESOM3_AB_ORDER=3` ⇒ `temp_M2`/`salt_M2` appear).
+- [x] oce element: `uv(1,:,:)`→`u`, `uv(2,:,:)`→`v`, `uv_rhsAB(1,1|1,2,:,:)`→`urhs_AB`/`vrhs_AB` (+`urhs_AB3`/`vrhs_AB3`
+      from `uv_rhsAB(2,·,·)` iff `dyn%AB_order==3`) — strided pointer sections associate without a copy
+- [x] optional `tke` (`dyn%work%tke`, FULL levels) — guarded `if (mix_scheme==5 .and. allocated(dyn%work%tke))`;
+      `mix_scheme` is an optional arg to `restart_register_state` (kept decoupled from `mod_param_phys`; Stage 5 passes
+      `mix_scheme_nmb`). Gate exercises it ON (`mix_scheme=5`).
+- [x] ice node: `area`/`hice`/`hsnow` (`ice%data(1:3)%values`), `uice`, `vice`; ice element: `sigma11`/`sigma12`/`sigma22`
+      (`ice%work%sigma11/12/22` — verified `mod_ice.F90:37`) — **F-C**
+- [x] **GATE (smoke):** a checkpoint contains all expected stores; xarray shapes match `nod2D`/`elem2D` × correct
+      level count; element stores ≈ 2× node count — **PASS np=1 AND np=2** (Intel dp, worktree `build_intel_dp`):
+      `fesom_restartstate` writes `fesom.2000.001.03600/` with all **26** stores (AB2+tke); `zarr_diff.py
+      --restart-state` confirms every store's entity×level-kind shape + `_ARRAY_DIMENSIONS` `(vdim,hdim)`, embedded
+      finite lon/lat sized to the entity, monotonic positive-down `nz`/`nz1`, finite data, and value==formula
+      (`g` 2-D / `g+0.5L` 3-D) **max|Δ|=0 on ALL 26** incl. the MP `hbar`/`hnode` (⇒ MP→WP staging lossless);
+      node=3140, elem=5839, elem/node=1.860 (~2×). **AB_order=3 run** ⇒ **30** stores (+`urhs_AB3`/`vrhs_AB3`/
+      `temp_M2`/`salt_M2`, all max|Δ|=0) — proves the conditionals. **Partition-independence:** np1 vs np2 checkpoint
+      `--output-cmp` byte-value-identical (max|Δ|=0, every store incl. coords). No-regression: `run_restartsmoke.sh`
+      + `run_restartcrash.sh` still GREEN np 1/2 after the `restart_register_field` refactor.
+
+> **MP precision handling (for the Task 4.1 read-back).** `mesh%hbar`/`mesh%hnode` are `real(MP)` (`MP=max(WP,4)`;
+> `==WP` at the dp anchor but the code is MP-correct for single/half builds). `t_restart_field` gains `mp_src`
+> (logical) + `pmp2d(:)`/`pmp3d(:,:)` (`real(MP)` live pointers); `restart_register_field_mp` sets them and forces
+> `dtype='<f8'`. `restart_write_field` copies MP→WP into a local staging buffer (`stg2`/`stg3`) before
+> `decomp_redistribute` — **never binds an MP array to a WP dummy**. **Task 4.1 read-back:** for `mp_src` fields,
+> read into a WP buffer then `f%pmp2d/pmp3d = real(buf, MP)` (the live MP pointer is held in the descriptor).
 
 ### Stage 4 — `mod_io_restart` READ path
 *The transpose of the write path; restores owned values then halo-exchanges to bit-exact full arrays.*

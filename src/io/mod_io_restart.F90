@@ -36,14 +36,19 @@ module mod_io_restart
     ! scans the directory, so a stray crashed-write *.tmp/ or an unpointed finalized fesom.*/ is ignored.
     ! A keep-N prune (restart_keep) trims the oldest immutable checkpoints after each finalize.
     !
-    ! SCOPE: Task 3.2 = the per-field writer + folder + checkpoint.json; Task 3.3 (this file now) =
-    ! atomic finalize + restart.latest + keep-N prune + restart_resolve_latest. Registering the full
-    ! oce+ice field set is Task 3.4; the READ path (which calls restart_resolve_latest) is Stage 4.
+    ! SCOPE: Task 3.2 = the per-field writer + folder + checkpoint.json; Task 3.3 = atomic finalize +
+    ! restart.latest + keep-N prune + restart_resolve_latest; Task 3.4 (this file now) =
+    ! restart_register_state, which maps the FULL oce+ice prognostic state (incl. EVP sigma and the
+    ! real(MP) mesh%hbar/hnode via a lossless WP staging copy) to the registry. The READ path (which
+    ! calls restart_resolve_latest and copies WP->MP back for mp_src fields) is Stage 4 (Task 4.1).
     use mpi
     use, intrinsic :: iso_fortran_env, only: real64
-    use mod_precision,   only: WP
+    use mod_precision,   only: WP, MP
     use mod_mesh,        only: t_mesh
     use mod_partit,      only: t_partit
+    use mod_dyn,         only: t_dyn        ! full-state registration (Task 3.4)
+    use mod_tracer,      only: t_tracer
+    use mod_ice,         only: t_ice
     use mod_part_bounds, only: is_multirank, local_dims
     use mod_io_zarr
     use mod_io_decomp
@@ -55,7 +60,8 @@ module mod_io_restart
     ! Re-export the entity selectors so a caller needs only `use mod_io_restart`.
     public :: DECOMP_NODE, DECOMP_ELEM
     public :: t_restart, t_restart_field, RESTART_MAXF
-    public :: restart_init, restart_register_field, restart_write_field, restart_write, restart_finalize
+    public :: restart_init, restart_register_field, restart_register_field_mp, restart_register_state
+    public :: restart_write_field, restart_write, restart_finalize
     public :: restart_resolve_latest
 
     integer, parameter :: RESTART_MAXF = 64
@@ -74,8 +80,16 @@ module mod_io_restart
         integer           :: nlev   = 1                ! vertical size (3-D): nl or nl-1
         character(len=8)  :: hdim   = 'nod2'           ! 'nod2' (node) / 'elem' (element)
         character(len=8)  :: vdim   = ''               ! 'nz' (levels) / 'nz1' (layers)
-        real(WP), pointer :: p2d(:)   => null()        ! live array (2-D field)
-        real(WP), pointer :: p3d(:,:) => null()        ! live array (3-D field)
+        real(WP), pointer :: p2d(:)   => null()        ! live array (2-D field, WP source)
+        real(WP), pointer :: p3d(:,:) => null()        ! live array (3-D field, WP source)
+        ! MP-source path (Task 3.4 precision gotcha): mesh%hbar / mesh%hnode are real(MP), which may
+        ! differ from WP (the decomp/Zarr path is WP). We never pass an MP array to a WP dummy; instead
+        ! we hold the live MP pointer + a flag, copy MP->WP into a local staging buffer at write time,
+        ! and (Task 4.1) copy WP->MP back at read time. dtype is forced <f8 so WP(real64) >= MP is
+        ! lossless. mp_src=.false. fields use p2d/p3d directly (no copy).
+        logical           :: mp_src   = .false.
+        real(MP), pointer :: pmp2d(:)   => null()      ! live array (2-D field, MP source)
+        real(MP), pointer :: pmp3d(:,:) => null()      ! live array (3-D field, MP source)
     end type t_restart_field
 
     type :: t_restart
@@ -160,6 +174,44 @@ contains
         logical,          intent(in), optional :: on_full_levels
         character(len=*), intent(in), optional :: precision
         integer :: k
+        k = restart_new_field(R, name, units, entity, precision)
+        call restart_set_levels(R, k, present(p3d), on_full_levels)
+        if (present(p3d)) then
+            R%f(k)%p3d => p3d
+        else if (present(p2d)) then
+            R%f(k)%p2d => p2d
+        end if
+    end subroutine restart_register_field
+
+    ! Register an MP-source field (mesh%hbar / mesh%hnode). Identical to restart_register_field but the
+    ! live pointer is real(MP): we never bind it to a WP dummy. dtype is forced <f8 so the WP staging
+    ! copy at write time (and the WP->MP copy at read time, Task 4.1) round-trips MP exactly when
+    ! WP=real64 >= MP. Pass pmp2d for a 2-D field, pmp3d for a 3-D field (on_full_levels picks nl vs nl-1).
+    subroutine restart_register_field_mp(R, name, units, entity, pmp2d, pmp3d, on_full_levels)
+        type(t_restart),   intent(inout)        :: R
+        character(len=*),  intent(in)           :: name, units
+        integer,           intent(in)           :: entity
+        real(MP), pointer, intent(in), optional :: pmp2d(:)
+        real(MP), pointer, intent(in), optional :: pmp3d(:,:)
+        logical,           intent(in), optional :: on_full_levels
+        integer :: k
+        k = restart_new_field(R, name, units, entity, '8')      ! MP -> always full precision
+        call restart_set_levels(R, k, present(pmp3d), on_full_levels)
+        R%f(k)%mp_src = .true.
+        if (present(pmp3d)) then
+            R%f(k)%pmp3d => pmp3d
+        else if (present(pmp2d)) then
+            R%f(k)%pmp2d => pmp2d
+        end if
+    end subroutine restart_register_field_mp
+
+    ! Bump the registry and set the identity fields (name/units/entity/hdim/dtype) common to the WP and
+    ! MP registration entry points; returns the new field index k.
+    integer function restart_new_field(R, name, units, entity, precision) result(k)
+        type(t_restart),  intent(inout)        :: R
+        character(len=*), intent(in)           :: name, units
+        integer,          intent(in)           :: entity
+        character(len=*), intent(in), optional :: precision
         call zarr_check(R%nf < RESTART_MAXF, 'restart: too many fields ('//trim(name)//')')
         R%nf = R%nf + 1; k = R%nf
         R%f(k)%name   = name
@@ -167,12 +219,20 @@ contains
         R%f(k)%entity = entity
         R%f(k)%hdim   = 'nod2'; if (entity == DECOMP_ELEM) R%f(k)%hdim = 'elem'
         R%f(k)%dtype  = restart_dtype(precision)
-        if (present(p3d)) then
+    end function restart_new_field
+
+    ! Resolve the level kind (2-D vs 3-D, nl vs nl-1) for field k from the pointer-presence + on_full_levels.
+    subroutine restart_set_levels(R, k, is3d, on_full_levels)
+        type(t_restart), intent(inout)        :: R
+        integer,         intent(in)           :: k
+        logical,         intent(in)           :: is3d
+        logical,         intent(in), optional :: on_full_levels
+        logical :: ofl
+        if (is3d) then
             R%f(k)%ndim = 3
-            R%f(k)%p3d => p3d
-            R%f(k)%on_full_levels = .false.
-            if (present(on_full_levels)) R%f(k)%on_full_levels = on_full_levels
-            if (R%f(k)%on_full_levels) then
+            ofl = .false.; if (present(on_full_levels)) ofl = on_full_levels
+            R%f(k)%on_full_levels = ofl
+            if (ofl) then
                 R%f(k)%nlev = R%nl;   R%f(k)%vdim = 'nz'
             else
                 R%f(k)%nlev = R%nl-1; R%f(k)%vdim = 'nz1'
@@ -180,9 +240,109 @@ contains
         else
             R%f(k)%ndim = 2
             R%f(k)%nlev = 1
-            if (present(p2d)) R%f(k)%p2d => p2d
         end if
-    end subroutine restart_register_field
+    end subroutine restart_set_levels
+
+    ! ----------------------------------------------------------------- full prognostic state (Task 3.4)
+
+    ! Register EVERY prognostic field of the full oce+ice state by associating a live pointer to each
+    ! model array, mirroring FESOM2's ini_ocean_io / ini_ice_io field lists (the verified safe superset,
+    ! F-F) and adding the EVP sigma stress (F-C, which FESOM2 omits). This is the one call Stage 5 makes
+    ! with the real structs; the reader (Task 4.1) iterates the same registry and writes back into these
+    ! pointers (mp_src fields via a WP->MP copy). Conditionals (AB_order, num_tracers, mix_scheme) are
+    ! read from the structs / args so a different config registers a different — but self-consistent — set.
+    !
+    !   store names (== FESOM2 oracle, except eta_n which FESOM3 names per the plan field-set table):
+    !     node 2-D : eta_n hbar(MP) ssh_rhs_old | area hice hsnow uice vice
+    !     node 3-D : hnode(MP, nl-1) | <tr> <tr>_AB <tr>_M1 [<tr>_M2 if tracer AB_order==3]
+    !                w w_expl w_impl (FULL nl) | tke (FULL nl, if mix_scheme==5)
+    !     elem 3-D : u v urhs_AB vrhs_AB [urhs_AB3 vrhs_AB3 if dyn%AB_order==3]   (nl-1)
+    !     elem 2-D : sigma11 sigma12 sigma22
+    subroutine restart_register_state(R, dyn, tracers, ice, mesh, mix_scheme)
+        type(t_restart), intent(inout)      :: R
+        type(t_dyn),     intent(in), target :: dyn
+        type(t_tracer),  intent(in), target :: tracers
+        type(t_ice),     intent(in), target :: ice
+        type(t_mesh),    intent(in), target :: mesh
+        integer,         intent(in), optional :: mix_scheme
+        real(WP), pointer :: p2(:), p3(:,:)
+        real(MP), pointer :: q2(:), q3(:,:)
+        integer           :: j, ms
+        character(len=32) :: tn
+        ms = 0; if (present(mix_scheme)) ms = mix_scheme
+
+        ! ---- ocean NODE 2-D ----
+        p2 => dyn%eta_n;       call restart_register_field(R, 'eta_n',       'm', DECOMP_NODE, p2d=p2)
+        q2 => mesh%hbar;       call restart_register_field_mp(R, 'hbar',      'm', DECOMP_NODE, pmp2d=q2)
+        p2 => dyn%ssh_rhs_old; call restart_register_field(R, 'ssh_rhs_old', '',  DECOMP_NODE, p2d=p2)
+
+        ! ---- ocean NODE 3-D layers (nl-1): ALE layer thickness (MP) ----
+        q3 => mesh%hnode;      call restart_register_field_mp(R, 'hnode',     'm', DECOMP_NODE, pmp3d=q3)
+
+        ! ---- ocean ELEMENT 3-D layers (nl-1): velocity + Adams-Bashforth history ----
+        p3 => dyn%uv(1,:,:);         call restart_register_field(R, 'u',       'm/s', DECOMP_ELEM, p3d=p3)
+        p3 => dyn%uv(2,:,:);         call restart_register_field(R, 'v',       'm/s', DECOMP_ELEM, p3d=p3)
+        p3 => dyn%uv_rhsAB(1,1,:,:); call restart_register_field(R, 'urhs_AB', 'm/s', DECOMP_ELEM, p3d=p3)
+        p3 => dyn%uv_rhsAB(1,2,:,:); call restart_register_field(R, 'vrhs_AB', 'm/s', DECOMP_ELEM, p3d=p3)
+        if (dyn%AB_order == 3) then
+            p3 => dyn%uv_rhsAB(2,1,:,:); call restart_register_field(R, 'urhs_AB3', 'm/s', DECOMP_ELEM, p3d=p3)
+            p3 => dyn%uv_rhsAB(2,2,:,:); call restart_register_field(R, 'vrhs_AB3', 'm/s', DECOMP_ELEM, p3d=p3)
+        end if
+
+        ! ---- tracers (NODE 3-D layers nl-1): values + AB interp + valuesold history (M1 mandatory) ----
+        do j = 1, tracers%num_tracers
+            tn = tracer_name(tracers%data(j)%ID, j)
+            p3 => tracers%data(j)%values;          call restart_register_field(R, trim(tn),         '', DECOMP_NODE, p3d=p3)
+            p3 => tracers%data(j)%valuesAB;         call restart_register_field(R, trim(tn)//'_AB',  '', DECOMP_NODE, p3d=p3)
+            p3 => tracers%data(j)%valuesold(1,:,:); call restart_register_field(R, trim(tn)//'_M1',  '', DECOMP_NODE, p3d=p3)
+            if (tracers%data(j)%AB_order == 3) then
+                p3 => tracers%data(j)%valuesold(2,:,:); call restart_register_field(R, trim(tn)//'_M2', '', DECOMP_NODE, p3d=p3)
+            end if
+        end do
+
+        ! ---- vertical velocities (NODE 3-D, FULL levels nl) ----
+        p3 => dyn%w;   call restart_register_field(R, 'w',      'm/s', DECOMP_NODE, p3d=p3, on_full_levels=.true.)
+        p3 => dyn%w_e; call restart_register_field(R, 'w_expl', 'm/s', DECOMP_NODE, p3d=p3, on_full_levels=.true.)
+        p3 => dyn%w_i; call restart_register_field(R, 'w_impl', 'm/s', DECOMP_NODE, p3d=p3, on_full_levels=.true.)
+
+        ! ---- optional TKE (NODE 3-D, FULL levels nl) — only when TKE mixing is active (mix_scheme==5) ----
+        if (ms == 5 .and. allocated(dyn%work%tke)) then
+            p3 => dyn%work%tke; call restart_register_field(R, 'tke', 'm2/s2', DECOMP_NODE, p3d=p3, on_full_levels=.true.)
+        end if
+
+        ! ---- ice NODE 2-D: tracers (a_ice/m_ice/m_snow) + velocity ----
+        p2 => ice%data(1)%values; call restart_register_field(R, 'area',  '',    DECOMP_NODE, p2d=p2)
+        p2 => ice%data(2)%values; call restart_register_field(R, 'hice',  'm',   DECOMP_NODE, p2d=p2)
+        p2 => ice%data(3)%values; call restart_register_field(R, 'hsnow', 'm',   DECOMP_NODE, p2d=p2)
+        p2 => ice%uice;           call restart_register_field(R, 'uice',  'm/s', DECOMP_NODE, p2d=p2)
+        p2 => ice%vice;           call restart_register_field(R, 'vice',  'm/s', DECOMP_NODE, p2d=p2)
+
+        ! ---- ice ELEMENT 2-D: EVP stress tensor (F-C: serialized so the gate is max|Δ|=0 on ice too) ----
+        p2 => ice%work%sigma11; call restart_register_field(R, 'sigma11', '', DECOMP_ELEM, p2d=p2)
+        p2 => ice%work%sigma12; call restart_register_field(R, 'sigma12', '', DECOMP_ELEM, p2d=p2)
+        p2 => ice%work%sigma22; call restart_register_field(R, 'sigma22', '', DECOMP_ELEM, p2d=p2)
+    end subroutine restart_register_state
+
+    ! Tracer store name == FESOM2 ini_ocean_io CASE(id) (io_restart.F90:167-212): id keys the canonical
+    ! name (1=temp, 2=salt, passive species by tracer ID), default 'tra'//j for an unlisted passive tracer.
+    function tracer_name(id, j) result(nm)
+        integer, intent(in) :: id, j
+        character(len=32)   :: nm
+        select case (id)
+        case (1);   nm = 'temp'
+        case (2);   nm = 'salt'
+        case (6);   nm = 'sf6'
+        case (11);  nm = 'cfc11'
+        case (12);  nm = 'cfc12'
+        case (14);  nm = 'r14c'
+        case (39);  nm = 'r39ar'
+        case (101); nm = 'h2o18'
+        case (102); nm = 'hDo16'
+        case (103); nm = 'h2o16'
+        case default
+            write(nm, '(a3,i4.4)') 'tra', j     ! FESOM2 oracle: write(trname,'(A3,i4.4)') 'tra_', j
+        end select
+    end function tracer_name
 
     ! ----------------------------------------------------------------- checkpoint write
 
@@ -386,7 +546,7 @@ contains
         type(t_zarr_store) :: store
         type(t_zarr_array) :: a_data, a_vert, a_lon, a_lat
         type(t_zarr_attrs) :: gat, at
-        real(WP), allocatable :: buf(:), buf3(:,:)
+        real(WP), allocatable :: buf(:), buf3(:,:), stg2(:), stg3(:,:)
         integer :: c, lo, ierr, cv, nvc, vc, L0, cvn
         ! resolve the entity context (node vs element-centroid)
         if (f%entity == DECOMP_ELEM) then
@@ -435,14 +595,25 @@ contains
         ! ---- every writer redistributes the live field + writes its data chunks ----
         if (f%ndim == 2) then
             allocate(buf(max(1, D%w_nbuf)))
-            call decomp_redistribute(D, f%p2d(1:nO), buf, 0.0_WP)            ! collective
+            if (f%mp_src) then                                              ! MP->WP staged (lossless)
+                allocate(stg2(max(1, nO))); stg2(1:nO) = real(f%pmp2d(1:nO), WP)
+                call decomp_redistribute(D, stg2(1:nO), buf, 0.0_WP)        ! collective
+            else
+                call decomp_redistribute(D, f%p2d(1:nO), buf, 0.0_WP)       ! collective
+            end if
             do c = D%w_first_chunk, D%w_last_chunk
                 lo = (c - D%w_first_chunk)*D%C + 1
                 call zarr_write_chunk(store, a_data, [c], buf(lo:lo + D%C - 1))
             end do
         else
             allocate(buf3(f%nlev, max(1, D%w_nbuf)))
-            call decomp_redistribute(D, f%p3d(1:f%nlev,1:nO), buf3, 0.0_WP)  ! collective
+            if (f%mp_src) then                                              ! MP->WP staged (lossless)
+                allocate(stg3(f%nlev, max(1, nO)))
+                stg3(1:f%nlev, 1:nO) = real(f%pmp3d(1:f%nlev, 1:nO), WP)
+                call decomp_redistribute(D, stg3(1:f%nlev, 1:nO), buf3, 0.0_WP)  ! collective
+            else
+                call decomp_redistribute(D, f%p3d(1:f%nlev,1:nO), buf3, 0.0_WP)  ! collective
+            end if
             nvc = (f%nlev + cv - 1)/cv
             do c = D%w_first_chunk, D%w_last_chunk
                 lo = (c - D%w_first_chunk)*D%C + 1
