@@ -320,6 +320,45 @@ The live "Oracle" section above + the "M2.12 entry notes" below cover what the c
 
 ## Next task
 
+### ⏭️ M9 (netCDF output + restart) — NEXT. **START WITH A BRAINSTORM, do NOT jump to implementation.**
+
+**Current state (2026-06-28):** M0–M8 COMPLETE & tagged (m0…m8). The **forcing-perf side-investigation is
+✅ RESOLVED & COMMITTED** (`708fdf4`/`ce2288a`/`1ef9516` on `main`): persistent HDF5 handle + double-buffer
+in `forcing_getcoeffld` ⇒ F3 forcing `17.7→5.78 ms/step` at dist_512, now *faster* than F2 (7.03); F3 beats
+F2 overall. Byte-exact (12/48-step + year-rollover gates `max|Δ|=0`, ctest 13/13). See the RESOLVED note at
+L133 + `docs/plans/2026-06-28-forcing-perf-investigation.md`.
+
+**⚠️ Process directive from the user (2026-06-28):** M9 is where the **model-harness architecture** gets
+decided, and **the user wants to control those decisions**. So the **next session MUST begin by
+brainstorming an M9 plan WITH the user** (use `brainstorm:do` / `planning:make`) — present options and
+trade-offs, let the user choose, *then* write the plan, *then* implement. Do **not** start coding M9 from a
+guessed design.
+
+**M9 scope (to be refined in the brainstorm):** netCDF **output** (diagnostics/mean fields) + **restart**
+(write/read model state incl. `tke` serialization for cvmix, and the ALE/ice/GM state) with bit-reproducible
+restart→continue (restarted run byte-exact vs an uninterrupted run).
+
+**Decision axes to put to the user in the brainstorm (each is a "harness" choice the user wants to own):**
+1. **Harness structure** — keep the monolithic `src/drivers/fesom_lifecycle_native_mr.F90` as the production
+   driver, or refactor into a cleaner model/IO separation before output/restart land? Where does I/O plug in?
+2. **Output format & schema** — FESOM2-compatible netCDF (so existing post-processing/`pyfesom`/diag tools
+   work) vs a fresh schema? Which fields, averaging/snapshot, output frequency, mesh+metadata embedding.
+3. **Parallel I/O strategy** — gather-to-root + serial write (simple, proven) vs per-rank files vs parallel
+   netCDF/HDF5 collective. Note the forcing-perf lesson: on Levante the `MPI_Bcast` path is slow (two-copy
+   vader, KNEM off), so gather/scatter collectives need measuring, not assuming.
+4. **Restart format & reproducibility** — FESOM2-compatible raw/netCDF restart vs native; exact state list
+   (T/S/u/v/w/ssh + ALE thickness/zbar + ice EVP + cvmix `tke`/`tdiss` + GM); the **byte-exact
+   restart-continue gate** recipe (analogous to the existing `max|Δ|=0` oracle gates).
+5. **Byte-identity target** — does output/restart need to byte-match FESOM2's *files*, or only preserve the
+   model state byte-exactly across a restart? (The project bar so far is `max|Δ|=0` vs the FESOM2 oracle.)
+
+**Pointers for the brainstorm:** the current driver already emits `fesom_raw_restart`/`fesom_bin_restart`/
+`fesom.clock` stubs in the gate rundirs (see what they actually write). FESOM2 reference: `io_restart` +
+`gen_modules_read_NetCDF`/`io_meandata` in `/home/a/a270088/port2/fesom2/src`. Memory:
+[[project-fesom3-implementation-state]], [[stay-close-to-fortran]], [[project-levante-mpi-knem-gotcha]].
+
+---
+
 **M2.10 forcing DONE + M2.11a geometry DONE + M2.11b initial conditions DONE + M2.11c lifecycle DONE (unforced AND
 forced) — the multi-step CORE2 lifecycle is `max|Δ|=0` (the "CG floor" was SOLVED 2026-06-21; the forced re-verify
 CONFIRMED 2026-06-21: 195 records, worst |Δ|=0).** **All of M2 is now byte-exact end-to-end on CORE2.**
