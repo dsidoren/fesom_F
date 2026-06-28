@@ -68,6 +68,9 @@ module mod_step_oce
     use oce_ale,            only: compute_vel_nodes, update_vel, compute_hbar_ale, &
                                   update_eta_n, vert_vel_ale, update_thickness_ale
     use oce_ale_tracer,     only: solve_tracers_ale
+    use mod_timer,          only: timer_start, timer_stop, &
+                                  TMR_OCE_MIXPRES, TMR_OCE_DYN, TMR_OCE_SSH, &
+                                  TMR_OCE_SOLVE, TMR_OCE_GMREDI, TMR_OCE_TRACER
     implicit none
     private
     public :: step_oce
@@ -103,6 +106,7 @@ contains
 
         !_______________________________________________________________________
         ! nodal velocity (the REAL uvnode source, was prescribed at M2.8)
+        call timer_start(TMR_OCE_MIXPRES)
         call compute_vel_nodes(dynamics, mesh, partit)
 
         !_______________________________________________________________________
@@ -140,12 +144,15 @@ contains
                                                  dynamics%work%pgf_x, dynamics%work%pgf_y, partit)
         end if
 
+        call timer_stop(TMR_OCE_MIXPRES)
+
         !_______________________________________________________________________
         ! M4/M5 producers: sw_alpha_beta (EOS expansion coeffs) feeds KPP (Bo), the GM
         ! streamfunction (via sigma_xy) and, for Redi, compute_neutral_slope. FESOM2
         ! oce_ale.F90:3673-3682 calls it unconditionally; here it fires for KPP.or.GM.or.Redi
         ! (the reduced PP/no-GM step leaves sw_alpha untouched). sigma_xy/neutral_slope are
         ! GM/Redi-only (KPP does not read them) so they stay Fer_GM.or.Redi-guarded.
+        call timer_start(TMR_OCE_GMREDI)
         if (Fer_GM .or. Redi .or. is_kpp) then
             call sw_alpha_beta(tracers%data(1)%values, tracers%data(2)%values, mesh, &
                                dynamics%work%sw_alpha, dynamics%work%sw_beta, partit)
@@ -158,6 +165,7 @@ contains
                                   dynamics%work%neutral_slope, dynamics%work%slope_tapered, &
                                   dynamics%work%fer_tapfac, partit)
         end if
+        call timer_stop(TMR_OCE_GMREDI)
 
         !_______________________________________________________________________
         ! vertical mixing + convective adjustment. FESOM2 oce_ale.F90:3713-3729 dispatches
@@ -170,6 +178,7 @@ contains
         ! and Av=avg(tke_Av) write-back INTERNALLY (oracle-faithful, unlike KPP's dispatch-level
         ! Kv=Kv_double loop), so the branch only calls it then mo_convect. Av stays element-based
         ! and Kv node-based -> impl_vert_visc_ale + the tracer TDMA are BYTE-UNCHANGED from M6.
+        call timer_start(TMR_OCE_MIXPRES)
         if (is_kpp) then
             if (.not. present(stress_node_surf)) &
                 error stop 'step_oce: KPP (mix_scheme_nmb==1) requires stress_node_surf'
@@ -189,9 +198,11 @@ contains
             call mo_convect(dynamics, mesh, partit)
         end if
         call dump_node(DUMP_SUBSTEP_MIXING, n, 'Kv', dynamics%work%Kv, mesh%nlevels_nod2D)
+        call timer_stop(TMR_OCE_MIXPRES)
 
         !_______________________________________________________________________
         ! momentum rhs: Coriolis AB2 + PGF + SSH-grad + momentum advection
+        call timer_start(TMR_OCE_DYN)
         call compute_vel_rhs(dynamics, mesh, dt, lfirst, partit)
 
         !_______________________________________________________________________
@@ -201,15 +212,20 @@ contains
         !_______________________________________________________________________
         ! implicit vertical viscosity TDMA (Av is now LIVE from PP mixing)
         call impl_vert_visc_ale(dynamics, mesh, dt, dynamics%work%Av, stress_surf, partit)
+        call timer_stop(TMR_OCE_DYN)
 
         !_______________________________________________________________________
         ! free-surface solve. For non-linfs ALE (zlevel/zstar) the SSH stiffness 2nd term
         ! tracks the moving surface: update it by the (lagged) dhe from the previous step's
         ! compute_hbar_ale BEFORE assembling/solving (FESOM2 oce_ale.F90:3921; step-1 dhe=0).
+        ! TMR_OCE_SOLVE (the CG solve) is nested inside TMR_OCE_SSH, mirroring FESOM2's "solve ssh".
+        call timer_start(TMR_OCE_SSH)
         if (trim(which_ALE)/='linfs') call update_stiff_mat_ale(mesh, dt, partit)
         call compute_ssh_rhs_ale(dynamics, mesh, partit, water_flux=water_flux)
         call dump_node_2d(DUMP_SUBSTEP_SSH_RHS, n, 'ssh_rhs', dynamics%ssh_rhs)
+        call timer_start(TMR_OCE_SOLVE)
         call solve_ssh_ale(dynamics, mesh, partit=partit)
+        call timer_stop(TMR_OCE_SOLVE)
         call dump_node_2d(DUMP_SUBSTEP_SSH_SOLVE, n, 'd_eta', dynamics%d_eta)
 
         !_______________________________________________________________________
@@ -219,11 +235,13 @@ contains
         call dump_node_2d(DUMP_SUBSTEP_HBAR, n, 'hbar', mesh%hbar)
         call update_eta_n(dynamics, mesh, partit)
         call dump_node_2d(DUMP_SUBSTEP_ETA_N, n, 'eta_n', dynamics%eta_n)
+        call timer_stop(TMR_OCE_SSH)
 
         !_______________________________________________________________________
         ! M4 GM diffusivity + streamfunction + bolus velocity (FESOM2 oce_ale.F90:4050-4058 —
         ! after the SSH/velocity/elevation update, before vert_vel_ale which then fills fer_w).
         ! Redi off (M4d). fer_uv feeds vert_vel_ale (fer_w) + the tracer bolus add/subtract.
+        call timer_start(TMR_OCE_GMREDI)
         if (Fer_GM .or. Redi) then
             if (Redi) then
                 call init_Redi_GM(mesh, dynamics%work%bvfreq, dynamics%work%fer_K, dynamics%work%fer_c, &
@@ -238,18 +256,22 @@ contains
                                  dynamics%work%fer_c, dynamics%work%fer_K, dynamics%work%fer_gamma, partit)
             call fer_gamma2vel(mesh, dynamics%work%fer_gamma, dynamics%fer_uv, partit)
         end if
+        call timer_stop(TMR_OCE_GMREDI)
 
         !_______________________________________________________________________
         ! vertical velocity / ALE thickness (linfs: hnode_new = hnode)
+        call timer_start(TMR_OCE_DYN)
         call vert_vel_ale(dynamics, mesh, dt, partit, water_flux=water_flux)
         call dump_node(DUMP_SUBSTEP_ALE, n, 'hnode_new', mesh%hnode_new, mesh%nlevels_nod2D)
         call dump_node(DUMP_SUBSTEP_ALE, n, 'w',         dynamics%w,     mesh%nlevels_nod2D)
+        call timer_stop(TMR_OCE_DYN)
 
         !_______________________________________________________________________
         ! tracer solve (advection + diffusion; tracer TDMA consumes LIVE Kv)
         ! M4d Redi: the diffusion uses the computed Redi diffusivity dynamics%work%Ki (the Ki
         ! arg is the prescribed background, 0 in the reduced config). The diff routines' Redi
         ! terms are if(Redi)-guarded so the non-Redi path is byte-unchanged.
+        call timer_start(TMR_OCE_TRACER)
         if (Redi) then
             call solve_tracers_ale(dt, dynamics, tracers, mesh, dynamics%work%Ki, &
                                    heat_flux, water_flux, virtual_salt, relax_salt, &
@@ -266,6 +288,7 @@ contains
         ! commit the new layer thicknesses (linfs: no-op)
         call update_thickness_ale(mesh, partit)
         call dump_node(DUMP_SUBSTEP_THICKNESS, n, 'hnode', mesh%hnode, mesh%nlevels_nod2D)
+        call timer_stop(TMR_OCE_TRACER)
     end subroutine step_oce
 
 end module mod_step_oce

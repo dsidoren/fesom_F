@@ -38,6 +38,7 @@ program fesom_lifecycle_native_mr
     !   FESOM_DUMP_MAXSTEPS dump step cap
     !   FESOM3_NSTEPS       number of steps                     (default: 3)
     use mpi
+    use mod_timer           ! permanent per-component wall-clock timing (TMR_* ids, timer_start/stop/report)
     use, intrinsic :: ieee_arithmetic   ! M8c Step-3 fix: control flush-to-zero (denormal) underflow mode
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use mod_precision,      only: WP, MP, MPI_WP
@@ -108,6 +109,7 @@ program fesom_lifecycle_native_mr
     real(kind=WP)      :: clk_t0, dstat(6)   ! dstat: M8c Step-3 global per-step physical diagnostics
     logical            :: ftz_supported   ! M8c Step-3: flush-to-zero (denormal) underflow control (match FESOM2)
     logical            :: step_diag        ! perf: per-step global MPI_MAX stability diagnostic (env FESOM3_STEP_DIAG; default OFF — FESOM2 has no per-step collective)
+    integer            :: mon_every        ! perf monitoring: emit a per-component timing report every mon_every steps (env FESOM3_TIMING_EVERY; 0 = only the final report)
     character(len=512) :: start_clock, restart_in
     real(kind=MP) :: zbar_srf, zbar_bot
     real(kind=WP), allocatable :: Ki(:,:), real_salt_flux(:), stress_surf(:,:)
@@ -165,6 +167,9 @@ program fesom_lifecycle_native_mr
     ! driver matches FESOM2's per-step work; the M8e free-running stability run sets FESOM3_STEP_DIAG=1.
     call get_environment_variable('FESOM3_STEP_DIAG', env, length=env_len, status=ios)
     step_diag = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_TIMING_EVERY', env, length=env_len, status=ios)
+    mon_every = 0
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) mon_every
     ! M6a-4: ALE vertical coordinate (default linfs). 'zstar' -> full free surface + real
     ! freshwater flux (use_virt_salt=.false., is_nonlinfs=1; mirror of the 1-rank M6a-3 wiring).
     call get_environment_variable('FESOM3_WHICH_ALE', env, length=env_len, status=ios)
@@ -692,26 +697,41 @@ program fesom_lifecycle_native_mr
     !===========================================================================
     ! runloop: ocean2ice -> [native atm] -> ice_timestep -> oce_fluxes_mom -> oce_fluxes ->
     ! step_oce (the FESOM2 runloop order; update_atm_forcing replaced by apply_native_forcing).
+    call timer_init()
     do n = 1, nsteps
         call clock                                   ! M8a: advance the model clock (top of step)
         if (ftz_supported) call ieee_set_underflow_mode(gradual=.false.)   ! M8c: keep FTZ on each step (match FESOM2; survive library MXCSR resets)
+        call timer_start(TMR_OCEAN2ICE)
         call ocean2ice(ice, dyn, tracers, mesh, partit)
+        call timer_stop(TMR_OCEAN2ICE)
         ! native atmosphere (after ocean2ice -> srfoce live; before EVP -> ice%uice/vice are
         ! the previous step's, as FESOM2 update_atm_forcing uses for the wind-on-ice stress).
+        call timer_start(TMR_FORCING)
         call apply_native_forcing(n)
+        call timer_stop(TMR_FORCING)
         if (do_atm_chk) call atm_selfcheck(n)
+        call timer_start(TMR_ICE)
         call ice_timestep(ice, mesh, atm, partit)
+        call timer_stop(TMR_ICE)
+        call timer_start(TMR_FLUXES)
         call oce_fluxes_mom(ice, atm, stress_surf, mesh, partit)
         call oce_fluxes(ice, tracers, atm, mesh, partit)
         ! M5d: shortwave penetration after oce_fluxes (over owned+halo via partit) — fills
         ! dyn%work%sw_3d + adds the visible band back to atm%heat_flux. albw = ice%thermo%albw.
         if (use_sw_pene) call cal_shortwave_rad(.true., ice%thermo%albw, atm%shortwave, chl, &
                               ice%data(1)%values(1:nNodL), atm%heat_flux, dyn%work%sw_3d, mesh, partit)
+        call timer_stop(TMR_FLUXES)
         ! M5d: stress_node_surf=atm%stress_node_surf (oce_fluxes_mom) feeds KPP ustar (PP ignores it).
+        call timer_start(TMR_STEP_OCE)
         call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
                       atm%heat_flux, atm%water_flux, atm%virtual_salt, atm%relax_salt, &
                       atm%real_salt_flux, is_nonlinfs, stress_surf, partit, &   ! M6a-4: native rsf (zstar)
                       stress_node_surf=atm%stress_node_surf)
+        call timer_stop(TMR_STEP_OCE)
+        ! perf monitoring: periodic (cumulative) per-component timing report every mon_every steps.
+        ! Collective (all ranks call it — placed before the step_diag cycle); 0 => only the final report.
+        if (mon_every > 0 .and. mod(n, mon_every) == 0) &
+            call timer_report(partit%MPI_COMM_FESOM, partit%mype, partit%npes, n, 'monitor')
         ! M8c Step 3: GLOBAL per-step diagnostics. ALL ranks compute local extrema and reduce with ONE
         ! MPI_MAX; only rank 0 prints. Stability (max|eta|,max|uv|), cryosphere (max a_ice in [0,1], max
         ! m_ice), and warm/salty drift ceilings (global Tmax, Smax). Diagnostic-only: reads the prognostic
@@ -731,6 +751,8 @@ program fesom_lifecycle_native_mr
                 '  a_ice=', dstat(3), '  m_ice=', dstat(4), &
                 '  Tmax=', dstat(5), '  Smax=', dstat(6)
     end do
+    ! permanent end-of-run per-component diagnostics (mean/min/max ms/step + % of loop, ocean broken down)
+    call timer_report(partit%MPI_COMM_FESOM, partit%mype, partit%npes, nsteps, 'FINAL')
 
     call dump_finalize()
     if (partit%mype == 0) &
