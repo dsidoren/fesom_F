@@ -41,8 +41,15 @@ module mod_forcing_read
     use mod_mesh_rotate, only: vector_g2r
     use mod_mesh,   only: t_mesh
     use mod_partit, only: t_partit
+    use mod_timer,  only: timer_start, timer_stop, TMR_FRC_OPEN, TMR_FRC_READ, TMR_FRC_INTRP2
     implicit none
     private
+
+    ! PERF toggle (FESOM3_FORCING_PERSIST, default ON). ON  = FESOM2-style persistent handle +
+    ! double-buffer (read one new slice/crossing). OFF = legacy open + read both + close every
+    ! crossing (kept for A/B measurement and as a safety valve). Read once, lazily, in getcoeffld.
+    logical, save :: frc_use_cache = .true.
+    logical, save :: frc_cache_init = .false.
     public :: t_atm_forcing, forcing_alloc, forcing_read_grid, forcing_build_bilin, &
               forcing_getcoeffld, forcing_rotate_wind, forcing_timeinterp, &
               forcing_julday, forcing_binarysearch, forcing_sbc_do
@@ -60,6 +67,19 @@ module mod_forcing_read
         ! M8b: persisted time bracket from the previous forcing_getcoeffld (FESOM2 flfi_type
         ! t_indx/t_indx_p1). forcing_sbc_do's crossing test reads them; nc_Ntime == ntime.
         integer            :: t_indx = 1, t_indx_p1 = 1
+        ! PERF (2026-06-28): the JRA55-do files are netCDF-4/HDF5, DEFLATE-compressed, chunked one
+        ! (lat,lon) slice per chunk. So every per-crossing nc_open re-parses HDF5 metadata and every
+        ! slice read re-inflates ~800 KB on EVERY rank. FESOM3 used to nc_open + read BOTH brackets +
+        ! nc_close every crossing on every rank — measured ~172 ms/crossing (microbench). FESOM2's
+        ! getcoeffld instead keeps the file open and double-buffers (reads only the ONE genuinely-new
+        ! slice). We mirror that here:
+        !   ncid/ncid_year: persistent read handle, reopened only when the year (=> filename) changes.
+        !   sbc_a/sbc_b + ia_indx/ib_indx: two slice buffers tagged with the time index they hold; on a
+        !     crossing the buffer already holding t_indx is reused (slot1), only t_indx_p1 is read fresh
+        !     (slot2). Byte-exact: the reused bytes are exactly what a re-read would deserialize.
+        integer            :: ncid = -1, ncid_year = -1
+        real(real32), allocatable :: sbc_a(:,:), sbc_b(:,:)
+        integer            :: ia_indx = -1, ib_indx = -1
     end type t_ffile
 
     type :: t_atm_forcing
@@ -273,18 +293,35 @@ contains
         end do
     end subroutine forcing_build_bilin
 
-    ! ---- read 2 bracketing slices, spatial bilinear, build coef (FESOM2 getcoeffld) --
+    ! ---- read the bracketing slice(s), spatial bilinear, build coef (FESOM2 getcoeffld) --
+    ! PERF (2026-06-28): the JRA55-do files are DEFLATE-compressed netCDF-4/HDF5 chunked one (lat,lon)
+    ! slice/chunk, so an nc_open re-parses HDF5 metadata and a slice read re-inflates ~800 KB — on
+    ! EVERY rank. We mirror FESOM2: keep the file open (persistent handle, reopen only on year change)
+    ! and double-buffer, so only the genuinely-new slice (t_indx_p1) is read each crossing; whichever
+    ! buffer already holds t_indx is reused (FESOM2 getcoeffld:866-898; slot2 is always read fresh).
+    ! Byte-exact: the reused bytes are exactly what re-reading the same record would deserialize.
     subroutine forcing_getcoeffld(frc, fld, year, rdate, mesh, partit)
-        type(t_atm_forcing), intent(inout) :: frc
+        type(t_atm_forcing), intent(inout), target :: frc
         integer,  intent(in) :: fld, year
         real(WP), intent(in) :: rdate
         type(t_mesh),   intent(in), target :: mesh
         type(t_partit), intent(in), target :: partit
         character(len=512) :: fname
         character(len=4) :: cyear
-        integer :: ncid, nlon, nlat, ntime, t_indx, t_indx_p1, ii, i, j, ip1, jp1, extrp
+        character(len=8) :: env
+        integer :: ncid, nlon, nlat, ntime, t_indx, t_indx_p1, ii, i, j, ip1, jp1, extrp, ln, ios
         real(WP) :: delta_t, x, y, x1, x2, y1, y2, denom, data1, data2
-        real(real32), allocatable :: raw(:,:), sbc1(:,:), sbc2(:,:)
+        real(real32), allocatable :: raw(:,:)
+        real(real32), pointer     :: sbc1(:,:), sbc2(:,:)
+        logical :: cache1
+
+        ! one-time toggle read (FESOM3_FORCING_PERSIST: default ON = persistent handle + double-buffer;
+        ! '0' restores the legacy open + read-both + close every crossing, for A/B and as a safety valve)
+        if (.not. frc_cache_init) then
+            call get_environment_variable('FESOM3_FORCING_PERSIST', env, length=ln, status=ios)
+            if (ios == 0 .and. ln > 0) frc_use_cache = (trim(env) /= '0')
+            frc_cache_init = .true.
+        end if
 
         nlon = frc%f(fld)%nlon; nlat = frc%f(fld)%nlat; ntime = frc%f(fld)%ntime
         write(cyear, '(I4)') year
@@ -304,19 +341,59 @@ contains
         frc%f(fld)%t_indx    = t_indx
         frc%f(fld)%t_indx_p1 = t_indx_p1
 
-        ! read the two slices into the halo'd buffers (interior 2:nlon-1; halo mirror)
-        allocate(raw(nlon-2, nlat), sbc1(nlon, nlat), sbc2(nlon, nlat))
-        ncid = nc_open_read(fname)
-        call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx, raw)
-        sbc1(2:nlon-1, 1:nlat) = raw
-        sbc1(1,    1:nlat) = sbc1(nlon-1, 1:nlat)
-        sbc1(nlon, 1:nlat) = sbc1(2,      1:nlat)
+        ! ensure the persistent double buffers exist (nlon/nlat are year-invariant for the grids)
+        if (.not. allocated(frc%f(fld)%sbc_a)) then
+            allocate(frc%f(fld)%sbc_a(nlon, nlat), frc%f(fld)%sbc_b(nlon, nlat))
+            frc%f(fld)%ia_indx = -1; frc%f(fld)%ib_indx = -1
+        end if
+
+        ! double-buffer slot selection (FESOM2 getcoeffld:866-898): reuse whichever buffer already
+        ! holds t_indx as slot1; slot2 (t_indx_p1) is ALWAYS read fresh. Toggle off => always read both
+        ! (the `frc_use_cache .and.` guards force the else branch), recycling only the buffer storage.
+        cache1 = .false.
+        if (frc_use_cache .and. frc%f(fld)%ia_indx == t_indx) then
+            cache1 = .true.;  sbc1 => frc%f(fld)%sbc_a; sbc2 => frc%f(fld)%sbc_b
+            frc%f(fld)%ib_indx = t_indx_p1
+        else if (frc_use_cache .and. frc%f(fld)%ib_indx == t_indx) then
+            cache1 = .true.;  sbc1 => frc%f(fld)%sbc_b; sbc2 => frc%f(fld)%sbc_a
+            frc%f(fld)%ia_indx = t_indx_p1
+        else
+            cache1 = .false.; sbc1 => frc%f(fld)%sbc_a; sbc2 => frc%f(fld)%sbc_b
+            frc%f(fld)%ia_indx = t_indx;  frc%f(fld)%ib_indx = t_indx_p1
+        end if
+
+        ! open: persistent handle (reopen only on year/file change) or a fresh open per call (toggle off)
+        call timer_start(TMR_FRC_OPEN)
+        if (frc_use_cache) then
+            if (frc%f(fld)%ncid < 0 .or. frc%f(fld)%ncid_year /= year) then
+                if (frc%f(fld)%ncid >= 0) call nc_close(frc%f(fld)%ncid)
+                frc%f(fld)%ncid = nc_open_read(fname)
+                frc%f(fld)%ncid_year = year
+            end if
+            ncid = frc%f(fld)%ncid
+        else
+            ncid = nc_open_read(fname)
+        end if
+        call timer_stop(TMR_FRC_OPEN)
+
+        ! read the genuinely-new slice(s) into the halo'd buffers (interior 2:nlon-1; halo mirror)
+        call timer_start(TMR_FRC_READ)
+        allocate(raw(nlon-2, nlat))
+        if (.not. cache1) then
+            call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx, raw)
+            sbc1(2:nlon-1, 1:nlat) = raw
+            sbc1(1,    1:nlat) = sbc1(nlon-1, 1:nlat)
+            sbc1(nlon, 1:nlat) = sbc1(2,      1:nlat)
+        end if
         call nc_get_slice_r4(ncid, [frc%f(fld)%varname], t_indx_p1, raw)
         sbc2(2:nlon-1, 1:nlat) = raw
         sbc2(1,    1:nlat) = sbc2(nlon-1, 1:nlat)
         sbc2(nlon, 1:nlat) = sbc2(2,      1:nlat)
-        call nc_close(ncid)
+        deallocate(raw)
+        if (.not. frc_use_cache) call nc_close(ncid)
+        call timer_stop(TMR_FRC_READ)
 
+        call timer_start(TMR_FRC_INTRP2)
         do ii = 1, frc%nnod
             i = frc%idx_i(fld, ii); j = frc%idx_j(fld, ii)
             ip1 = i + 1; jp1 = j + 1
@@ -350,7 +427,8 @@ contains
             frc%coef_a(fld, ii) = (data2 - data1) / delta_t
             frc%coef_b(fld, ii) = data1 - frc%coef_a(fld, ii) * frc%f(fld)%nc_time(t_indx)
         end do
-        deallocate(raw, sbc1, sbc2)
+        call timer_stop(TMR_FRC_INTRP2)
+        sbc1 => null(); sbc2 => null()
     end subroutine forcing_getcoeffld
 
     ! ---- g2r rotation of the wind interpolation coefficients (FESOM2 703-707) -----
@@ -409,6 +487,9 @@ contains
         if (yearnew /= yearold) then
             do fld = 1, frc%nfld
                 call forcing_read_grid(frc, fld, yearnew)
+                ! invalidate the double-buffer (new year => read both brackets fresh; mirror FESOM2's
+                ! yearold==yearnew cache guard). getcoeffld reopens the persistent handle on ncid_year/=year.
+                frc%f(fld)%ia_indx = -1; frc%f(fld)%ib_indx = -1
             end do
             force_newcoeff = .true.
             if (partit%mype == 0) write(*,'(a,i0,a,i0)') &

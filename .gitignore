@@ -28,3 +28,6 @@ __pycache__/
 
 # M8a runtime clock-state files (written by the clock machinery / gates)
 *.clock
+
+# SLURM job stdout (perf/A-B runs land here in the repo root — always artifacts)
+slurm-*.out
