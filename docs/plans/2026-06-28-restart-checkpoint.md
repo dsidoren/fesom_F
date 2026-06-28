@@ -239,15 +239,39 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
       chunks + `.zarray`/`.zattrs`) — canonical write is partition-independent. ushow command printed by the runner
       (manual display; the xarray round-trip is the automated proxy)
 
-#### Task 3.3: Atomicity + `restart.latest` + keep-N prune (crash-injection gate)
+#### Task 3.3 ✅: Atomicity + `restart.latest` + keep-N prune (crash-injection gate)
 
 **Files:**
 - Modify: `src/io/mod_io_restart.F90`
+- Modify: `src/io/mod_io_posix.F90` (➕ `posix_listdir` — opendir/readdir/closedir `bind(C)`, the no-fork
+      directory enumeration the keep-N prune needs to find `fesom.*` checkpoint folders; same module as Task 3.1)
+- Create: `src/drivers/fesom_restartcrash.F90` (➕ the Task-3.3 GATE driver; mirrors `fesom_restartsmoke`)
+- Create: `tools/run_restartcrash.sh` (➕ the gate runner; `F3`/`BUILD`/`RUN` overridable for worktree runs)
 
-- [ ] sequence: all writers → `fesom.<tag>.tmp/` → `MPI_Barrier` → rank-0 `fsync`+`rename` to final → rank-0
+- [x] sequence: all writers → `fesom.<tag>.tmp/` → `MPI_Barrier` → rank-0 `fsync`+`rename` to final → rank-0
       atomic-update `restart.latest` (write `.tmp`+`rename`) → rank-0 keep-N prune (`restart_keep`; warn, never abort)
-- [ ] **GATE (crash-safety):** inject a stray `*.tmp/` and a finalized-but-not-pointed checkpoint → the reader still
+      — `restart_write` now: rank-0 `posix_rmtree` any stale same-tag `.tmp` + `zarr_mkdir(fesom.<tag>.tmp/)` →
+      barrier → every writer stages its stores into the tmp + rank-0 stages `checkpoint.json` → barrier → rank-0
+      `posix_fsync_dir(tmp)` + `posix_rename(tmp→fesom.<tag>/)` (ATOMIC publish) + `posix_fsync_dir(parent)` →
+      `update_restart_latest` (write `restart.latest.tmp` with the bare folder NAME + `posix_rename` onto
+      `restart.latest`) → `restart_prune`. Knob `restart_keep` (arg + `FESOM3_RESTART_KEEP`; `0`=keep all) added to
+      `restart_init`. Prune: `posix_listdir` → strict `is_checkpoint_name` filter (`fesom.`+4+`.`+3+`.`+5 digits, 20
+      chars — excludes `fesom.clock`/`*.zarr`/`restart.latest`/`*.tmp`) → lexical(==chrono) sort → `posix_rmtree` the
+      oldest beyond `restart_keep`, but the **current pointer target is always protected** (so a stray later-named
+      folder can never cause the just-committed checkpoint to be pruned); every prune failure WARNs, never aborts.
+      Resolver `restart_resolve_latest(restart_dir, folder_out, ok)` (public, for Task 4.1) reads `restart.latest`,
+      returns `<dir>/<name>`, `ok=.true.` iff the target carries a `checkpoint.json`; it **only follows the pointer**,
+      never scans, so stray `*.tmp/` + unpointed `fesom.*/` are ignored by construction.
+- [x] **GATE (crash-safety):** inject a stray `*.tmp/` and a finalized-but-not-pointed checkpoint → the reader still
       follows the previous valid `restart.latest`; assert the pointer flips atomically (never a partial `restart.latest`)
+      — **PASS np=1 AND np=2** (Intel dp, worktree `build_intel_dp`): `fesom_restartcrash` writes C1
+      (`fesom.2000.001.03600`) atomically → `restart.latest`=="fesom.2000.001.03600" + resolve==C1; injects a stray
+      `fesom.2000.001.05000.tmp/` + an unpointed LATER `fesom.2000.001.09000/` → resolve STILL returns C1 (follows the
+      pointer, ignores both); writes C2 (`fesom.2000.001.07200`, `restart_keep=1`) → `restart.latest`=="…07200" +
+      resolve==C2, keep-N=1 pruned C1 (its `checkpoint.json` gone), C2 remains (protect-target despite 09000>07200),
+      the later folder survives, the stray `.tmp` is left untouched. All 9 assertions PASS at np 1 AND 2, exit 0; dir
+      listing after = `{05000.tmp, 07200, 09000, restart.latest}` (C1 gone). Runner: `tools/run_restartcrash.sh`.
+      No-regression: `run_restartsmoke.sh` still GREEN (same final folder, max|Δ|=0); `ctest -R io_` 7/7 PASS.
 
 #### Task 3.4: Register the full field set (oce + ice incl. sigma)
 

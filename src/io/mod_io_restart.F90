@@ -29,9 +29,16 @@ module mod_io_restart
     !   restart_write(R, dir, year, day, time_sec, globalstep)      writes the folder + per-field stores
     !   restart_finalize(R)                                         end-of-run barrier
     !
-    ! SCOPE (Task 3.2): the general per-field writer + the folder + checkpoint.json. Atomic tmp/rename
-    ! + restart.latest + keep-N prune is Task 3.3; registering the full oce+ice field set is Task 3.4;
-    ! the READ path is Stage 4. This file deliberately implements only the WRITE mechanism + one field.
+    ! ATOMICITY (Task 3.3): restart_write stages a whole checkpoint into fesom.<tag>.tmp/ and only then
+    ! atomically renames it into place and flips a one-line restart.latest pointer (write .tmp + rename),
+    ! so a crash leaves either the OLD valid checkpoint or the NEW one — never a half-written folder and
+    ! never a partial pointer. A reader (restart_resolve_latest) ALWAYS follows restart.latest and never
+    ! scans the directory, so a stray crashed-write *.tmp/ or an unpointed finalized fesom.*/ is ignored.
+    ! A keep-N prune (restart_keep) trims the oldest immutable checkpoints after each finalize.
+    !
+    ! SCOPE: Task 3.2 = the per-field writer + folder + checkpoint.json; Task 3.3 (this file now) =
+    ! atomic finalize + restart.latest + keep-N prune + restart_resolve_latest. Registering the full
+    ! oce+ice field set is Task 3.4; the READ path (which calls restart_resolve_latest) is Stage 4.
     use mpi
     use, intrinsic :: iso_fortran_env, only: real64
     use mod_precision,   only: WP
@@ -41,6 +48,7 @@ module mod_io_restart
     use mod_io_zarr
     use mod_io_decomp
     use mod_io_coords    ! shared lon/lat + _ARRAY_DIMENSIONS + UGRID-attr embedding (Task 2.1)
+    use mod_io_posix     ! POSIX fs shims: rename/fsync/rmtree/listdir for atomic finalize + prune (Task 3.1)
     implicit none
     private
 
@@ -48,6 +56,7 @@ module mod_io_restart
     public :: DECOMP_NODE, DECOMP_ELEM
     public :: t_restart, t_restart_field, RESTART_MAXF
     public :: restart_init, restart_register_field, restart_write_field, restart_write, restart_finalize
+    public :: restart_resolve_latest
 
     integer, parameter :: RESTART_MAXF = 64
     integer, parameter :: RESTART_FORMAT_VERSION = 1
@@ -81,6 +90,7 @@ module mod_io_restart
         ! global writer knobs (mirror mod_io_means)
         integer               :: chunk_vert = 0        ! vertical chunk (0 => full depth single chunk)
         character(len=16)     :: compressor = 'none'   ! data-array codec: 'none' | 'lz4'
+        integer               :: restart_keep = 0      ! keep-N prune: keep newest N checkpoints (0 = keep all)
         ! cached owned coords for the embed (node + element-centroid), like means_init
         real(WP), allocatable :: lon_n(:), lat_n(:), rlon_n(:), rlat_n(:)
         integer,  allocatable :: nlev_n(:)
@@ -93,12 +103,13 @@ contains
 
     ! ----------------------------------------------------------------- setup / registration
 
-    subroutine restart_init(R, mesh, partit, chunk_horiz, n_writers, chunk_vert, compressor)
+    subroutine restart_init(R, mesh, partit, chunk_horiz, n_writers, chunk_vert, compressor, restart_keep)
         type(t_restart),  intent(out)          :: R
         type(t_mesh),     intent(in)           :: mesh
         type(t_partit),   intent(in), optional :: partit
         integer,          intent(in), optional :: chunk_horiz, n_writers, chunk_vert
         character(len=*), intent(in), optional :: compressor
+        integer,          intent(in), optional :: restart_keep
         integer :: C, nw, i, nNodL, nEdgeO, nEdgeL, nElemL, nElemF
         character(len=16) :: cbuf
         R%nf = 0
@@ -112,9 +123,11 @@ contains
         nw = 0;      if (present(n_writers))   nw = n_writers
         R%chunk_vert = 0; if (present(chunk_vert)) R%chunk_vert = chunk_vert
         R%compressor = 'none'; if (present(compressor)) R%compressor = compressor
+        R%restart_keep = 0; if (present(restart_keep)) R%restart_keep = restart_keep
         call read_env_int('FESOM3_CHUNK_HORIZ', C)
         call read_env_int('FESOM3_N_WRITERS',  nw)
         call read_env_int('FESOM3_CHUNK_VERT', R%chunk_vert)
+        call read_env_int('FESOM3_RESTART_KEEP', R%restart_keep)
         cbuf = ''; call get_environment_variable('FESOM3_COMPRESSOR', cbuf)
         if (len_trim(cbuf) > 0) R%compressor = cbuf
         call local_dims(mesh, partit, R%nNodO, nNodL, nEdgeO, nEdgeL, R%nElemO, nElemL, nElemF)
@@ -173,35 +186,189 @@ contains
 
     ! ----------------------------------------------------------------- checkpoint write
 
-    ! Write one full checkpoint: create the folder fesom.<YYYY>.<DDD>.<SSSSS>/ (zero-padded; SSSSS =
-    ! int(time_sec) = sec-of-day / timenew), write each registered field's snapshot store into it, and
-    ! write checkpoint.json (rank 0). time_sec is the new-clock sec-of-day; Stage 5 passes timenew.
-    ! (Atomic tmp/rename + restart.latest is Task 3.3 — a plain mkdir + direct write is used here.)
+    ! Write one full checkpoint ATOMICALLY (Task 3.3). The on-disk publish sequence guarantees that a
+    ! crash at any point leaves either the previous valid checkpoint or this one — never a torn folder
+    ! and never a partial restart.latest:
+    !
+    !   1. rank 0 clears any stale fesom.<tag>.tmp/ (from a crashed earlier write at THIS tag) and
+    !      mkdir's a clean staging dir.                                   <- barrier ->
+    !   2. EVERY writer writes its field stores into fesom.<tag>.tmp/, then rank 0 writes
+    !      checkpoint.json there.                                         <- barrier ->
+    !   3. rank 0 fsyncs the staging dir, then rename(2)s fesom.<tag>.tmp/ -> fesom.<tag>/ (atomic
+    !      within one filesystem: the immutable checkpoint appears all-at-once), then fsyncs the parent.
+    !   4. rank 0 atomically flips restart.latest to the new folder NAME (write restart.latest.tmp +
+    !      rename), then runs the keep-N prune (best-effort; warns, never aborts).
+    !
+    ! folder/tag = fesom.<YYYY>.<DDD>.<SSSSS> (zero-padded; SSSSS = int(time_sec) = sec-of-day / timenew;
+    ! lexical order == chronological). time_sec is the new-clock sec-of-day; Stage 5 passes timenew.
     subroutine restart_write(R, checkpoint_dir, year, day, time_sec, globalstep)
         type(t_restart),  intent(in), target :: R
         character(len=*), intent(in)         :: checkpoint_dir
         integer,          intent(in)         :: year, day
         real(real64),     intent(in)         :: time_sec
         integer,          intent(in), optional :: globalstep
-        integer :: k, ierr, gstep
+        integer :: k, ierr, gstep, irc
         character(len=4) :: cy
         character(len=3) :: cd
         character(len=5) :: cs
-        character(len=:), allocatable :: folder
+        character(len=:), allocatable :: tag, fname, final_folder, tmp_folder
         gstep = 0; if (present(globalstep)) gstep = globalstep
         write(cy, '(i4.4)') year
         write(cd, '(i3.3)') day
         write(cs, '(i5.5)') int(time_sec)
-        folder = trim(checkpoint_dir)//'/fesom.'//cy//'.'//cd//'.'//cs
-        if (R%mype == 0) call zarr_mkdir(folder)          ! recursive mkdir -p (also creates the parent)
-        if (R%mr) call MPI_Barrier(R%comm, ierr)          ! folder must exist before any store write
+        tag          = cy//'.'//cd//'.'//cs                ! YYYY.DDD.SSSSS (lexical == chronological)
+        fname        = 'fesom.'//tag                       ! the FINAL folder NAME (what restart.latest holds)
+        final_folder = trim(checkpoint_dir)//'/'//fname
+        tmp_folder   = trim(checkpoint_dir)//'/'//fname//'.tmp'
+        ! 1) rank 0: clear any stale tmp from a crashed write at this tag, then (re)create clean tmp.
+        if (R%mype == 0) then
+            irc = posix_rmtree(tmp_folder)                 ! best-effort (ENOENT if none) -> ignore status
+            call zarr_mkdir(tmp_folder)                    ! recursive mkdir -p (also creates the parent)
+        end if
+        if (R%mr) call MPI_Barrier(R%comm, ierr)           ! tmp folder must exist before any store write
+        ! 2) every writer stages its field stores INTO the tmp folder; rank 0 stages checkpoint.json.
         do k = 1, R%nf
-            call restart_write_field(R, R%f(k), trim(folder)//'/'//trim(R%f(k)%name)//'.zarr')
+            call restart_write_field(R, R%f(k), trim(tmp_folder)//'/'//trim(R%f(k)%name)//'.zarr')
         end do
-        if (R%mype == 0) call write_checkpoint_json(R, trim(folder)//'/checkpoint.json', year, day, &
+        if (R%mype == 0) call write_checkpoint_json(R, trim(tmp_folder)//'/checkpoint.json', year, day, &
                                                     time_sec, gstep)
+        if (R%mr) call MPI_Barrier(R%comm, ierr)           ! all stores + json fully staged before publish
+        ! 3) + 4) rank 0: durably publish (fsync+rename), flip restart.latest atomically, then prune.
+        if (R%mype == 0) then
+            irc = posix_fsync_dir(tmp_folder)              ! durability of the staged dir before rename
+            irc = posix_rename(tmp_folder, final_folder)   ! ATOMIC publish: fesom.<tag>.tmp -> fesom.<tag>
+            call zarr_check(irc == 0, 'restart: rename tmp->final failed: '//trim(final_folder))
+            irc = posix_fsync_dir(checkpoint_dir)          ! durably record the new dir entry
+            call update_restart_latest(checkpoint_dir, fname)
+            call restart_prune(R, checkpoint_dir, fname)
+        end if
         if (R%mr) call MPI_Barrier(R%comm, ierr)
     end subroutine restart_write
+
+    ! Atomically point restart.latest at <folder_name> (the bare folder NAME, e.g. fesom.2000.001.03600).
+    ! Write restart.latest.tmp then rename(2) it onto restart.latest: rename is atomic within one
+    ! filesystem, so a concurrent or crashing reader sees the OLD or NEW pointer — never a partial line.
+    ! rank-0 only.
+    subroutine update_restart_latest(restart_dir, folder_name)
+        character(len=*), intent(in) :: restart_dir, folder_name
+        character(len=:), allocatable :: latest, latest_tmp
+        integer :: irc
+        latest     = trim(restart_dir)//'/restart.latest'
+        latest_tmp = trim(restart_dir)//'/restart.latest.tmp'
+        call write_text_file(latest_tmp, trim(folder_name))
+        irc = posix_rename(latest_tmp, latest)
+        call zarr_check(irc == 0, 'restart: rename restart.latest.tmp -> restart.latest failed')
+    end subroutine update_restart_latest
+
+    ! keep-N prune (rank-0, best-effort). After a checkpoint is finalized, enumerate the immutable
+    ! checkpoint folders under restart_dir, sort lexically (== chronologically — the tag is fixed-width
+    ! zero-padded), and posix_rmtree the oldest beyond restart_keep. restart_keep<=0 keeps all. The
+    ! CURRENT pointer target (keep_name) is ALWAYS protected, even if a stray later-named folder would
+    ! rank ahead of it, so the prune can never delete the checkpoint restart.latest just committed.
+    ! Stray *.tmp/ dirs do NOT match the strict checkpoint pattern (is_checkpoint_name), so they are
+    ! never pruned and never resolved — they are left as-is (documented: the reader only trusts the
+    ! pointer). ANY failure warns and continues — a prune problem must never abort a good checkpoint.
+    subroutine restart_prune(R, restart_dir, keep_name)
+        type(t_restart),  intent(in) :: R
+        character(len=*), intent(in) :: restart_dir, keep_name
+        integer, parameter :: MAXLIST = 4096
+        character(len=64), allocatable :: names(:)
+        character(len=64) :: swap
+        integer :: n, i, j, irc
+        logical :: ok
+        character(len=:), allocatable :: folder
+        if (R%restart_keep <= 0) return                    ! 0 => keep all
+        allocate(names(MAXLIST))
+        call posix_listdir(restart_dir, names, n, ok)
+        if (.not. ok) then
+            write(*,'(a)') '[restart] WARN: cannot list '//trim(restart_dir)//' for keep-N prune (skipped)'
+            return
+        end if
+        ! keep only strict checkpoint folder names (excludes fesom.clock, *.zarr, restart.latest, *.tmp)
+        j = 0
+        do i = 1, n
+            if (is_checkpoint_name(names(i))) then
+                j = j + 1; names(j) = names(i)
+            end if
+        end do
+        n = j
+        if (n <= R%restart_keep) return                    ! nothing to prune
+        ! selection sort ascending (lexical == chronological); n is tiny, clarity over speed.
+        do i = 1, n - 1
+            do j = i + 1, n
+                if (names(j) < names(i)) then
+                    swap = names(i); names(i) = names(j); names(j) = swap
+                end if
+            end do
+        end do
+        ! rmtree the oldest (n - restart_keep), but NEVER the active pointer target (keep_name).
+        do i = 1, n - R%restart_keep
+            if (trim(names(i)) == trim(keep_name)) cycle   ! protect the just-committed checkpoint
+            folder = trim(restart_dir)//'/'//trim(names(i))
+            irc = posix_rmtree(folder)
+            if (irc /= 0) then
+                write(*,'(a)') '[restart] WARN: keep-N prune could not fully remove '//trim(folder)
+            else
+                write(*,'(a)') '[restart] keep-N prune removed old checkpoint '//trim(names(i))
+            end if
+        end do
+    end subroutine restart_prune
+
+    ! True iff `name` is EXACTLY a checkpoint folder name: 'fesom.' + 4 digits + '.' + 3 digits + '.' +
+    ! 5 digits (20 chars). This strict shape excludes fesom.clock, fesom.mesh.diag.zarr, restart.latest,
+    ! and any fesom.<tag>.tmp staging dir — so the prune only ever touches real finalized checkpoints.
+    logical function is_checkpoint_name(name)
+        character(len=*), intent(in) :: name
+        character(len=20) :: s
+        integer :: i
+        is_checkpoint_name = .false.
+        if (len_trim(name) /= 20) return
+        s = name(1:20)
+        if (s(1:6) /= 'fesom.')               return
+        if (s(11:11) /= '.' .or. s(15:15) /= '.') return
+        do i = 7, 10
+            if (s(i:i) < '0' .or. s(i:i) > '9') return
+        end do
+        do i = 12, 14
+            if (s(i:i) < '0' .or. s(i:i) > '9') return
+        end do
+        do i = 16, 20
+            if (s(i:i) < '0' .or. s(i:i) > '9') return
+        end do
+        is_checkpoint_name = .true.
+    end function is_checkpoint_name
+
+    ! Resolve the newest finalized checkpoint by FOLLOWING restart.latest — never by scanning the dir —
+    ! so a stray crashed-write fesom.<tag>.tmp/ or an unpointed finalized fesom.<tag>/ is ignored by
+    ! construction. Returns folder_out = <restart_dir>/<name-in-restart.latest> and ok=.true. iff
+    ! restart.latest exists, is readable, names a non-empty folder, and that folder carries a
+    ! checkpoint.json (the manifest that confirms a complete checkpoint). This is the entry point the
+    ! Task 4.1 read path calls; any rank may call it (a pure file read).
+    subroutine restart_resolve_latest(restart_dir, folder_out, ok)
+        character(len=*),              intent(in)  :: restart_dir
+        character(len=:), allocatable, intent(out) :: folder_out
+        logical,                       intent(out) :: ok
+        character(len=512) :: name
+        character(len=:), allocatable :: latest
+        integer :: u, ios
+        logical :: ex
+        ok = .false.
+        folder_out = ''
+        latest = trim(restart_dir)//'/restart.latest'
+        inquire(file=latest, exist=ex)
+        if (.not. ex) return
+        open(newunit=u, file=latest, status='old', action='read', form='formatted', iostat=ios)
+        if (ios /= 0) return
+        read(u, '(a)', iostat=ios) name
+        close(u)
+        if (ios /= 0) return
+        name = adjustl(name)
+        if (len_trim(name) == 0) return
+        folder_out = trim(restart_dir)//'/'//trim(name)
+        ! trust the pointer, but confirm the target is a complete checkpoint (has its manifest).
+        inquire(file=folder_out//'/checkpoint.json', exist=ex)
+        ok = ex
+    end subroutine restart_resolve_latest
 
     ! Write ONE field's snapshot store (general: node OR element, 2-D OR 3-D). Resolves the field's
     ! entity decomp + cached coords from R, creates a single-variable single-entity store (data var

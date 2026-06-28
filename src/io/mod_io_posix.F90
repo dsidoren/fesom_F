@@ -18,16 +18,22 @@ module mod_io_posix
     ! returns the C int status (0 = success, -1 = error with errno set). x86-64 Linux,
     ! little-endian LP64 — matches the rest of the build.
     use, intrinsic :: iso_c_binding, only: c_char, c_int, c_ptr, c_funptr, c_funloc, &
-                                           c_null_char
+                                           c_null_char, c_associated, c_f_pointer
     implicit none
     private
 
     public :: posix_rename, posix_unlink, posix_rmdir, posix_fsync_dir, posix_rmtree
+    public :: posix_listdir
 
     ! POSIX open(2) flag and nftw(3) flags we use (Linux x86-64 glibc values).
     integer(c_int), parameter :: O_RDONLY  = 0_c_int
     integer(c_int), parameter :: FTW_PHYS  = 1_c_int   ! physical walk; do not follow symlinks
     integer(c_int), parameter :: FTW_DEPTH = 8_c_int   ! post-order: a dir's contents before the dir
+
+    ! Byte offset of d_name within glibc's x86-64 struct dirent (LP64): d_ino(8) + d_off(8) +
+    ! d_reclen(2) + d_type(1) = 19. readdir() returns a pointer to such a record; posix_listdir maps
+    ! it as a c_char array and copies d_name (a NUL-terminated string) starting one byte past this.
+    integer, parameter :: DIRENT_NAME_OFF = 19
 
     interface
         ! int rename(const char *oldpath, const char *newpath);  — atomic within one filesystem.
@@ -97,6 +103,29 @@ module mod_io_posix
             integer(c_int), value :: nopenfd, flags
             integer(c_int)        :: r
         end function c_nftw
+
+        ! DIR *opendir(const char *name);  — open a directory stream for enumeration.
+        function c_opendir(path) bind(C, name="opendir") result(dirp)
+            import :: c_char, c_ptr
+            character(kind=c_char), dimension(*), intent(in) :: path
+            type(c_ptr) :: dirp
+        end function c_opendir
+
+        ! struct dirent *readdir(DIR *dirp);  — next entry, or NULL at end. The returned record's
+        ! d_name field (offset DIRENT_NAME_OFF) is the NUL-terminated entry name. On LP64 x86-64 the
+        ! plain "readdir" symbol is the 64-bit-ino variant; the d_name offset is identical either way.
+        function c_readdir(dirp) bind(C, name="readdir") result(ent)
+            import :: c_ptr
+            type(c_ptr), value :: dirp
+            type(c_ptr)        :: ent
+        end function c_readdir
+
+        ! int closedir(DIR *dirp);
+        function c_closedir(dirp) bind(C, name="closedir") result(r)
+            import :: c_ptr, c_int
+            type(c_ptr), value :: dirp
+            integer(c_int)     :: r
+        end function c_closedir
     end interface
 
     ! Failure accumulator for the nftw callback. The C-driven callback can only see module
@@ -161,6 +190,47 @@ contains
             r = 0
         end if
     end function posix_rmtree
+
+    ! --- enumerate a directory's entries (names only) ----------------------------------
+    ! Fill names(1:n) with the entries of `path` (excluding "." and ".."), and return ok=.true.
+    ! iff opendir() succeeded. Used by the restart keep-N prune to find fesom.<tag>/ checkpoint
+    ! folders WITHOUT forking an `ls` (the execute_command_line-after-MPI_Init segfault gotcha).
+    ! Entries past size(names) are dropped and names longer than len(names) are truncated, so the
+    ! caller sizes both generously (checkpoint names are 20 chars). readdir() hands back a struct
+    ! dirent*; we map it as a c_char array and copy d_name (offset DIRENT_NAME_OFF) up to its NUL —
+    ! the NUL always lies within the record, so the fixed 256-byte d_name window is never overread.
+    subroutine posix_listdir(path, names, n, ok)
+        character(len=*), intent(in)    :: path
+        character(len=*), intent(inout) :: names(:)
+        integer,          intent(out)   :: n
+        logical,          intent(out)   :: ok
+        type(c_ptr) :: dirp, ent
+        character(kind=c_char), pointer :: rec(:)
+        character(len=len(names)) :: nm
+        integer :: j, rc
+        n = 0; ok = .false.
+        dirp = c_opendir(trim(path)//c_null_char)
+        if (.not. c_associated(dirp)) return
+        ok = .true.
+        do
+            ent = c_readdir(dirp)
+            if (.not. c_associated(ent)) exit
+            call c_f_pointer(ent, rec, [DIRENT_NAME_OFF + 256])
+            nm = ''
+            do j = 1, len(nm)
+                if (DIRENT_NAME_OFF + j > size(rec)) exit
+                if (rec(DIRENT_NAME_OFF + j) == c_null_char) exit
+                nm(j:j) = rec(DIRENT_NAME_OFF + j)
+            end do
+            if (len_trim(nm) == 0)          cycle
+            if (nm == '.' .or. nm == '..')  cycle
+            if (n < size(names)) then
+                n = n + 1
+                names(n) = nm
+            end if
+        end do
+        rc = c_closedir(dirp)
+    end subroutine posix_listdir
 
     ! nftw callback. Signature MUST match the C type
     !   int (*)(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
