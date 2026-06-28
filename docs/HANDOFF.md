@@ -320,9 +320,9 @@ The live "Oracle" section above + the "M2.12 entry notes" below cover what the c
 
 ## Next task
 
-### ⏭️ M9 (Zarr OUTPUT) — **Stage 0 + 1 + Stage 2 + F1 COMPLETE (scalars + 3-D + NODE + ELEMENT vectors/scalars + Task 2.6 namelist/knobs + full no-regression sweep) DONE & byte-gated (2026-06-28). RESUME at F2 (commit + tag `m9` + move plan to completed/).**
+### ✅ M9 (Zarr OUTPUT) — **COMPLETE & tagged `m9` (commit `b631399`, 2026-06-28).** All stages (scalars + 3-D + NODE + ELEMENT vectors/scalars) + Task 2.6 namelist/knobs + F1 full no-regression sweep, all byte-gated. The lone open plan box = the MANUAL `ushow` display smoke. **NEXT MILESTONE = restart/checkpoint** (the M9 brainstorm split restart OUT, output-first).
 
-**Plan:** `docs/plans/2026-06-28-m9-zarr-output.md` (checkboxes ticked through F1). Design SETTLED.
+**Plan:** `docs/plans/completed/2026-06-28-m9-zarr-output.md` (checkboxes ticked through F1; moved to completed/). Design SETTLED.
 
 **DONE (F1 done, all byte-gated, ctest 18/18 Intel+GNU, no regression):**
 - **Stage 0 — `mod_io_zarr`** (Zarr v2): JSON + C-order transpose + partial-chunk fill-pad + codecs `none`/**lz4** +
@@ -420,12 +420,16 @@ run with `FESOM3_OUTPUT`+`FESOM3_OUTPUT_EVERY=1` wrote all 14 default-set stores
 ssh/sst/sss/a_ice/m_ice/m_snow/temp/salt/w/unod/vnod **+ element u/v/Av**), xarray opens each (dims, CF time, finite
 node+elem-centroid coords, 2 records, 244659 elem ≈ 2× node), bolus correctly absent (Fer_GM off).
 
-**NEXT = F2 (FINALIZE — needs the user's go-ahead to commit/tag).** The technical work + docs + memory are DONE; what
-remains is the git ritual: (1) `git add` the M9 Task 2.6+2.7 working tree (mod_io_zarr/mod_io_means/two drivers/
-config/namelist.io/tools{zarr_diff.py,run_output_gate.sh}/test{test_io_means.F90,CMakeLists.txt} + the docs) and commit
-(`feat(m9): Zarr output — Task 2.6 namelist/knobs + Task 2.7 ELEMENT output + F1 sweep`); (2) `git mv` this plan to
-`docs/plans/completed/`; (3) `git tag m9`. Then M9 = DONE; the remaining 1/14 plan box is the MANUAL `ushow` display
-smoke. After m9: **restart/checkpoint** (deferred from M9 brainstorm) or **M3+ physics** per the roadmap below.
+**M9 DONE & tagged `m9`** (commit `b631399`, 2026-06-28): Task 2.6 + 2.7 + F1 all byte-gated; the working tree
+(`mod_io_zarr`/`mod_io_means`/both drivers/`config/namelist.io`/`tools{zarr_diff.py,run_output_gate.sh}`/
+`test{test_io_means.F90,CMakeLists.txt}` + docs) committed, plan moved to `docs/plans/completed/`, tag created. The
+only open M9 item is the MANUAL `ushow` display smoke (the xarray/zarr round-trip is the automated proxy).
+
+**NEXT MILESTONE = restart/checkpoint.** The M9 brainstorm deliberately split restart OUT (output-first); it is now the
+next piece. Port `io_restart.F90` write/read (state serialization — the M8 `tke` restart precedent + the `r_restart`/
+`clock_finish`/`clock_newyear`/`use_transit` items rehomed to `mod_clock` and deferred here); gate =
+restart-reproducibility `max|Δ|=0` straight-through vs split-restart (see the M8/M9 roadmap §below, lines ~741-750).
+Alternative if restart waits: **M3+ physics** per the roadmap. Either way M0–M9 are byte-exact & tagged (`m0…m9`).
 
 M0–M8 COMPLETE & tagged (m0…m8); forcing-perf ✅ RESOLVED (`708fdf4`/`ce2288a`/`1ef9516`; L133).
 
