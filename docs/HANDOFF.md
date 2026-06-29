@@ -325,7 +325,7 @@ The live "Oracle" section above + the "M2.12 entry notes" below cover what the c
 - **Gate (6.2) cross-partition storage+restore:** `C2(np2) ≡ C8(np8)` **strict `max|Δ|=0`** all 27 stores (`tools/run_restart_gate_multirank.sh`, np8 reads C2, zero steps, re-writes C8).
 - **No-regression (6.3):** ctest **Intel 21/21 + GNU 21/21** (sweep caught & fixed a GNU-only cpp `/*`-in-comment build break); M9 zarrsmoke/meshdiag/output gates GREEN; production MR lifecycle byte-gate np2 **195 records `max|Δ|=0`**.
 - **Plan:** `docs/plans/completed/2026-06-28-restart-checkpoint.md` (all boxes ticked; Claim-scope refinement documents the np>1 ULP). Memory: `restart-tskin-carried-ice-state`, `restart-np-element-1ulp-inherent`.
-- **NEXT MILESTONE:** open — resume **M3+ physics / production** per the roadmap (M0–M10 all byte-exact & tagged `m0…m10`). Decide with the user.
+- **NEXT MILESTONE: OPEN — FESOM3 v1 is feature-complete & byte-exact vs FESOM2 (`m0…m10`: dyn core, sea ice EVP/mEVP, GM/Redi, KPP, zstar, TKE, long runs, output, restart).** No more core physics to byte-port. The genuine remaining directions (each a phase, user picks): **(a) scientific/production validation** — multi-decade real runs (JRA55-do from 1958), SST/SSS RMS + deep-drift + ice area/volume vs obs & FESOM2 (the "is it a good climate run" check the byte-gates do NOT cover; Post-Completion manual HPC); **(b) mixed precision** — flip WP→real32, protect cancellation islands (foundation laid); **(c) performance/SYPD profiling + optimization** (forcing-perf was a first taste); **(d) beyond-v1 physics** — IDEMIX, backscatter (uke/iwe), BGC/REcoM, ice-shelf cavities, icebergs, coupling (OIFS/OASIS/icepack) — fresh ports, not byte-ports. Decide with the user.
 
 ### ✅ M9 (Zarr OUTPUT) — **COMPLETE & tagged `m9` (commit `b631399`, 2026-06-28).** All stages (scalars + 3-D + NODE + ELEMENT vectors/scalars) + Task 2.6 namelist/knobs + F1 full no-regression sweep, all byte-gated. The lone open plan box = the MANUAL `ushow` display smoke. (Restart was the milestone that followed — now DONE, see above.)
 
@@ -438,8 +438,10 @@ only open M9 item is the MANUAL `ushow` display smoke (the xarray/zarr round-tri
 reusing the M9 stack; F-C = serialize EVP `sigma` for true `max|Δ|=0` on ice; cadence periodic+end; clock_finish
 ported; field set = the FESOM2 superset + the gate-found carried `t_skin`/`d_eta`). Gates GREEN (6.1 split-vs-straight
 np=1 exact / np>1 ≤1-ULP FESOM2-inherent; 6.2 cross-np restore `C2≡C8`; 6.3 no-regression Intel+GNU ctest 21/21 +
-M9 gates + production lifecycle). **NEXT MILESTONE: open** — resume **M3+ physics / production** per the roadmap;
-decide with the user.
+M9 gates + production lifecycle). **NEXT MILESTONE: OPEN — v1 is feature-complete & byte-exact (`m0…m10`); no core
+physics left to port.** Remaining directions (each a phase; see the top of "Next task" for the full list): scientific
+multi-decade validation, mixed-precision (WP→real32), performance/SYPD, or beyond-v1 physics (IDEMIX/backscatter/BGC/
+cavities/coupling). Decide with the user.
 
 M0–M10 COMPLETE & tagged (m0…m10); forcing-perf ✅ RESOLVED (`708fdf4`/`ce2288a`/`1ef9516`; L133).
 
