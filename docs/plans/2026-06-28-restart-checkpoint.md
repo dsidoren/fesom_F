@@ -499,19 +499,30 @@ found by plan-review, verified against source).*
 - [x] **GATE:** `run_restart_gate_multirank.sh` GREEN — np=8 resumed (`r_restart`), `C2(np2) ≡ C8(np8)` `max|Δ|=0`
       across ALL 27 stores incl. element u/v/urhs_AB/sigma + MP hbar/hnode (Intel dp, worktree build, 256-core node).
 
-#### Task 6.3: No-regression sweep + ctest
+#### Task 6.3 ✅: No-regression sweep + ctest
 
-- [ ] `ctest` GREEN both compilers (new `test_io_decomp_gather` included)
-- [ ] `run_output_gate.sh` + `run_meshdiag_gate.sh` + `run_zarrsmoke.sh` GREEN (shared coord helper didn't regress M9)
-- [ ] production MR lifecycle byte-gate (`run_lifecycle_fullynative_gate_multirank.sh`, forced np=2) stays `max|Δ|=0`
-- [ ] **GATE:** full sweep GREEN
+- [x] `ctest` GREEN both compilers — **Intel 21/21** AND **GNU 21/21** (incl. `test_io_decomp_gather` np1/np2 +
+      `dump_diff_selftest`). **Caught a real GNU-only build break:** gfortran cpp-preprocesses `.F90`, and the comments
+      `src/io/*.F90` (`/*`) + `fesom.*/` (`*/`) opened/closed a phantom C block-comment → "unterminated comment"
+      (Intel's fpp tolerated it). Fixed (commit `d8c8f76`) by rewording both — the sweep earned its keep.
+- [x] `run_zarrsmoke.sh` + `run_meshdiag_gate.sh` + `run_output_gate.sh` GREEN (Task 2.1 shared coord/attr helper
+      did NOT regress M9 output — `max|Δ|=0` incl. the chunk-time / chunk-vert / lz4 output variants)
+- [x] production MR lifecycle byte-gate (`run_lifecycle_fullynative_gate_multirank.sh`, forced np=2, whichEVP=0 — the
+      EVP-sigma-carrying case) stays `max|Δ|=0`: **195 records (13 NODE substeps × 5 probes × 3 steps), worst |Δ|=0,
+      MATCH**. (restart code is `do_restart`-gated off here; the AB guard reduces to `(n==1)` when `r_restart=.false.`)
+- [x] **GATE:** full sweep GREEN (Intel+GNU ctest 21/21, M9 gates, production lifecycle all `max|Δ|=0`)
 
 ### Final
 
-#### Task F1: Verify acceptance criteria
-- [ ] every Overview requirement met (write periodic+end, read on `r_restart`, byte-exact resume incl. ice,
-      partition-independent, ushow-viewable)
-- [ ] both gates `max|Δ|=0`; smoke stores open in xarray/ushow
+#### Task F1 ✅: Verify acceptance criteria
+- [x] every Overview requirement met: **write periodic+end** (Task 5.3 gate: mid-run checkpoint @step2 + end-of-run
+      @step3, chained `.clock`/`restart.latest`); **read on `r_restart`** (Task 5.1/6.1: seg-2 fresh process resumes,
+      `r_restart=.true.`); **byte-exact resume incl. ice** (Task 6.1: np=1 `max|Δ|=0` over the WHOLE state incl.
+      ice+sigma; np>1 ≤1 ULP, FESOM2-inherent, documented); **partition-independent** (Task 6.2: `C2(np2)≡C8(np8)`
+      `max|Δ|=0`); **ushow-viewable** (F1 smoke: every store opens in xarray — node `nz1/nod2`, element `nz1/elem`,
+      finite values + finite global node/elem-centroid coords; M9-shape ⇒ ushow-renderable).
+- [x] both gates `max|Δ|=0` (np=1 exact; np>1 storage-restore exact; np>1 evolution ≤1-ULP FESOM2-inherent floor);
+      smoke stores open in xarray/ushow.
 
 #### Task F2: Docs + memory + tag
 - [ ] update `docs/HANDOFF.md` ("Where we are" + "Next task" → restart DONE / next milestone)
