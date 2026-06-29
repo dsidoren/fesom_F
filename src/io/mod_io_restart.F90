@@ -33,7 +33,7 @@ module mod_io_restart
     ! atomically renames it into place and flips a one-line restart.latest pointer (write .tmp + rename),
     ! so a crash leaves either the OLD valid checkpoint or the NEW one — never a half-written folder and
     ! never a partial pointer. A reader (restart_resolve_latest) ALWAYS follows restart.latest and never
-    ! scans the directory, so a stray crashed-write *.tmp/ or an unpointed finalized fesom.*/ is ignored.
+    ! scans the directory, so a stray crashed-write tmp folder or an unpointed finalized fesom folder is ignored.
     ! A keep-N prune (restart_keep) trims the oldest immutable checkpoints after each finalize.
     !
     ! SCOPE: Task 3.2 = the per-field writer + folder + checkpoint.json; Task 3.3 = atomic finalize +

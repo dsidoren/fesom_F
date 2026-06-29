@@ -8,7 +8,9 @@ module mod_io_posix
     !
     ! No C source file is compiled into the build (mod_io_zarr binds mkdir / liblz4 the
     ! same way, and the repo ships zero .c files); a new .F90 is auto-included by the
-    ! src/io/*.F90 CONFIGURE_DEPENDS GLOB in the top-level CMakeLists.
+    ! CONFIGURE_DEPENDS GLOB over the src io directory in the top-level CMakeLists.
+    ! (NB: avoid writing the glob with a slash-star here — .F90 is cpp-preprocessed under
+    ! gfortran and a literal slash-star opens an unterminated C comment.)
     !
     ! The restart writer (Stage 3) needs: atomic finalize + pointer-file swap (rename),
     ! durability before rename (fsync of the containing directory), and tmp-cleanup /
