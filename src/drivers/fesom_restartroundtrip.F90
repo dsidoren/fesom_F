@@ -88,7 +88,7 @@ program fesom_restartroundtrip
 
     ! ---- allocate correctly-shaped REAL model state (node arrays nNodL, element arrays nElemF) -------
     dyn%AB_order = ab
-    allocate(dyn%eta_n(nNodL), dyn%ssh_rhs_old(nNodL))
+    allocate(dyn%eta_n(nNodL), dyn%d_eta(nNodL), dyn%ssh_rhs_old(nNodL))
     allocate(dyn%w(nl,nNodL), dyn%w_e(nl,nNodL), dyn%w_i(nl,nNodL))
     allocate(dyn%uv(2, nl-1, nElemF))
     allocate(dyn%uv_rhsAB(ab-1, 2, nl-1, nElemF))
@@ -112,10 +112,11 @@ program fesom_restartroundtrip
         allocate(ice%data(j)%values(nNodL))
     end do
     allocate(ice%uice(nNodL), ice%vice(nNodL))
+    allocate(ice%thermo%t_skin(nNodL))                     ! carried thermo skin temp (NODE 2-D)
     allocate(ice%work%sigma11(nElemF), ice%work%sigma12(nElemF), ice%work%sigma22(nElemF))
 
     ! ---- zero-init the WHOLE arrays (halo + eXDim start finite at 0 = the fresh-allocate baseline) -----
-    dyn%eta_n = 0; dyn%ssh_rhs_old = 0
+    dyn%eta_n = 0; dyn%d_eta = 0; dyn%ssh_rhs_old = 0
     dyn%w = 0; dyn%w_e = 0; dyn%w_i = 0; dyn%uv = 0; dyn%uv_rhsAB = 0; dyn%work%tke = 0
     mesh%hbar = 0; mesh%hnode = 0
     do j = 1, 2
@@ -124,7 +125,7 @@ program fesom_restartroundtrip
     do j = 1, 3
         ice%data(j)%values = 0
     end do
-    ice%uice = 0; ice%vice = 0
+    ice%uice = 0; ice%vice = 0; ice%thermo%t_skin = 0
     ice%work%sigma11 = 0; ice%work%sigma12 = 0; ice%work%sigma22 = 0
 
     ! ---- fill OWNED nodes (value = g for 2-D ; g + 0.5*L for 3-D) -------------------------------------
@@ -132,10 +133,12 @@ program fesom_restartroundtrip
         gid = i; if (mr) gid = partit%myList_nod2D(i)
         vn  = real(gid, WP)
         dyn%eta_n(i)          = vn
+        dyn%d_eta(i)          = vn
         dyn%ssh_rhs_old(i)    = vn
         mesh%hbar(i)          = real(gid, MP)
         ice%data(1)%values(i) = vn; ice%data(2)%values(i) = vn; ice%data(3)%values(i) = vn
         ice%uice(i)           = vn; ice%vice(i)           = vn
+        ice%thermo%t_skin(i)  = vn
         do L = 1, nl-1
             v3 = vn + 0.5_WP*real(L, WP)
             mesh%hnode(L,i)               = real(gid, MP) + 0.5_MP*real(L, MP)

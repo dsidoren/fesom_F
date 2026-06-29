@@ -469,7 +469,7 @@ def restart_state(ckpt_root, ab_order=2, tke=True):
 
     # expected stores: name -> (entity 'nod2'|'elem', kind '2d'|'nz1'|'nz')
     exp = {}
-    for n in ("eta_n", "hbar", "ssh_rhs_old", "area", "hice", "hsnow", "uice", "vice"):
+    for n in ("eta_n", "d_eta", "hbar", "ssh_rhs_old", "area", "hice", "hsnow", "uice", "vice", "t_skin"):
         exp[n] = ("nod2", "2d")
     exp["hnode"] = ("nod2", "nz1")
     for tr in ("temp", "salt"):

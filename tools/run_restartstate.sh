@@ -30,7 +30,7 @@ ulimit -s unlimited
 MPIRUN=(mpirun --mca pml ob1 --mca btl self,vader --mca btl_vader_single_copy_mechanism none --oversubscribe)
 
 for AB in 2 3; do
-    [ "$AB" = 2 ] && NEXP=26 || NEXP=30
+    [ "$AB" = 2 ] && NEXP=28 || NEXP=32
     export FESOM3_AB_ORDER="$AB"
     for NP in $NPS; do
         DIR="$RUN/ab${AB}_np$NP"

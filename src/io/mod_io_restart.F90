@@ -272,7 +272,7 @@ contains
     ! read from the structs / args so a different config registers a different — but self-consistent — set.
     !
     !   store names (== FESOM2 oracle, except eta_n which FESOM3 names per the plan field-set table):
-    !     node 2-D : eta_n hbar(MP) ssh_rhs_old | area hice hsnow uice vice
+    !     node 2-D : eta_n d_eta hbar(MP) ssh_rhs_old | area hice hsnow uice vice t_skin
     !     node 3-D : hnode(MP, nl-1) | <tr> <tr>_AB <tr>_M1 [<tr>_M2 if tracer AB_order==3]
     !                w w_expl w_impl (FULL nl) | tke (FULL nl, if mix_scheme==5)
     !     elem 3-D : u v urhs_AB vrhs_AB [urhs_AB3 vrhs_AB3 if dyn%AB_order==3]   (nl-1)
@@ -292,6 +292,11 @@ contains
 
         ! ---- ocean NODE 2-D ----
         p2 => dyn%eta_n;       call restart_register_field(R, 'eta_n',       'm', DECOMP_NODE, p2d=p2)
+        ! d_eta: SSH increment is the CG solve's INITIAL GUESS (oce_ssh_solve.F90:87 x0=dynamics%d_eta).
+        ! The CG converges only to a relative tolerance (soltol=1e-5), NOT machine precision, so the
+        ! converged d_eta depends on the carried x0. Without it the resumed SSH solve (substep 9) drifts at
+        ! the ~1e-5 tolerance floor -> d_eta/eta_n diverge. Carried prognostic state. NODE halo variant.
+        p2 => dyn%d_eta;       call restart_register_field(R, 'd_eta',       'm', DECOMP_NODE, p2d=p2)
         q2 => mesh%hbar;       call restart_register_field_mp(R, 'hbar',      'm', DECOMP_NODE, pmp2d=q2)
         p2 => dyn%ssh_rhs_old; call restart_register_field(R, 'ssh_rhs_old', '',  DECOMP_NODE, p2d=p2)
 
@@ -337,6 +342,10 @@ contains
         p2 => ice%data(3)%values; call restart_register_field(R, 'hsnow', 'm',   DECOMP_NODE, p2d=p2)
         p2 => ice%uice;           call restart_register_field(R, 'uice',  'm/s', DECOMP_NODE, p2d=p2)
         p2 => ice%vice;           call restart_register_field(R, 'vice',  'm/s', DECOMP_NODE, p2d=p2)
+        ! t_skin: thermo skin temperature is genuine carried prognostic state — the Newton ice-surface
+        ! solver seeds from it each step (mod_ice_thermo.F90 read@222 t=t_skin(i), write@260 t_skin(i)=t).
+        ! Without it the resumed flx_fw -> water_flux -> ssh_rhs diverges (substep 8). NODE halo variant.
+        p2 => ice%thermo%t_skin;  call restart_register_field(R, 't_skin', 'degC', DECOMP_NODE, p2d=p2)
 
         ! ---- ice ELEMENT 2-D: EVP stress tensor (F-C: serialized so the gate is max|Δ|=0 on ice too) ----
         p2 => ice%work%sigma11; call restart_register_field(R, 'sigma11', '', DECOMP_ELEM, p2d=p2)

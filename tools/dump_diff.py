@@ -15,6 +15,11 @@ Usage:
     dump_diff.py A B [--threshold T] [--glob]   # compare files (or prefixes with --glob)
     dump_diff.py A B --ignore-substep=2          # skip a substep id (repeatable; e.g. the
                                                  # M2-dead SW_AB=2 that FESOM3 does not emit)
+    dump_diff.py A B --ignore-step               # compare the SAME physical state reached via a
+                                                 # different per-segment step count (restart gate:
+                                                 # straight step N vs split seg-2 step N-K). Each
+                                                 # side must be windowed to ONE step; records re-key
+                                                 # on (substep, gid, name) so the labels align.
     dump_diff.py --selftest                      # self-check (no external data)
 
 Exit code 0 = match (all |delta| <= threshold), 1 = divergence (for ctest).
@@ -60,6 +65,20 @@ def parse_tree(arg, use_glob):
     for p in files:
         merged.update(parse_file(p))
     return merged
+
+
+def collapse_step(records, label):
+    """Re-key a parsed dump so its step field is dropped (set to 0), for comparing the SAME
+    physical state reached via a different per-segment step count — the restart gate compares the
+    straight run's final step N against the split run's seg-2 final step N-K. Each side MUST be
+    windowed to a single step (FESOM_DUMP_MINSTEP==FESOM_DUMP_MAXSTEP); the single-step guard makes
+    masking impossible (two distinct steps cannot silently collapse onto one another)."""
+    steps = sorted({k[0] for k in records})
+    if len(steps) != 1:
+        raise ValueError(
+            f"--ignore-step: '{label}' carries {len(steps)} distinct step(s) {steps}; window the "
+            "dump to ONE step (FESOM_DUMP_MINSTEP==FESOM_DUMP_MAXSTEP) so the alignment is unambiguous")
+    return {(0, ss, gid, name): v for (st, ss, gid, name), v in records.items()}
 
 
 def max_abs_diff(va, vb):
@@ -167,6 +186,25 @@ def selftest():
              for s, ss, g, n, v in recs)
     print("[selftest] round-trip parse ->", "PASS" if rt else "FAIL"); ok &= rt
 
+    # 4. --ignore-step: two single-step dumps with DIFFERENT step labels but identical state must
+    #    MATCH after collapse (restart gate: straight step N vs split seg-2 step N-K).
+    one_a = {(7, 1, 1001, "T"): (1.0, 2.0), (7, 15, 2000, "S"): (3.0,)}
+    one_b = {(2, 1, 1001, "T"): (1.0, 2.0), (2, 15, 2000, "S"): (3.0,)}
+    ca, cb = collapse_step(one_a, "A"), collapse_step(one_b, "B")
+    rc = report(*compare(ca, cb, 0.0), 0.0)
+    print("[selftest] ignore-step aligns N vs N-K ->", "PASS" if rc == 0 else "FAIL"); ok &= (rc == 0)
+    #    a real divergence must still surface after collapse
+    one_b_bad = dict(one_b); one_b_bad[(2, 15, 2000, "S")] = (3.5,)
+    rc = report(*compare(collapse_step(one_a, "A"), collapse_step(one_b_bad, "B"), 0.0), 0.0)
+    print("[selftest] ignore-step still detects divergence ->", "PASS" if rc == 1 else "FAIL"); ok &= (rc == 1)
+    #    the single-step guard rejects a multi-step dump (masking is impossible)
+    try:
+        collapse_step({(1, 1, 1001, "T"): (1.0,), (2, 1, 1001, "T"): (1.0,)}, "multi")
+        guard = False
+    except ValueError:
+        guard = True
+    print("[selftest] ignore-step single-step guard ->", "PASS" if guard else "FAIL"); ok &= guard
+
     for p in (fa, fb):
         os.remove(p)
     os.rmdir(d)
@@ -180,6 +218,7 @@ def main(argv):
     args = [a for a in argv if not a.startswith("--")]
     threshold = 0.0
     use_glob = "--glob" in argv
+    ignore_step = "--ignore-step" in argv
     ignore_substeps = set()
     for a in argv:
         if a.startswith("--threshold="):
@@ -196,6 +235,10 @@ def main(argv):
         a = {k: v for k, v in a.items() if k[1] not in ignore_substeps}
         b = {k: v for k, v in b.items() if k[1] not in ignore_substeps}
         print("ignoring substep id(s): " + ", ".join(str(s) for s in sorted(ignore_substeps)))
+    if ignore_step:
+        a = collapse_step(a, args[0])
+        b = collapse_step(b, args[1])
+        print("ignoring step field (single-step alignment; compare same state, different step count)")
     return report(*compare(a, b, threshold), threshold)
 
 
