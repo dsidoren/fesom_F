@@ -16,6 +16,21 @@ segments) and **`ushow`/xarray-viewable** exactly like M9 output.
 > `C2 ≡ C8` (Task 6.2) — but then continues on a physically-valid, *not* bit-identical trajectory, because FESOM's
 > global reductions (SSH-CG `allreduce_sum`) reduce in comm-size-dependent order. This is inherent to FESOM (FESOM2
 > too), not a defect; it is why the cross-np gate is a restore round-trip, not an evolution compare.
+>
+> **Claim scope refinement (Task 6.1 gate result, 2026-06-29).** Same-np resume is **exactly `max|Δ|=0`** at **np=1
+> for the entire state**, and at **np>1 for the whole state in the quiet (mid-run) case**. At **np>1 with active
+> forcing** there is a residual **≤1 ULP** (temp `2.22e-16`, w `4e-22`; propagated from element velocity into temp/w):
+> FESOM2 assigns an element to a rank if **any** of its nodes is owned (`gen_comm.F90:265`), so on CORE2/dist_2 **562
+> boundary elements are redundantly owned by both ranks** (Σ myDim_elem2D 245221 > nElem2D 244659). `exchange_elem(UV)`
+> uses `com_elem2D` (eDim halo) only — FESOM2's UV has **no eXDim slot** (`oce_setup_step.F90:655`) — so these
+> node-only-adjacent shared elements are **never synced** and diverge ~1 ULP from order-dependent RHS sums, in **both
+> FESOM2 and FESOM3**. The partition-independent checkpoint must dedup them to one value, so resume perturbs the other
+> rank's copy by ~1 ULP. **This is FESOM2-faithful** — FESOM2's own netCDF restart `gather_elem3D` deduplicates
+> identically. Forcing a live-model sync (eXDim halo + `exchange_elem_full(UV)`) would make FESOM3 diverge from FESOM2
+> and **break the M0–M9 byte-identity gates**, so it is deliberately NOT done. Bit-exact same-np resume at np>1 would
+> require FESOM2-`raw`-style per-rank element storage (rejected — costs cross-np element restore). The Task 6.1 gate
+> therefore asserts **strict `max|Δ|=0` at np=1** and admits a **per-store relative ε floor (1e-12, ≫ the ~2e-16
+> residual, ≪ any real regression at ~1e-4)** at np>1. See memory `restart-np-element-1ulp-inherent`.
 
 This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr stack (`mod_io_zarr` +
 `mod_io_decomp`) and the byte-gate tooling (`mod_dump` + `dump_diff.py`). The brainstorm-prep is
@@ -442,18 +457,28 @@ found by plan-review, verified against source).*
 
 ### Stage 6 — Reproducibility gates
 
-#### Task 6.1: PRIMARY self-consistency gate (straight-through vs split, np1/np2)
+#### Task 6.1 ✅: PRIMARY self-consistency gate (straight-through vs split, np1/np2)
 
 **Files:**
-- Create: `tools/run_restart_gate_core2.sh`
+- Create: `tools/run_restart_gate_core2.sh`; relative-ε floor added to `tools/zarr_diff.py` (`output_cmp --rel-floor`)
+  + `tools/dump_diff.py` (`compare(..., rel_floor) / --rel-floor=`).
 
-- [ ] straight-through: run N steps, `FESOM_DUMP_ALL` final state (node + element incl. ice + sigma)
-- [ ] split: run K → `restart_write` → **fresh process** → `restart_read` (`.clock`-chained) → run N−K → `FESOM_DUMP_ALL`
-- [ ] `dump_diff.py --glob` → `max|Δ|=0` (whole state incl. ice); at np=1 and np=2
-- [ ] **boundary variant:** a second split whose checkpoint lands on a **year/month boundary** (or runs long enough
-      that the periodic cadence fires), so forcing-from-clock resume + the `roll_monthly_clim` read-ahead
-      (`:1016-1020`, fires at `timenew==86400` / `n==1`) is actually exercised — a mid-run integer K never hits it
-- [ ] **GATE:** `run_restart_gate_core2.sh` GREEN (`max|Δ|=0`) on Intel **and** GNU, **both** the mid-run and boundary splits
+- [x] straight-through: run N steps, `FESOM_DUMP_ALL` final state (node + element incl. ice + sigma)
+- [x] split: run K → `restart_write` → **fresh process** → `restart_read` (`.clock`-chained) → run N−K → `FESOM_DUMP_ALL`
+- [x] **two complementary comparisons** so the FULL state is covered: **#1** end-of-run CHECKPOINT compare
+      (`zarr_diff --output-cmp`, ALL stores incl. ice/sigma/velocity/AB) + **#2** live `FESOM_DUMP_ALL` node dyn/tracer
+      (`dump_diff --glob --ignore-step`); at np=1 and np=2.
+- [x] **boundary variant:** a second split whose checkpoint lands ON the Jan→Feb month boundary (`82800 31 1948`,
+      K=2 → 86400), so forcing-from-clock resume + the `roll_monthly_clim` read-ahead (Feb "slice 2") is exercised —
+      asserted via the log; a mid-run integer K never hits it. PASS at np 1 AND 2.
+- [x] **Two carried-state fixes found by this gate** (commit `08a4060`): `ice%thermo%t_skin` (Newton ice-surface
+      solver seed) + `dyn%d_eta` (SSH-CG initial guess, converges to soltol not machine ε) — both genuine
+      read-before-write cross-step prognostic state missing from Task 3.4. Localized by first-resumed-step substep
+      dumps (substep 8 SSH_RHS → 9 SSH_SOLVE → clean). See memory `restart-tskin-carried-ice-state`.
+- [x] **GATE:** `run_restart_gate_core2.sh` GREEN — np=1 mid+bnd **exactly `max|Δ|=0`** (whole state incl. ice+sigma);
+      np=2 mid **exactly `max|Δ|=0`**; np=2 bnd **≤1 ULP** (temp `2.22e-16`, w `4e-22`) admitted by the np>1 relative-ε
+      floor (1e-12) — the FESOM2-inherent redundant-element roundoff documented in the Claim-scope refinement above.
+      (Intel dp, worktree build. GNU sweep folded into Task 6.3.)
 
 #### Task 6.2: SECONDARY cross-partition gate — RESTORE round-trip (np=2 write → np=8 restore)
 

@@ -87,18 +87,26 @@ def max_abs_diff(va, vb):
     return max((abs(a - b) for a, b in zip(va, vb)), default=0.0)
 
 
-def compare(a, b, threshold):
+def max_abs(va):
+    return max((abs(a) for a in va), default=0.0)
+
+
+def compare(a, b, threshold, rel_floor=0.0):
     keys = sorted(set(a) | set(b))
     only_a = [k for k in keys if k not in b]
     only_b = [k for k in keys if k not in a]
     diffs = []  # (step, substep, gid, name, maxabsdiff)
+    eff = {}    # per-key effective threshold = max(abs threshold, rel_floor*|ref|)
     for k in keys:
         if k in a and k in b:
             diffs.append((k[0], k[1], k[2], k[3], max_abs_diff(a[k], b[k])))
-    # first diverging (step, substep) above threshold
+            eff[k] = max(threshold, rel_floor * max_abs(a[k])) if rel_floor > 0.0 else threshold
+    # first diverging (step, substep) above the (possibly relative) effective threshold.
+    # rel_floor>0 (np>1 restart) admits the FESOM2-inherent redundant-element ~1-ULP roundoff
+    # (see zarr_diff.output_cmp doc) while still catching any real regression (>= ~1e-4).
     first = None
     for step, substep, gid, name, d in sorted(diffs):
-        if d > threshold:
+        if d > eff[(step, substep, gid, name)]:
             first = (step, substep)
             break
     # histogram of magnitudes
@@ -217,12 +225,15 @@ def main(argv):
         return selftest()
     args = [a for a in argv if not a.startswith("--")]
     threshold = 0.0
+    rel_floor = 0.0
     use_glob = "--glob" in argv
     ignore_step = "--ignore-step" in argv
     ignore_substeps = set()
     for a in argv:
         if a.startswith("--threshold="):
             threshold = float(a.split("=", 1)[1])
+        if a.startswith("--rel-floor="):
+            rel_floor = float(a.split("=", 1)[1])
         if a.startswith("--ignore-substep="):
             ignore_substeps.add(int(a.split("=", 1)[1]))
     if len(args) != 2:
@@ -239,7 +250,9 @@ def main(argv):
         a = collapse_step(a, args[0])
         b = collapse_step(b, args[1])
         print("ignoring step field (single-step alignment; compare same state, different step count)")
-    return report(*compare(a, b, threshold), threshold)
+    if rel_floor > 0.0:
+        print(f"np>1 rel-eps floor = {rel_floor:.0e} (FESOM2-inherent redundant-element ~1-ULP roundoff)")
+    return report(*compare(a, b, threshold, rel_floor), threshold)
 
 
 if __name__ == "__main__":

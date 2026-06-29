@@ -565,14 +565,24 @@ def restart_state(ckpt_root, ab_order=2, tke=True):
     print("RESTART-STATE PASS (all stores present, shapes+levels+values+coords OK, elem~2x node)")
 
 
-def output_cmp(d1, d2):
-    """Partition-independence (Task 2.3): two output dirs (e.g. dist_2 vs dist_8) must hold
-    value-identical stores — every variable max|Δ|=0."""
-    print(f"[output-cmp] {d1}  vs  {d2}")
+def output_cmp(d1, d2, rel_floor=0.0):
+    """Partition-independence / restart self-consistency: two output dirs hold value-identical
+    stores. Default rel_floor=0.0 => strict max|Δ|=0 (np=1, and the exact-by-construction cases).
+
+    rel_floor>0 admits a per-store RELATIVE machine-epsilon floor for the np>1 restart gate ONLY:
+    at np>1, FESOM2's any-node element ownership makes 562 boundary elements redundantly owned and
+    NOT halo-synced (UV has no eXDim halo — oce_setup_step.F90:655); they diverge by ~1 ULP from
+    order-dependent RHS sums, and the partition-INDEPENDENT checkpoint must dedup them to one value,
+    so a same-np resume perturbs the other rank by ~1 ULP and propagates ~2e-16 into temp/w. This is
+    FESOM2-faithful (its nc restart dedups identically). The floor is set far below any real
+    regression (the t_skin/d_eta seeds were ~1e-4 >> 1e-12) so the gate stays meaningful. Stores are
+    classified =0 (exact) / ~eps (<=floor) / BAD (>floor); a BAD at >floor still FAILS."""
+    print(f"[output-cmp] {d1}  vs  {d2}" + (f"  (np>1 rel-eps floor={rel_floor:.0e})" if rel_floor else ""))
     stores = sorted(s for s in os.listdir(d1) if s.endswith(".zarr"))
     if not stores:
         _fail(f"no .zarr stores in {d1}")
     nfail = 0
+    neps = 0
     for s in stores:
         ds1 = xr.open_zarr(os.path.join(d1, s), consolidated=False, mask_and_scale=False, decode_times=False)
         ds2 = xr.open_zarr(os.path.join(d2, s), consolidated=False, mask_and_scale=False, decode_times=False)
@@ -583,13 +593,25 @@ def output_cmp(d1, d2):
                 print(f"  ! {s}:{v} shape {a1.shape} != {a2.shape}")
                 nfail += 1
                 continue
-            d = float(np.max(np.abs(a1.astype(np.float64) - a2.astype(np.float64)))) if a1.size else 0.0
-            print(f"  {'ok ' if d==0 else 'BAD'} {s}:{v:8s} max|Δ|={d:.3e}")
-            if d != 0.0:
-                nfail += 1
+            a1 = a1.astype(np.float64); a2 = a2.astype(np.float64)
+            d = float(np.max(np.abs(a1 - a2))) if a1.size else 0.0
+            scale = float(np.max(np.abs(a1))) if a1.size else 0.0
+            # relative residual vs the store's own magnitude; rel=d if scale==0 (forces exact for all-zero)
+            rel = d / scale if scale > 0.0 else d
+            if d == 0.0:
+                tag = "ok "
+            elif rel_floor > 0.0 and rel <= rel_floor:
+                tag = "eps"; neps += 1
+            else:
+                tag = "BAD"; nfail += 1
+            print(f"  {tag} {s}:{v:8s} max|Δ|={d:.3e}  rel={rel:.2e}")
     if nfail:
-        _fail(f"output-cmp: {nfail} mismatch(es)")
-    print("OUTPUT-CMP PASS (max|Δ|=0, partition-independent)")
+        _fail(f"output-cmp: {nfail} mismatch(es)" + (f" (+{neps} at <=eps floor)" if neps else ""))
+    if neps:
+        print(f"OUTPUT-CMP PASS ({neps} store(s) at <=rel-eps floor {rel_floor:.0e} — FESOM2-inherent "
+              f"np>1 redundant-element roundoff; rest max|Δ|=0)")
+    else:
+        print("OUTPUT-CMP PASS (max|Δ|=0, partition-independent)")
 
 
 def main():
@@ -612,6 +634,9 @@ def main():
     ap.add_argument("--frame", choices=("geographic", "native"), default="geographic",
                     help="vector frame for --output's fld_u/fld_v check (default geographic)")
     ap.add_argument("--ftol", type=float, default=0.0, help="float tolerance for --meshdiag (default 0)")
+    ap.add_argument("--rel-floor", type=float, default=0.0, dest="rel_floor",
+                    help="per-store RELATIVE eps floor for --output-cmp (default 0=strict; np>1 restart "
+                         "uses ~1e-12 for the FESOM2-inherent redundant-element roundoff)")
     args = ap.parse_args()
 
     if args.roundtrip:
@@ -627,7 +652,7 @@ def main():
     elif args.restart_state:
         restart_state(args.restart_state, ab_order=args.ab_order, tke=not args.no_tke)
     elif args.output_cmp:
-        output_cmp(args.output_cmp[0], args.output_cmp[1])
+        output_cmp(args.output_cmp[0], args.output_cmp[1], rel_floor=args.rel_floor)
     else:
         ap.error("no mode selected (use --roundtrip / --lz4 / --meshdiag / --output / --output-cmp / "
                  "--restart / --restart-state)")
