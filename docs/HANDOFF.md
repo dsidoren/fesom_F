@@ -320,7 +320,14 @@ The live "Oracle" section above + the "M2.12 entry notes" below cover what the c
 
 ## Next task
 
-### ✅ M9 (Zarr OUTPUT) — **COMPLETE & tagged `m9` (commit `b631399`, 2026-06-28).** All stages (scalars + 3-D + NODE + ELEMENT vectors/scalars) + Task 2.6 namelist/knobs + F1 full no-regression sweep, all byte-gated. The lone open plan box = the MANUAL `ushow` display smoke. **NEXT MILESTONE = restart/checkpoint** (the M9 brainstorm split restart OUT, output-first).
+### ✅ RESTART / CHECKPOINT — **COMPLETE & tagged `m10` (2026-06-29).** Partition-independent Zarr checkpoints (full prognostic state incl. sea ice + EVP sigma), written periodically + at end-of-run, read at startup on `r_restart`, resuming byte-exactly. Built on the M9 Zarr stack (`mod_io_zarr` + `mod_io_decomp` + new `decomp_gather` inverse); new `src/io/mod_io_restart.F90` (writer+reader, atomic tmp→rename finalize + `restart.latest` + keep-N prune), `mod_io_posix.F90` (bind(C) rename/unlink/fsync/rmtree — no `execute_command_line`), `mod_io_coords.F90` (shared coord helper). Lifecycle wiring in `fesom_lifecycle_native_mr` (detect/read/AB-guard/write/cadence + `clock_finish`).
+- **Gate (6.1) split-vs-straight self-consistency:** np=1 mid+boundary **exactly `max|Δ|=0`** over the WHOLE state (ice+sigma+velocity+AB+tracers); np=2 mid exact; np=2 boundary **≤1 ULP** (temp 2.2e-16) — a **FESOM2-inherent** limit (any-node element ownership → 562 redundantly-owned boundary elements not halo-synced; FESOM2's own nc restart dedups identically; a live sync would break M0–M9 byte-identity → user-accepted caveat; `tools/run_restart_gate_core2.sh`, `--rel-floor` 0 at np=1 / 1e-12 at np>1). Found+fixed 2 missing carried fields the gate caught: `ice%thermo%t_skin` + `dyn%d_eta`.
+- **Gate (6.2) cross-partition storage+restore:** `C2(np2) ≡ C8(np8)` **strict `max|Δ|=0`** all 27 stores (`tools/run_restart_gate_multirank.sh`, np8 reads C2, zero steps, re-writes C8).
+- **No-regression (6.3):** ctest **Intel 21/21 + GNU 21/21** (sweep caught & fixed a GNU-only cpp `/*`-in-comment build break); M9 zarrsmoke/meshdiag/output gates GREEN; production MR lifecycle byte-gate np2 **195 records `max|Δ|=0`**.
+- **Plan:** `docs/plans/completed/2026-06-28-restart-checkpoint.md` (all boxes ticked; Claim-scope refinement documents the np>1 ULP). Memory: `restart-tskin-carried-ice-state`, `restart-np-element-1ulp-inherent`.
+- **NEXT MILESTONE:** open — resume **M3+ physics / production** per the roadmap (M0–M10 all byte-exact & tagged `m0…m10`). Decide with the user.
+
+### ✅ M9 (Zarr OUTPUT) — **COMPLETE & tagged `m9` (commit `b631399`, 2026-06-28).** All stages (scalars + 3-D + NODE + ELEMENT vectors/scalars) + Task 2.6 namelist/knobs + F1 full no-regression sweep, all byte-gated. The lone open plan box = the MANUAL `ushow` display smoke. (Restart was the milestone that followed — now DONE, see above.)
 
 **Plan:** `docs/plans/completed/2026-06-28-m9-zarr-output.md` (checkboxes ticked through F1; moved to completed/). Design SETTLED.
 
@@ -425,19 +432,16 @@ node+elem-centroid coords, 2 records, 244659 elem ≈ 2× node), bolus correctly
 `test{test_io_means.F90,CMakeLists.txt}` + docs) committed, plan moved to `docs/plans/completed/`, tag created. The
 only open M9 item is the MANUAL `ushow` display smoke (the xarray/zarr round-trip is the automated proxy).
 
-**NEXT MILESTONE = restart/checkpoint.** The M9 brainstorm deliberately split restart OUT (output-first); it is now the
-next piece. **➡️ Detailed brainstorm-prep handoff: `docs/plans/2026-06-28-restart-handoff.md`** — grounded oracle→FESOM3
-state inventory, what's already in place (the `write_t_dyn`/`read_t_dyn`/`write_t_mesh`/`write_t_tracer_data` dump
-primitives, `r_restart`, `RestartInPath`), and the **design forks to brainstorm WITH the user first** (F-A file
-format/backend: reuse M9 Zarr vs port FESOM2 netCDF-gather vs raw per-rank Fortran; F-B partition portability; F-C the
-EVP `sigma` fork — it carries across steps but FESOM2 omits it from the restart, which shapes whether the gate is
-`max|Δ|=0` on ice; F-D cadence; F-E clock write; F-F prognostic-vs-recompute). Port FESOM2 `io_restart.F90` write/read
-(M8 `tke` precedent + the `clock_finish`/`clock_newyear`/`use_transit` items rehomed to `mod_clock` and deferred here);
-gate = restart-reproducibility `max|Δ|=0` straight-through vs split-restart (+ optional cross-partition). **Run the
-brainstorm THEN write the plan THEN implement** (the M9 pattern). Alternative if restart waits: **M3+ physics** per the
-roadmap. Either way M0–M9 are byte-exact & tagged (`m0…m9`).
+**RESTART / CHECKPOINT = DONE & tagged `m10`** (2026-06-29) — see the `✅ RESTART / CHECKPOINT` section at the top of
+"Next task" for the full result. The brainstorm-prep + plan are at `docs/plans/2026-06-28-restart-handoff.md` and
+`docs/plans/completed/2026-06-28-restart-checkpoint.md` (forks decided: F-A/F-B = canonical partition-independent Zarr
+reusing the M9 stack; F-C = serialize EVP `sigma` for true `max|Δ|=0` on ice; cadence periodic+end; clock_finish
+ported; field set = the FESOM2 superset + the gate-found carried `t_skin`/`d_eta`). Gates GREEN (6.1 split-vs-straight
+np=1 exact / np>1 ≤1-ULP FESOM2-inherent; 6.2 cross-np restore `C2≡C8`; 6.3 no-regression Intel+GNU ctest 21/21 +
+M9 gates + production lifecycle). **NEXT MILESTONE: open** — resume **M3+ physics / production** per the roadmap;
+decide with the user.
 
-M0–M8 COMPLETE & tagged (m0…m8); forcing-perf ✅ RESOLVED (`708fdf4`/`ce2288a`/`1ef9516`; L133).
+M0–M10 COMPLETE & tagged (m0…m10); forcing-perf ✅ RESOLVED (`708fdf4`/`ce2288a`/`1ef9516`; L133).
 
 **M9 = model OUTPUT as hand-rolled Zarr v2** — xarray-readable, openable by the user's `ushow` (`/home/a/a270088/ushow`),
 UGRID-1.0, + a `fesom.mesh.diag.zarr` analog. **Settled design:**
