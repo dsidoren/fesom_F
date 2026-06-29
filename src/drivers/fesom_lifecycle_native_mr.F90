@@ -64,8 +64,9 @@ program fesom_lifecycle_native_mr
                                   tke_use_lbound_dirichlet, tke_dolangmuir
     use mod_config,         only: use_sw_pene, which_ALE, &
                                   cfg_dt => dt, step_per_day, run_length, run_length_unit, &
-                                  runid, RestartInPath, include_fleapyear
-    use mod_clock,          only: clock, clock_init, clock_nsteps, yearnew, daynew, timenew, month, &
+                                  runid, RestartInPath, RestartOutPath, include_fleapyear
+    use mod_clock,          only: clock, clock_init, clock_nsteps, clock_finish, r_restart, &
+                                  yearnew, yearold, daynew, timenew, month, &
                                   yearstart, ndpyr, day_in_month, fleapyear, num_day_in_month
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
     use oce_mixing_tke,     only: tke_init
@@ -97,16 +98,19 @@ program fesom_lifecycle_native_mr
                                   means_define_elem3d, means_define_vector3d_elem, means_accumulate, &
                                   means_has, means_output, means_finalize
     use mod_dump,           only: dump_init, dump_finalize
+    ! Restart Stage 5: checkpoint registry + register/write/read hooks (the lifecycle wiring of mod_io_restart).
+    use mod_io_restart,     only: t_restart, restart_init, restart_register_state, restart_write, &
+                                  restart_read, restart_finalize, restart_resolve_latest
     implicit none
 
     real(kind=WP), parameter :: dt = 86400.0_WP / real(48, WP)   ! CORE2 dt = 1800 s
 
     character(len=512) :: mesh_dir, ic_file, env, whichevp_str
-    type(t_partit)     :: partit
-    type(t_mesh)       :: mesh
-    type(t_dyn)        :: dyn
-    type(t_tracer)     :: tracers
-    type(t_ice)        :: ice
+    type(t_partit)        :: partit
+    type(t_mesh),  target :: mesh        ! target: restart registers live pointers into these (Stage 5)
+    type(t_dyn),   target :: dyn
+    type(t_tracer),target :: tracers
+    type(t_ice),   target :: ice
     type(t_atmflux)    :: atm
     type(t_ic3d_config):: ic
     integer :: n, nz, nl, nzmin, nzmax, e, tr_num, nsteps, ios, env_len, nsw, whichevp
@@ -127,6 +131,18 @@ program fesom_lifecycle_native_mr
     logical            :: step_diag        ! perf: per-step global MPI_MAX stability diagnostic (env FESOM3_STEP_DIAG; default OFF — FESOM2 has no per-step collective)
     integer            :: mon_every        ! perf monitoring: emit a per-component timing report every mon_every steps (env FESOM3_TIMING_EVERY; 0 = only the final report)
     character(len=512) :: start_clock, restart_in
+    ! Restart Stage 5 (Tasks 5.1/5.3): checkpoint registry + global cadence + restart-mode detection.
+    type(t_restart)     :: rst
+    logical             :: do_restart      ! FESOM3_RESTART set => register + write the checkpoint state
+    logical             :: restart_mode    ! restart launch: do_restart AND a complete checkpoint resolves
+    logical             :: wrote_final     ! did the last in-loop step already checkpoint? (skip the final)
+    logical             :: rl_ok
+    character(len=4096) :: restart_dir     ! FESOM3_RESTART value (no trailing slash); checkpoint folder root
+    character(len=:), allocatable :: rl_folder
+    integer             :: restart_length  ! cadence length  (&nml_restart restart_length; FESOM3_RESTART_LENGTH)
+    character(len=8)    :: restart_length_unit  ! cadence unit (y|m|d|h|s|off; FESOM3_RESTART_UNIT)
+    integer             :: cp_year, cp_day      ! normalized checkpoint clock (year-rollover, like clock_finish)
+    real(kind=real64)   :: cp_tsec
     real(kind=MP) :: zbar_srf, zbar_bot
     real(kind=WP), allocatable :: Ki(:,:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
@@ -566,12 +582,42 @@ program fesom_lifecycle_native_mr
         if (idx > 0) then; restart_in = restart_in(1:idx); else; restart_in = './'; end if
     end if
     RestartInPath = trim(restart_in)
+    ! ---- Restart Stage 5 (Task 5.1): restart-mode detection, BEFORE the cold .clock overwrite ----
+    ! A restart LAUNCH iff FESOM3_RESTART=<dir> is set AND a COMPLETE checkpoint resolves under
+    ! RestartInPath (restart.latest -> a folder carrying checkpoint.json). FESOM3_RESTART also enables
+    ! the checkpoint WRITE path (do_restart) and sets RestartOutPath (where clock_finish + the folders go).
+    call get_environment_variable('FESOM3_RESTART', restart_dir, length=env_len, status=ios)
+    do_restart = (ios == 0 .and. env_len > 0)
+    if (do_restart) then
+        ! strip a trailing '/': restart_write joins <dir>/<folder>; RestartOutPath keeps a trailing slash.
+        if (len_trim(restart_dir) > 1) then
+            if (restart_dir(len_trim(restart_dir):len_trim(restart_dir)) == '/') &
+                restart_dir = restart_dir(1:len_trim(restart_dir)-1)
+        end if
+        RestartOutPath = trim(restart_dir)//'/'
+    end if
+    restart_mode = .false.
+    if (do_restart) then
+        call restart_resolve_latest(trim(RestartInPath), rl_folder, rl_ok)
+        restart_mode = rl_ok
+    end if
+    ! restart cadence knobs (default 1 'y'; &nml_restart-equivalent via FESOM3_* env per the plan's
+    ! "env fallbacks are fine" allowance). restart_keep / compressor / n_writers enter via restart_init.
+    restart_length = 1; restart_length_unit = 'y'
+    call get_environment_variable('FESOM3_RESTART_LENGTH', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) restart_length
+    call get_environment_variable('FESOM3_RESTART_UNIT', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) restart_length_unit = trim(env)
     ! cold-start clock values from FESOM3_START_CLOCK (default 0 1 <start year>); both lines equal
     ! => cold start. JRA55 forcing starts 1958 (no 1949), CORE2 NCAR at 1948.
     clk_t0 = 0.0_WP; clk_d0 = 1; clk_y0 = merge(1958, 1948, trim(forc_set) == 'JRA55')
     call get_environment_variable('FESOM3_START_CLOCK', start_clock, length=env_len, status=ios)
     if (ios == 0 .and. env_len > 0) read(start_clock, *, iostat=ios) clk_t0, clk_d0, clk_y0
-    if (partit%mype == 0) then
+    ! In restart mode SKIP the unconditional cold .clock overwrite so clock_init reads the PREVIOUS
+    ! segment's clock_finish-written .clock (two DIFFERING lines => r_restart=.true.); the overwrite
+    ! would force two EQUAL lines => r_restart always false => the READ hook below would be dead
+    ! (verified mod_clock.F90:127-132).
+    if (.not. restart_mode .and. partit%mype == 0) then
         open(newunit=clk_unit, file=trim(RestartInPath)//trim(runid)//'.clock', &
              status='replace', action='write')
         write(clk_unit,*) clk_t0, clk_d0, clk_y0
@@ -579,6 +625,9 @@ program fesom_lifecycle_native_mr
         close(clk_unit)
     end if
     call MPI_Barrier(partit%MPI_COMM_FESOM, ierr)
+    if (restart_mode .and. partit%mype == 0) write(*,'(a)') &
+        'fesom_lifecycle_native_mr: RESTART MODE — checkpoint found under '//trim(RestartInPath)// &
+        ' (cold .clock overwrite skipped; clock_init reads the chained .clock)'
     call clock_init(partit)
     nsteps = clock_nsteps(partit)
     call get_environment_variable('FESOM3_NSTEPS', env, length=env_len, status=ios)
@@ -762,9 +811,34 @@ program fesom_lifecycle_native_mr
     end if
 
     !===========================================================================
+    ! Restart Stage 5 (Task 5.3 REGISTER + Task 5.1 READ). When FESOM3_RESTART=<dir> is set, register the
+    ! FULL prognostic state (live pointers — oce + ice incl. EVP sigma + MP hbar/hnode) so the in-loop /
+    ! end-of-run hooks below can checkpoint it. When this is a RESTART launch (r_restart, set by clock_init
+    ! from the chained .clock), restart_read then restores the newest checkpoint INTO those live arrays,
+    ! OVERWRITING the cold state allocated above — placed after the whole cold init (dyn/tracers/ice +
+    ! forcing) and before the loop; nothing between clock_init and here consumes the cold ocean/ice state
+    ! (the forcing build reads only the clock + atmosphere). restart_read resolves the folder via
+    ! restart.latest under RestartInPath; clock_year/day/time_sec drive the time-vs-clock safety warning
+    ! (time_sec is the sec-of-day == timenew, matching the folder tag + checkpoint.json convention).
+    if (do_restart) then
+        call restart_init(rst, mesh, partit)
+        call restart_register_state(rst, dyn, tracers, ice, mesh, mix_scheme=mix_scheme_nmb)
+        if (partit%mype == 0) write(*,'(a,i0,a)') &
+            'restart: registered ', rst%nf, ' prognostic fields -> '//trim(RestartOutPath)
+        if (r_restart) then
+            call restart_read(rst, trim(RestartInPath), mesh, partit, &
+                              clock_year=yearnew, clock_day=daynew, clock_time_sec=real(timenew, real64))
+            if (partit%mype == 0) write(*,'(a,f9.1,a,i0,a,i0)') &
+                'restart: state restored (resumed run) at clock time=', timenew, ' day=', daynew, &
+                ' year=', yearnew
+        end if
+    end if
+
+    !===========================================================================
     ! runloop: ocean2ice -> [native atm] -> ice_timestep -> oce_fluxes_mom -> oce_fluxes ->
     ! step_oce (the FESOM2 runloop order; update_atm_forcing replaced by apply_native_forcing).
     call timer_init()
+    wrote_final = .false.
     do n = 1, nsteps
         call clock                                   ! M8a: advance the model clock (top of step)
         if (ftz_supported) call ieee_set_underflow_mode(gradual=.false.)   ! M8c: keep FTZ on each step (match FESOM2; survive library MXCSR resets)
@@ -790,7 +864,11 @@ program fesom_lifecycle_native_mr
         call timer_stop(TMR_FLUXES)
         ! M5d: stress_node_surf=atm%stress_node_surf (oce_fluxes_mom) feeds KPP ustar (PP ignores it).
         call timer_start(TMR_STEP_OCE)
-        call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
+        ! Restart Stage 5 (Task 5.2): first-resumed-step AB guard. lfirst = (n==1) .and. .not. r_restart
+        ! so the first step of a RESUMED run blends AB2 (ff=ab2) over the RESTORED uv_rhsAB instead of
+        ! forward-Euler (ff=1.0) discarding it (oce_dyn_velrhs.F90:62-64,135-136). A cold run keeps the
+        ! Euler first step (r_restart=.false.).
+        call step_oce(n, dt, (n == 1) .and. .not. r_restart, dyn, tracers, mesh, Ki, &
                       atm%heat_flux, atm%water_flux, atm%virtual_salt, atm%relax_salt, &
                       atm%real_salt_flux, is_nonlinfs, stress_surf, partit, &   ! M6a-4: native rsf (zstar)
                       stress_node_surf=atm%stress_node_surf)
@@ -822,6 +900,27 @@ program fesom_lifecycle_native_mr
             oclk%ndim_month = num_day_in_month(fleapyear, month); oclk%timenew = real(timenew, real64)
             call means_output(oio, n, oclk)
         end if
+        ! Restart Stage 5 (Task 5.3): periodic checkpoint of the live (post-step_oce) state — the same
+        ! end-of-step instant M9 output sees. restart_due is the GLOBAL is_due cadence (restart_length/
+        ! unit; the last step is always due). clock_finish writes RestartOutPath//runid//.clock after
+        ! EVERY write (mirror io_restart.F90:573-578) so a mid-run checkpoint is resumable next launch —
+        ! else the .clock stays at the cold-start time and r_restart stays false. The folder tag +
+        ! checkpoint.json use clock_finish's own year-rollover normalization so the stamps match the
+        ! .clock that the next segment's clock_init reads back (time_sec = sec-of-day = timenew).
+        if (do_restart) then
+            if (restart_due(n)) then
+                cp_year = yearnew; cp_day = daynew; cp_tsec = real(timenew, real64)
+                if (daynew == ndpyr .and. timenew == 86400._WP) then
+                    cp_tsec = 0.0_real64; cp_day = 1; cp_year = yearold + 1
+                end if
+                call restart_write(rst, trim(restart_dir), cp_year, cp_day, cp_tsec, globalstep=n)
+                if (partit%mype == 0) call clock_finish()
+                if (n == nsteps) wrote_final = .true.
+                if (partit%mype == 0) write(*,'(a,i0,a,i4.4,a,i3.3,a,i5.5)') &
+                    'restart: checkpoint written at step ', n, ' -> fesom.', cp_year, '.', cp_day, &
+                    '.', int(cp_tsec)
+            end if
+        end if
         ! perf monitoring: periodic (cumulative) per-component timing report every mon_every steps.
         ! Collective (all ranks call it — placed before the step_diag cycle); 0 => only the final report.
         if (mon_every > 0 .and. mod(n, mon_every) == 0) &
@@ -845,6 +944,20 @@ program fesom_lifecycle_native_mr
                 '  a_ice=', dstat(3), '  m_ice=', dstat(4), &
                 '  Tmax=', dstat(5), '  Smax=', dstat(6)
     end do
+    ! Restart Stage 5 (Task 5.3): end-of-run final checkpoint — a safety net for the case the last
+    ! in-loop step was NOT cadence-due. restart_due already treats the last step as due, so this is
+    ! normally skipped (wrote_final); kept so a run can never end without a resumable checkpoint.
+    ! clock_finish after the write keeps RestartOutPath//.clock at the final instant for the next launch.
+    if (do_restart .and. .not. wrote_final) then
+        cp_year = yearnew; cp_day = daynew; cp_tsec = real(timenew, real64)
+        if (daynew == ndpyr .and. timenew == 86400._WP) then
+            cp_tsec = 0.0_real64; cp_day = 1; cp_year = yearold + 1
+        end if
+        call restart_write(rst, trim(restart_dir), cp_year, cp_day, cp_tsec, globalstep=nsteps)
+        if (partit%mype == 0) call clock_finish()
+        if (partit%mype == 0) write(*,'(a)') 'restart: end-of-run final checkpoint written'
+    end if
+    if (do_restart) call restart_finalize(rst)
     if (do_output) then
         call means_finalize(oio)
         if (partit%mype == 0) write(*,'(a)') 'M9: field output finalized.'
@@ -858,6 +971,38 @@ program fesom_lifecycle_native_mr
     call par_ex(partit%MPI_COMM_FESOM, partit%mype)
 
 contains
+
+    ! Restart Stage 5 (Task 5.3): the GLOBAL restart cadence predicate. FESOM2 io_restart.F90:937 is_due
+    ! + gen_events.F90 annual/monthly/daily/hourly/step_event ported FRESH (the M9 mod_io_means event_due
+    ! is private + coupled to t_means_clock, not reusable). Reads the host's restart_length/unit + the
+    ! live mod_clock state. The LAST step is ALWAYS due so end-of-run always leaves a resumable
+    ! checkpoint; 'off' disables only the PERIODIC writes. Identical 'y'/'m'/'d'/'h'/'s' semantics to the
+    ! M9 output event so a checkpoint and an annual output land on the same instant.
+    logical function restart_due(istep)
+        integer, intent(in) :: istep
+        integer :: fr
+        restart_due = .false.
+        fr = max(1, restart_length)
+        select case (restart_length_unit(1:1))
+        case ('y')                                            ! annual_event
+            restart_due = (mod(yearnew - yearstart + 1, fr) == 0 .and. &
+                           daynew == ndpyr .and. timenew == 86400._WP)
+        case ('m')                                            ! monthly_event
+            restart_due = (mod(month, fr) == 0 .and. &
+                           day_in_month == num_day_in_month(fleapyear, month) .and. timenew == 86400._WP)
+        case ('d')                                            ! daily_event
+            restart_due = (mod(daynew, fr) == 0 .and. timenew == 86400._WP)
+        case ('h')                                            ! hourly_event
+            restart_due = (mod(timenew, 3600._WP*real(fr, WP)) == 0._WP)
+        case ('s')                                            ! step_event
+            restart_due = (mod(istep, fr) == 0)
+        case ('o')                                            ! 'off' — no periodic writes
+            restart_due = .false.
+        case default
+            restart_due = .false.
+        end select
+        if (istep == nsteps) restart_due = .true.             ! end-of-run always checkpoints
+    end function restart_due
 
     ! M9 Task 2.6: register one output stream from a parsed namelist.io row (id + freq/unit/precision/
     ! mean|snap), dispatching the FESOM3 field's fixed name/long_name/units/kind. Unknown ids warn+skip.

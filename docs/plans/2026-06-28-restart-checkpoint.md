@@ -364,54 +364,81 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
 load-bearing as the I/O — each of the three, if wrong, makes the Stage 6 gate diverge or the read hook dead (all three
 found by plan-review, verified against source).*
 
-#### Task 5.1: Restart-mode detection + skip cold-start `.clock` overwrite + READ hook
+#### Task 5.1 ✅: Restart-mode detection + skip cold-start `.clock` overwrite + READ hook
 
 **Files:**
 - Modify: `src/drivers/fesom_lifecycle_native_mr.F90`
-- Modify: `src/io/mod_io_restart.F90`
+- Modify: `src/io/mod_io_restart.F90` (no change needed — `restart_read`/`restart_resolve_latest` already exist from Stage 4)
 
-- [ ] detect restart mode **early** — before the cold-start `.clock` writer (`:574-580`): restart iff `FESOM3_RESTART`
-      set AND `restart.latest` exists under `RestartInPath`
-- [ ] **skip the unconditional `.clock` overwrite (`:574-580`) when in restart mode** so `clock_init` (`:582`) reads
-      the previous segment's `clock_finish`-written `.clock` and sets `r_restart=.true.` — else the overwrite writes
-      two equal lines and `r_restart` is **always false** (verified `:574-582` + `mod_clock.F90:126-131`), making the
-      read hook dead
-- [ ] **READ hook** (after `clock_init`/`clock_nsteps` `:582-583`, after cold-state init, before the loop `:768`):
-      `if (r_restart) call restart_read(...)` — resolve folder via `restart.latest`, `decomp_gather`+halo-exchange
-      into the live arrays
-- [ ] **GATE:** with a checkpoint present, `r_restart` becomes true and `restart_read` runs; with none, cold start unchanged
+- [x] detect restart mode **early** — before the cold-start `.clock` writer: `do_restart` = `FESOM3_RESTART=<dir>`
+      set; `restart_mode` = `do_restart .and. restart_resolve_latest(RestartInPath)` returns `ok` (restart.latest ->
+      a folder carrying checkpoint.json). Sets `RestartOutPath = <dir>/` (trailing-slash stripped from `<dir>` first
+      so `restart_write` joins `<dir>/<folder>` cleanly while `clock_finish` keeps the slash)
+- [x] **skip the unconditional `.clock` overwrite when in restart mode** — guarded `if (.not. restart_mode .and.
+      mype==0)` so `clock_init` reads the previous segment's `clock_finish`-written `.clock` (two DIFFERING lines =>
+      `r_restart=.true.`). GATE-CONFIRMED: seg-2 prints `RESTART MODE — ... cold .clock overwrite skipped`, the
+      `.clock` shows differing lines `3600.. / 5400..`, `clock_init` sets `r_restart=.true.`
+- [x] **READ hook** — after the M9 output register (`~:725`, after the whole cold dyn/tracers/ice + forcing init,
+      before the loop): `if (r_restart) call restart_read(rst, RestartInPath, mesh, partit, clock_year=yearnew,
+      clock_day=daynew, clock_time_sec=real(timenew,real64))` — resolves the folder via `restart.latest`,
+      `decomp_gather`+halo-exchange into the live arrays (overwrites the cold state). `clock_time_sec` = sec-of-day
+      (== `timenew`), matching the folder-tag/checkpoint.json convention so the time-vs-clock safety compare is clean
+- [x] **GATE (FUNCTIONAL):** `tools/run_restart_lifecycle.sh` np 1 AND 2 (Intel dp, worktree build): with a checkpoint
+      present seg-2 sets `r_restart=.true.` (RESTART RUN banner) and `restart_read` restores the state (`state restored
+      ... at clock time=5400`); with none seg-1 is a cold INITIALISATION run (no read) — both GREEN, exit 0
 
-#### Task 5.2: First-resumed-step AB guard (`lfirst .and. .not. r_restart`)
+#### Task 5.2 ✅: First-resumed-step AB guard (`lfirst .and. .not. r_restart`)
 
 **Files:**
 - Modify: `src/drivers/fesom_lifecycle_native_mr.F90`
 
-- [ ] change the step call (`:793`) `step_oce(n, dt, (n == 1), ...)` → `step_oce(n, dt, (n==1) .and. .not. r_restart, ...)`
+- [x] changed the step call `step_oce(n, dt, (n == 1), ...)` → `step_oce(n, dt, (n==1) .and. .not. r_restart, ...)`
       so the first resumed step blends with `ff=ab2` (AB2) over the **restored** `uv_rhsAB`, not forward-Euler
-      (`ff=1.0`, `oce_dyn_velrhs.F90:136`) which discards it — the routine's header documents exactly this guard
-      (`oce_dyn_velrhs.F90:62-64`)
-- [ ] confirm no tracer analog needed (FESOM3 tracer solve has no `lfirst`; FESOM2's only `.not.r_restart` tracer
-      guard is the cold-start `valuesold=values` init, which the post-cold-init READ-hook ordering overwrites)
-- [ ] **GATE:** folded into 6.1 — the velocity dump on the **first resumed step** is where a wrong guard surfaces
+      (`ff=1.0`, `oce_dyn_velrhs.F90:135-136`) which discards it — the routine's header documents exactly this guard
+      (`oce_dyn_velrhs.F90:62-64`). Cold runs keep the Euler first step (`r_restart=.false.`)
+- [x] confirmed no tracer analog needed — VERIFIED in source: `lfirst` is consumed ONLY by `compute_vel_rhs`
+      (`mod_step_oce.F90:206`); the tracer solve `solve_tracers_ale` (`:276/:280`) takes no `lfirst`. FESOM2's only
+      `.not.r_restart` tracer guard is the cold-start `valuesold=values` init (lifecycle `:338-339`), which the
+      post-cold-init READ hook overwrites (restored `<tr>_M1` => `valuesold(1,:,:)`; `valuesold(2)` is unused at the
+      default tracer `AB_order==2`, restored only as `<tr>_M2` when `AB_order==3`)
+- [ ] **GATE:** folded into **Task 6.1** (Stage 6 byte-gate, NOT run here) — the velocity dump on the **first resumed
+      step** is where a wrong guard surfaces. The FUNCTIONAL np1/np2 2-segment gate DID exercise the guarded
+      first-resumed step cleanly (lfirst=.false. => AB2 over the restored `uv_rhsAB`; resumed run completed, exit 0),
+      but the `max|Δ|=0` velocity check is genuinely Task 6.1
 
-#### Task 5.3: WRITE hooks + cadence + `clock_finish` per write
+#### Task 5.3 ✅: WRITE hooks + cadence + `clock_finish` per write
 
 **Files:**
 - Modify: `src/drivers/fesom_lifecycle_native_mr.F90`
-- Modify: `src/io/mod_io_restart.F90`
+- Modify: `src/io/mod_io_restart.F90` (no change needed — `restart_init`/`restart_register_state`/`restart_write` already exist from Stages 3–4)
 
-- [ ] **REGISTER** (~`:725`): env-gate `FESOM3_RESTART=<dir>` → `RestartOutPath`; parse `&nml_restart`
-      (`restart_length`, `restart_length_unit`, `restart_keep`, `compressor`, `n_writers`) + `FESOM3_*` overrides;
-      register the field set
-- [ ] **WRITE** in-loop (after `step_oce`, ~`:802`): `if (restart_due(n)) call restart_write(...)`; end-of-run
-      (after loop ~`:848`): final `restart_write` (skip if the last step already wrote)
-- [ ] **`clock_finish` + `restart.latest` update after EVERY `restart_write`** (periodic AND final), mirroring
-      `io_restart.F90:573-578` — NOT only at end-of-run, else a periodic mid-run checkpoint leaves `.clock` at the
-      cold-start time → `r_restart` stays false next launch → the periodic checkpoint is silently ignored
-- [ ] `restart_due(n)` = **global** `is_due(restart_length_unit, restart_length, n)` — port FESOM2 `is_due` +
-      `annual_event`/`step_event` **fresh** (`event_due` is private + coupled to `t_means_clock`, not reusable)
-- [ ] **GATE:** a 2-segment run (seg 1: K steps → checkpoint + `.clock`; seg 2: resumes, reads, runs N−K) completes;
-      `.clock` chaining + `r_restart` fire; a PERIODIC mid-run checkpoint also yields a resumable `.clock`
+- [x] **REGISTER** (after the M9 output register `~:725`): env-gate `FESOM3_RESTART=<dir>` → `RestartOutPath`;
+      `restart_init(rst, mesh, partit)` (knobs `restart_keep`/`compressor`/`n_writers`/`chunk_*` enter via its own
+      `FESOM3_*` env reads) + `restart_register_state(rst, dyn, tracers, ice, mesh, mix_scheme=mix_scheme_nmb)`.
+      `restart_length`/`restart_length_unit` parsed via `FESOM3_RESTART_LENGTH`/`FESOM3_RESTART_UNIT` (env fallback per
+      the plan's "env fallbacks are fine if a namelist is heavy" allowance; default `1 'y'`). GATE-CONFIRMED:
+      `registered 25 prognostic fields` (full oce+ice incl. EVP sigma; tke correctly ABSENT since the production
+      lifecycle runs PP mixing `mix_scheme_nmb=2`, not 5 — the `ms==5` conditional fires as designed)
+- [x] **WRITE** in-loop (after the M9 output-eval block, post-`step_oce`): `if (do_restart) then if (restart_due(n))
+      call restart_write(rst, restart_dir, cp_year, cp_day, cp_tsec, globalstep=n)`; end-of-run (after the loop):
+      a final `restart_write` guarded by `.not. wrote_final` (normally skipped — `restart_due` already treats the last
+      step as due). Folder tag / `checkpoint.json` use `clock_finish`'s own year-rollover normalization
+      (`daynew==ndpyr .and. timenew==86400 → 0/1/yearold+1`) so the stamps match the chained `.clock`; `time_sec` =
+      sec-of-day = `timenew`
+- [x] **`clock_finish` after EVERY `restart_write`** — `if (mype==0) call clock_finish()` right after each
+      collective `restart_write` (periodic AND final), mirroring `io_restart.F90:573-578` (the `restart.latest` flip is
+      inside `restart_write`). GATE-CONFIRMED: seg-1 wrote a PERIODIC mid-run checkpoint at step 2 + the last-step
+      checkpoint at step 3, leaving `.clock` line-2 = `5400 1 1948` == the newest-checkpoint tag (resumable)
+- [x] `restart_due(n)` = **global** `is_due(restart_length_unit, restart_length, n)` — ported FESOM2 `is_due`
+      (`io_restart.F90:937`) + `annual_event`/`monthly_event`/`daily_event`/`hourly_event`/`step_event`
+      (`gen_events.F90`) **fresh** into a contained function (the M9 `event_due` is private + coupled to
+      `t_means_clock`); reads the host `restart_length`/`unit` + live `mod_clock` state; the LAST step is always due
+- [x] **GATE (FUNCTIONAL):** `tools/run_restart_lifecycle.sh` np 1 AND 2 (Intel dp, worktree build): the 2-segment
+      run (seg-1 cold 3 steps → 2 checkpoints + chained `.clock` + `restart.latest`; seg-2 fresh process resumes,
+      detects `r_restart`, `restart_read`s, runs 3 more, writes its own checkpoints) COMPLETES exit 0; `.clock`
+      chaining VERIFIED (`seg-1 .clock=5400 == checkpoint tag=5400 == seg-2 clock_init=5400`); `r_restart` fired;
+      the PERIODIC mid-run checkpoint (step 2) yields a resumable `.clock` (clock_finish ran on it too). All 9
+      assertions PASS at np 1 AND 2 (BYTE-exact split-vs-straight-through `max|Δ|=0` is Task 6.1, Stage 6)
 
 ### Stage 6 — Reproducibility gates
 
