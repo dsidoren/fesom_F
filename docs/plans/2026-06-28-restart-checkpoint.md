@@ -480,19 +480,24 @@ found by plan-review, verified against source).*
       floor (1e-12) — the FESOM2-inherent redundant-element roundoff documented in the Claim-scope refinement above.
       (Intel dp, worktree build. GNU sweep folded into Task 6.3.)
 
-#### Task 6.2: SECONDARY cross-partition gate — RESTORE round-trip (np=2 write → np=8 restore)
+#### Task 6.2 ✅: SECONDARY cross-partition gate — RESTORE round-trip (np=2 write → np=8 restore)
 
 **Files:**
 - Create: `tools/run_restart_gate_multirank.sh`
 
-- [ ] write checkpoint `C2` at np=2; a **fresh np=8 process** reads `C2` and **immediately re-writes** `C8`
-      (**zero steps**); assert `C2 ≡ C8` canonically (`zarr_diff.py`, `max|Δ|=0`)
-- [ ] this proves F-B = partition-independent **STORAGE + RESTORE**, NOT cross-np **evolution** byte-identity — which
+- [x] write checkpoint `C2` at np=2; a **fresh np=8 process** reads `C2` and **immediately re-writes** `C8`
+      (**zero steps**, via `FESOM3_NSTEPS=0` → loop skipped, end-of-run final write fires on the just-restored state);
+      assert `C2 ≡ C8` canonically (`zarr_diff --output-cmp --rel-floor 0`, STRICT `max|Δ|=0`)
+- [x] this proves F-B = partition-independent **STORAGE + RESTORE**, NOT cross-np **evolution** byte-identity — which
       is physically impossible in FESOM (SSH-CG `allreduce_sum` reduces in comm-size-dependent order, `oce_ssh_solve.F90`
       / `mod_halo.F90:25-30`; FESOM2 has the same property; every project byte-gate is same-np). The bit-identical
-      **resume** claim is **same-np** (Task 6.1); cross-np gives a physically-valid, not bit-identical, continuation
-- [ ] `env.sh` KNEM `single_copy_mechanism=none`
-- [ ] **GATE:** `run_restart_gate_multirank.sh` GREEN (`C2 ≡ C8`, `max|Δ|=0`)
+      **resume** claim is **same-np** (Task 6.1); cross-np gives a physically-valid, not bit-identical, continuation.
+      NB: with ZERO steps there is no order-dependent RHS, so even the 562 redundantly-owned elements round-trip
+      EXACTLY (np=8 reads canonical into every owner, re-dedups to the same canonical value) — hence STRICT
+      `max|Δ|=0`, no element-ownership floor needed here (contrast Task 6.1's np>1 evolution floor).
+- [x] `env.sh` KNEM `single_copy_mechanism=none` (`--mca btl_vader_single_copy_mechanism none` in the runner)
+- [x] **GATE:** `run_restart_gate_multirank.sh` GREEN — np=8 resumed (`r_restart`), `C2(np2) ≡ C8(np8)` `max|Δ|=0`
+      across ALL 27 stores incl. element u/v/urhs_AB/sigma + MP hbar/hnode (Intel dp, worktree build, 256-core node).
 
 #### Task 6.3: No-regression sweep + ctest
 
