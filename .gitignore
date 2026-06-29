@@ -31,3 +31,6 @@ __pycache__/
 
 # SLURM job stdout (perf/A-B runs land here in the repo root — always artifacts)
 slurm-*.out
+
+# Claude Code agent state (worktrees + local session files) — local only, never shared
+.claude/
