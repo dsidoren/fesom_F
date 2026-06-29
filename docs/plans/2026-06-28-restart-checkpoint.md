@@ -321,21 +321,43 @@ This is the milestone after M9 (Zarr output, tagged `m9`). It reuses the M9 Zarr
 ### Stage 4 — `mod_io_restart` READ path
 *The transpose of the write path; restores owned values then halo-exchanges to bit-exact full arrays.*
 
-#### Task 4.1: Per-field reader (`zarr_read_chunk` + `decomp_gather` + halo exchange) + safety check
+#### Task 4.1 ✅: Per-field reader (`zarr_read_chunk` + `decomp_gather` + halo exchange) + safety check
 
 **Files:**
 - Modify: `src/io/mod_io_restart.F90`
+- Create: `src/drivers/fesom_restartroundtrip.F90` (➕ the Task-4.1 GATE driver; mirrors `fesom_restartstate`'s
+      full-state setup + adds the in-process write→corrupt→read round-trip, comparing live vs reference over the
+      FULL local extent generically over the registry)
+- Create: `tools/run_restartroundtrip.sh` (➕ the gate runner; `F3`/`BUILD`/`RUN` overridable for worktree runs)
 
-- [ ] `restart_read`: resolve the folder via `restart.latest` under `RestartInPath`; read `checkpoint.json`;
-      **abort** only on missing/corrupt `restart.latest`/store; on `checkpoint.json` time ≠ clock **WARN and continue**
-      (a legitimate `dt`-change restart trips it — oracle `io_restart.F90:904-914` warns, does **not** abort)
-- [ ] `restart_read_field`: each writer `zarr_read_chunk` its owned chunks → `buf_writer` → `decomp_gather` →
-      `field_owned` → write back **into the live array** → halo exchange using the **same variant the field's in-step
-      consumer uses**: `exchange_nod` (nodes); `exchange_elem` for `uv` (`com_elem2D`, `mod_halo.F90:110`),
-      `exchange_elem_full` for element fields needing `eDim+eXDim` — a wrong variant leaves stale halo cells
-- [ ] node + element + 3D coverage; ice incl. sigma
-- [ ] **GATE:** in-process write→read round-trip reproduces every registered array `max|Δ|=0` over the **full local
-      extent (incl. eXDim)** — so a wrong exchange variant is caught — including halos after exchange
+- [x] `restart_read`: resolve the folder via `restart_resolve_latest` (`restart.latest` under the restart dir); read
+      `checkpoint.json` (minimal line parse of `year`/`day`/`time_sec`); **aborts** (`zarr_check`→`error stop`) only on
+      missing/unreadable `restart.latest`/incomplete checkpoint, or a missing/corrupt per-field store (inquires
+      `<store>/.zgroup`); on `checkpoint.json` time ≠ clock **WARNs and continues** (oracle `io_restart.F90:904-914`).
+      Signature `restart_read(R, restart_dir, mesh, partit, [clock_year, clock_day, clock_time_sec])`.
+- [x] `restart_read_field`: writers `zarr_read_chunk` their owned chunks `[D%w_first_chunk..D%w_last_chunk]`
+      (3-D loops the vertical chunks `[vc,c]` into a full-(cv,C) temp, keeping the valid rows) → `buf_writer` →
+      `decomp_gather` (the transpose of the write's `decomp_redistribute`) → owned values → written **into the live
+      array** (`f%p2d`/`f%p3d`; MP fields `f%pmp2d/pmp3d = real(buf,MP)`) → halo exchange via the field's recorded
+      variant. Signature `restart_read_field(R, f, store_path, partit)`. Read array handle built IDENTICALLY to the
+      writer (same dims/chunks/dtype/codec); 'none' **and** 'lz4' codecs round-trip.
+- [x] **halo-exchange variant per field class** (recorded in `t_restart_field%halo`, set at registration; matched to
+      the production consumer): `RESTART_HALO_NODE` = `exchange_nod` for **all node fields** (node halo is
+      owner-consistent at end-of-step — `oce_ale.F90`); `RESTART_HALO_ELEM` = `exchange_elem` (eDim `com_elem2D`) for
+      `u`/`v` (production `update_vel` `oce_ale.F90:140`; the full halo CORRUPTS the trajectory — documented there);
+      `RESTART_HALO_NONE` = no exchange for `uv_rhsAB`/EVP `sigma11/12/22` (their consumers `compute_vel_rhs`/
+      `stress2rhs` read owned-only, never halo-exchanged). MP node fields exchange via a WP staging copy. np=1 = no-op
+      (array wholly owned). Node + element + 3-D coverage; ice incl. sigma.
+- [x] **GATE:** in-process write→corrupt→read round-trip reproduces every registered array `max|Δ|=0` over the **full
+      local extent** — **PASS np=1 AND np=2** (Intel dp, worktree `build_intel_dp`): `fesom_restartroundtrip` fills
+      synthetic OWNED values, writes a checkpoint, halo-exchanges the originals (reference), CORRUPTS every live array
+      (restart-reconstructed region → wild sentinel `-9.99e30`; un-owned tail → 0 = fresh-allocate), `restart_read`s,
+      compares full local extent. AB2 = **26** fields, AB3 = **30** fields (+`urhs_AB3`/`vrhs_AB3`/`temp_M2`/`salt_M2`),
+      every field `max|Δ|=0` incl. the MP `hbar`/`hnode` at np 1 AND 2; lz4 codec round-trip also `max|Δ|=0`.
+      **Teeth-check:** with the read-path exchange disabled, the 21 halo-bearing fields (19 node + `u`/`v`) report
+      `max|Δ|=9.99e30` in the halo/eXDim region → ROUNDTRIP FAIL (exit 1), the 5 owned-only fields stay 0 — so a wrong
+      variant / gather bug is genuinely caught. No-regression: `run_restartsmoke.sh` + `run_restartstate.sh` +
+      `run_restartcrash.sh` still GREEN np 1/2 after the `restart_register_field` `halo`-arg addition.
 
 ### Stage 5 — Lifecycle wiring + cadence
 *Three hooks PLUS three restart-conditioning fixes the cold-start path currently hardwires. The conditioning is as

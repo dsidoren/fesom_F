@@ -54,6 +54,7 @@ module mod_io_restart
     use mod_io_decomp
     use mod_io_coords    ! shared lon/lat + _ARRAY_DIMENSIONS + UGRID-attr embedding (Task 2.1)
     use mod_io_posix     ! POSIX fs shims: rename/fsync/rmtree/listdir for atomic finalize + prune (Task 3.1)
+    use mod_halo,        only: exchange_nod, exchange_elem, exchange_elem_full   ! read-back halo recon (Task 4.1)
     implicit none
     private
 
@@ -63,9 +64,21 @@ module mod_io_restart
     public :: restart_init, restart_register_field, restart_register_field_mp, restart_register_state
     public :: restart_write_field, restart_write, restart_finalize
     public :: restart_resolve_latest
+    ! READ path (Stage 4, Task 4.1) + the per-field halo-exchange variant selectors
+    public :: restart_read, restart_read_field, restart_halo_exchange_all
+    public :: RESTART_HALO_NONE, RESTART_HALO_NODE, RESTART_HALO_ELEM, RESTART_HALO_ELEM_FULL
 
     integer, parameter :: RESTART_MAXF = 64
     integer, parameter :: RESTART_FORMAT_VERSION = 1
+
+    ! Halo-exchange variant a field's read-back uses to reconstruct its halo from owner values, matching
+    ! the variant the field's in-step consumer uses (a wrong variant leaves stale halo cells):
+    !   NONE       no exchange  — consumer reads owned-only (uv_rhsAB, EVP sigma); halo stays fresh-allocate
+    !   NODE       exchange_nod — every node field (node halo owner-consistent at end of step)
+    !   ELEM       exchange_elem      (eDim com_elem2D) — dyn%uv u/v (production update_vel; full CORRUPTS)
+    !   ELEM_FULL  exchange_elem_full (eDim+eXDim)      — element fields whose consumer needs the full halo
+    integer, parameter :: RESTART_HALO_NONE = 0, RESTART_HALO_NODE = 1, &
+                          RESTART_HALO_ELEM = 2, RESTART_HALO_ELEM_FULL = 3
 
     ! One registered prognostic field: its identity + a live POINTER to the model array it serializes.
     ! ndim=2 uses p2d (entity,); ndim=3 uses p3d (nlev, entity). on_full_levels picks nl levels ('nz')
@@ -75,6 +88,7 @@ module mod_io_restart
         character(len=32) :: units  = ''
         integer           :: entity = DECOMP_NODE      ! DECOMP_NODE | DECOMP_ELEM
         integer           :: ndim   = 2                ! 2 or 3
+        integer           :: halo   = RESTART_HALO_NONE ! read-back halo-exchange variant (Task 4.1)
         logical           :: on_full_levels = .false.  ! 3-D: nl levels (true) vs nl-1 layers (false)
         character(len=8)  :: dtype  = '<f8'            ! restart default = full precision
         integer           :: nlev   = 1                ! vertical size (3-D): nl or nl-1
@@ -165,7 +179,7 @@ contains
     ! 2-D field, p3d for a 3-D field (on_full_levels selects nl vs nl-1). entity = DECOMP_NODE/ELEM.
     ! The pointer is stored, not copied, so the writer reads the live values and the reader (Task 4.1)
     ! can write back into the same array. Caller passes a Fortran pointer (e.g. peta => dyn%eta_n).
-    subroutine restart_register_field(R, name, units, entity, p2d, p3d, on_full_levels, precision)
+    subroutine restart_register_field(R, name, units, entity, p2d, p3d, on_full_levels, precision, halo)
         type(t_restart),  intent(inout)        :: R
         character(len=*), intent(in)           :: name, units
         integer,          intent(in)           :: entity
@@ -173,8 +187,10 @@ contains
         real(WP), pointer, intent(in), optional :: p3d(:,:)
         logical,          intent(in), optional :: on_full_levels
         character(len=*), intent(in), optional :: precision
+        integer,          intent(in), optional :: halo     ! override the entity-default read-back variant
         integer :: k
         k = restart_new_field(R, name, units, entity, precision)
+        if (present(halo)) R%f(k)%halo = halo
         call restart_set_levels(R, k, present(p3d), on_full_levels)
         if (present(p3d)) then
             R%f(k)%p3d => p3d
@@ -219,6 +235,9 @@ contains
         R%f(k)%entity = entity
         R%f(k)%hdim   = 'nod2'; if (entity == DECOMP_ELEM) R%f(k)%hdim = 'elem'
         R%f(k)%dtype  = restart_dtype(precision)
+        ! default read-back halo: node -> exchange_nod; element -> none (overridable, e.g. u/v -> ELEM)
+        R%f(k)%halo   = RESTART_HALO_NONE
+        if (entity == DECOMP_NODE) R%f(k)%halo = RESTART_HALO_NODE
     end function restart_new_field
 
     ! Resolve the level kind (2-D vs 3-D, nl vs nl-1) for field k from the pointer-presence + on_full_levels.
@@ -280,8 +299,10 @@ contains
         q3 => mesh%hnode;      call restart_register_field_mp(R, 'hnode',     'm', DECOMP_NODE, pmp3d=q3)
 
         ! ---- ocean ELEMENT 3-D layers (nl-1): velocity + Adams-Bashforth history ----
-        p3 => dyn%uv(1,:,:);         call restart_register_field(R, 'u',       'm/s', DECOMP_ELEM, p3d=p3)
-        p3 => dyn%uv(2,:,:);         call restart_register_field(R, 'v',       'm/s', DECOMP_ELEM, p3d=p3)
+        ! u/v reconstruct over the eDim com_elem2D halo (production update_vel; full halo CORRUPTS the
+        ! trajectory — oce_ale.F90:140); uv_rhsAB is owned-only (compute_vel_rhs) => RESTART_HALO_NONE.
+        p3 => dyn%uv(1,:,:);         call restart_register_field(R, 'u',       'm/s', DECOMP_ELEM, p3d=p3, halo=RESTART_HALO_ELEM)
+        p3 => dyn%uv(2,:,:);         call restart_register_field(R, 'v',       'm/s', DECOMP_ELEM, p3d=p3, halo=RESTART_HALO_ELEM)
         p3 => dyn%uv_rhsAB(1,1,:,:); call restart_register_field(R, 'urhs_AB', 'm/s', DECOMP_ELEM, p3d=p3)
         p3 => dyn%uv_rhsAB(1,2,:,:); call restart_register_field(R, 'vrhs_AB', 'm/s', DECOMP_ELEM, p3d=p3)
         if (dyn%AB_order == 3) then
@@ -642,6 +663,218 @@ contains
         integer :: ierr
         if (R%mr) call MPI_Barrier(R%comm, ierr)
     end subroutine restart_finalize
+
+    ! ----------------------------------------------------------------- checkpoint READ (Stage 4, Task 4.1)
+    !
+    ! The exact INVERSE of the write path. For every registered field: writer ranks read their owned
+    ! canonical chunks (mirroring the write chunk loop), decomp_gather (the literal transpose of the
+    ! write's decomp_redistribute) pulls them back to the compute partition's owned entities, those are
+    ! written INTO the live model array's owned slots, and the halo is reconstructed by the SAME exchange
+    ! the field's in-step consumer uses. Owned values round-trip max|Δ|=0 (the gather is exact); halos
+    ! become owner-derived copies => the restored full array is bit-identical to a straight-through run
+    ! at the same instant. The store holds only canonical OWNED values, so partition-independence falls
+    ! out: a different np builds a different decomp plan over the SAME canonical chunks.
+
+    ! Restore the FULL prognostic state from the newest finalized checkpoint under restart_dir. ABORTS
+    ! (clear message) only if restart.latest is missing/unreadable, names an incomplete checkpoint, or a
+    ! registered field's store is missing/corrupt — exactly as clock_init aborts on a missing .clock. On
+    ! a checkpoint.json time that differs from the current clock it WARNs and CONTINUES (a legitimate
+    ! dt-change restart trips it; oracle io_restart.F90:904-914 warns, never aborts). mesh is accepted
+    ! for signature symmetry with the lifecycle (halo reconstruction needs only partit's com structures);
+    ! the optional clock args drive the time-vs-clock safety warning.
+    subroutine restart_read(R, restart_dir, mesh, partit, clock_year, clock_day, clock_time_sec)
+        type(t_restart),  intent(in), target  :: R
+        character(len=*), intent(in)           :: restart_dir
+        type(t_mesh),     intent(in)           :: mesh
+        type(t_partit),   intent(in)           :: partit
+        integer,          intent(in), optional :: clock_year, clock_day
+        real(real64),     intent(in), optional :: clock_time_sec
+        character(len=:), allocatable :: folder
+        logical :: ok, have_json
+        integer :: k, jyear, jday, ierr
+        real(real64) :: jtime
+        call restart_resolve_latest(restart_dir, folder, ok)
+        call zarr_check(ok, 'restart_read: restart.latest missing/unreadable or checkpoint incomplete under '// &
+                            trim(restart_dir))
+        if (R%mype == 0) write(*,'(a)') '[restart] reading checkpoint '//folder
+        ! time-vs-clock safety check (WARN, never abort)
+        if (present(clock_time_sec)) then
+            call read_checkpoint_json(folder//'/checkpoint.json', jyear, jday, jtime, have_json)
+            if (have_json .and. abs(jtime - clock_time_sec) > 0.0_real64 .and. R%mype == 0) then
+                write(*,'(a,es24.16,a,es24.16,a)') '[restart] WARN: checkpoint time_sec=', jtime, &
+                    ' differs from clock time_sec=', clock_time_sec, ' (continuing)'
+            end if
+        end if
+        ! restore + halo-reconstruct every field
+        do k = 1, R%nf
+            call restart_read_field(R, R%f(k), folder//'/'//trim(R%f(k)%name)//'.zarr', partit)
+        end do
+        if (R%mr) call MPI_Barrier(R%comm, ierr)
+    end subroutine restart_read
+
+    ! Read ONE field's snapshot store back into its live model array, then reconstruct its halo. WRITER
+    ! ranks read their owned canonical chunks ([w_first_chunk..w_last_chunk]; 3-D loops the vertical
+    ! chunks exactly like the writer); ALL ranks then decomp_gather the canonical buffer to owned values,
+    ! write them into the live array's owned slots (MP-source fields via a lossless WP->MP copy), and
+    ! finally halo-exchange (restart_halo_exchange_field) so the restored array matches a straight-through
+    ! run over the extent that variant refreshes.
+    subroutine restart_read_field(R, f, store_path, partit)
+        type(t_restart),       intent(in), target :: R
+        type(t_restart_field), intent(in)         :: f
+        character(len=*),      intent(in)         :: store_path
+        type(t_partit),        intent(in)         :: partit
+        type(t_io_decomp), pointer :: D
+        integer                    :: nO
+        type(t_zarr_store) :: store
+        type(t_zarr_array) :: a_data
+        real(WP), allocatable :: buf(:), buf3(:,:), bo(:), bo3(:,:), rdc(:,:)
+        integer :: c, lo, cv, nvc, vc, L0, cvn
+        logical :: ex
+        ! entity context (node vs element decomp + owned count)
+        if (f%entity == DECOMP_ELEM) then; D => R%De; nO = R%nElemO
+        else;                              D => R%Dn; nO = R%nNodO; end if
+        ! abort on a missing/corrupt store (mirrors clock_init's missing-.clock abort)
+        inquire(file=trim(store_path)//'/.zgroup', exist=ex)
+        call zarr_check(ex, 'restart_read: missing/corrupt store '//trim(store_path))
+        store%path = trim(store_path)
+        if (f%ndim == 2) then
+            ! data array (entity,) chunked (C); build the handle IDENTICALLY to the writer so chunk
+            ! paths + chunk byte sizes match exactly.
+            call zarr_array_init(a_data, trim(f%name), [D%N], [D%C], trim(f%dtype), &
+                                 has_fill=.false., codec=trim(R%compressor))
+            allocate(buf(max(1, D%w_nbuf)), bo(max(1, nO)))
+            do c = D%w_first_chunk, D%w_last_chunk                ! writers only (else empty range)
+                lo = (c - D%w_first_chunk)*D%C + 1
+                call zarr_read_chunk(store, a_data, [c], buf(lo:lo + D%C - 1))
+            end do
+            call decomp_gather(D, buf, bo)                        ! collective: canonical -> owned
+            if (f%mp_src) then
+                f%pmp2d(1:nO) = real(bo(1:nO), MP)               ! WP -> MP (lossless at WP>=MP)
+            else
+                f%p2d(1:nO) = bo(1:nO)
+            end if
+        else
+            ! data array (nlev, entity) chunked (cv, C)
+            cv = vchunk_eff(R%chunk_vert, max(1, f%nlev))
+            call zarr_array_init(a_data, trim(f%name), [f%nlev, D%N], [cv, D%C], trim(f%dtype), &
+                                 has_fill=.false., codec=trim(R%compressor))
+            allocate(buf3(f%nlev, max(1, D%w_nbuf)), bo3(f%nlev, max(1, nO)), rdc(cv, D%C))
+            nvc = (f%nlev + cv - 1)/cv
+            do c = D%w_first_chunk, D%w_last_chunk
+                lo = (c - D%w_first_chunk)*D%C + 1
+                do vc = 0, nvc - 1
+                    L0 = vc*cv; cvn = min(cv, f%nlev - L0)
+                    call zarr_read_chunk(store, a_data, [vc, c], rdc) ! reads the FULL (cv,C) chunk
+                    buf3(L0+1:L0+cvn, lo:lo + D%C - 1) = rdc(1:cvn, 1:D%C)  ! keep the valid rows
+                end do
+            end do
+            call decomp_gather(D, buf3, bo3)
+            if (f%mp_src) then
+                f%pmp3d(1:f%nlev, 1:nO) = real(bo3(1:f%nlev, 1:nO), MP)
+            else
+                f%p3d(1:f%nlev, 1:nO) = bo3(1:f%nlev, 1:nO)
+            end if
+        end if
+        ! reconstruct the halo with the field's chosen variant (no-op at np=1: no halo cells exist)
+        call restart_halo_exchange_field(f, partit)
+    end subroutine restart_read_field
+
+    ! Reconstruct field f's halo IN-PLACE with the exchange variant its in-step consumer uses, so the
+    ! restored array is bit-identical to a straight-through run over the extent that variant refreshes.
+    ! MP-source fields (mesh%hbar/hnode) exchange via a WP staging copy (exchange_* is WP-typed): copy
+    ! MP->WP, exchange, copy WP->MP (lossless at WP=real64>=MP). f is intent(in) but its POINTER targets
+    ! (the live arrays) are modified — allowed. At single rank there are no halo cells (return early).
+    subroutine restart_halo_exchange_field(f, partit)
+        type(t_restart_field), intent(in) :: f
+        type(t_partit),        intent(in) :: partit
+        real(WP), allocatable :: s2(:), s3(:,:)
+        integer :: n1, n2
+        if (f%halo == RESTART_HALO_NONE) return                  ! owned-only consumer: halo stays as-is
+        if (.not. is_multirank(partit)) return                   ! np=1: array is wholly owned
+        select case (f%halo)
+        case (RESTART_HALO_NODE)
+            if (f%mp_src) then
+                if (f%ndim == 2) then
+                    n1 = size(f%pmp2d); allocate(s2(n1)); s2 = real(f%pmp2d, WP)
+                    call exchange_nod(s2, partit);                     f%pmp2d = real(s2, MP)
+                else
+                    n1 = size(f%pmp3d,1); n2 = size(f%pmp3d,2); allocate(s3(n1,n2)); s3 = real(f%pmp3d, WP)
+                    call exchange_nod(s3, partit);                     f%pmp3d = real(s3, MP)
+                end if
+            else
+                if (f%ndim == 2) then; call exchange_nod(f%p2d, partit)
+                else;                  call exchange_nod(f%p3d, partit); end if
+            end if
+        case (RESTART_HALO_ELEM)        ! eDim com_elem2D (dyn%uv u/v); broadcast-only => per-component == blk
+            if (f%ndim == 2) then; call exchange_elem(f%p2d, partit)
+            else;                  call exchange_elem(f%p3d, partit); end if
+        case (RESTART_HALO_ELEM_FULL)   ! eDim+eXDim com_elem2D_full (rank-1 element fields only —
+            !                             exchange_elem_full has no (nlev,elem) rank-2 variant)
+            if (f%ndim == 2) then; call exchange_elem_full(f%p2d, partit)
+            else; call zarr_check(.false., 'restart: ELEM_FULL halo on a (nlev,elem) field is '// &
+                                           'unsupported (no rank-2 exchange_elem_full): '//trim(f%name)); end if
+        end select
+    end subroutine restart_halo_exchange_field
+
+    ! Reconstruct EVERY registered field's halo. Used by the read path's per-field loop indirectly, and
+    ! directly by the Task 4.1 round-trip gate to make its REFERENCE halos owner-derived with the exact
+    ! same logic the read path uses (so reference and read-back halos are built identically).
+    subroutine restart_halo_exchange_all(R, partit)
+        type(t_restart), intent(in) :: R
+        type(t_partit),  intent(in) :: partit
+        integer :: k
+        do k = 1, R%nf
+            call restart_halo_exchange_field(R%f(k), partit)
+        end do
+    end subroutine restart_halo_exchange_all
+
+    ! Minimal line-based reader for the manifest keys the safety check needs (year/day/time_sec) from the
+    ! plain document write_checkpoint_json emits (one "key": value per line). ok=.false. if unreadable.
+    ! Not a general JSON parser — only the keys we wrote.
+    subroutine read_checkpoint_json(path, year, day, time_sec, ok)
+        character(len=*), intent(in)  :: path
+        integer,          intent(out) :: year, day
+        real(real64),     intent(out) :: time_sec
+        logical,          intent(out) :: ok
+        integer :: u, ios
+        character(len=256) :: line
+        year = 0; day = 0; time_sec = 0.0_real64; ok = .false.
+        open(newunit=u, file=trim(path), status='old', action='read', form='formatted', iostat=ios)
+        if (ios /= 0) return
+        do
+            read(u, '(a)', iostat=ios) line
+            if (ios /= 0) exit
+            if (index(line, '"year"')     > 0) call json_value_int(line, year)
+            if (index(line, '"day"')      > 0) call json_value_int(line, day)
+            if (index(line, '"time_sec"') > 0) call json_value_real(line, time_sec)
+        end do
+        close(u)
+        ok = .true.
+    end subroutine read_checkpoint_json
+
+    subroutine json_value_int(line, v)
+        character(len=*), intent(in)  :: line
+        integer,          intent(out) :: v
+        character(len=64) :: s
+        integer :: p, ios
+        v = 0
+        p = index(line, ':'); if (p == 0) return
+        s = adjustl(line(p+1:))
+        p = index(s, ','); if (p > 0) s(p:) = ' '
+        read(s, *, iostat=ios) v
+    end subroutine json_value_int
+
+    subroutine json_value_real(line, v)
+        character(len=*), intent(in)  :: line
+        real(real64),     intent(out) :: v
+        character(len=64) :: s
+        integer :: p, ios
+        v = 0.0_real64
+        p = index(line, ':'); if (p == 0) return
+        s = adjustl(line(p+1:))
+        p = index(s, ','); if (p > 0) s(p:) = ' '
+        read(s, *, iostat=ios) v
+    end subroutine json_value_real
 
     ! ----------------------------------------------------------------- checkpoint.json (rank 0)
 
