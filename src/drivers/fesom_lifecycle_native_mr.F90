@@ -103,7 +103,12 @@ program fesom_lifecycle_native_mr
                                   restart_read, restart_finalize, restart_resolve_latest
     implicit none
 
-    real(kind=WP), parameter :: dt = 86400.0_WP / real(48, WP)   ! CORE2 dt = 1800 s
+    ! Model timestep, from step_per_day (env FESOM3_STEP_PER_DAY; default 48 => dt = 1800 s = 30 min,
+    ! the CORE2 namelist timestep). Set once in the env block below, BEFORE init_stiff_mat_ale and
+    ! ice_setup bake it in. Leaving the env unset reproduces the old parameter exactly, so every
+    ! byte-gate is unchanged.
+    integer                  :: spd, spd_env
+    real(kind=WP)            :: dt
 
     character(len=512) :: mesh_dir, ic_file, env, whichevp_str
     type(t_partit)        :: partit
@@ -206,6 +211,16 @@ program fesom_lifecycle_native_mr
     ! freshwater flux (use_virt_salt=.false., is_nonlinfs=1; mirror of the 1-rank M6a-3 wiring).
     call get_environment_variable('FESOM3_WHICH_ALE', env, length=env_len, status=ios)
     if (ios == 0 .and. env_len > 0) which_ALE = trim(env)
+    ! Timestep: FESOM3_STEP_PER_DAY steps per day (default 48 = 1800 s = 30 min, the CORE2
+    ! namelist timestep). A finer mesh needs a larger value (e.g. 96 => 900 s). dt must be
+    ! resolved HERE: init_stiff_mat_ale and ice_setup below capture it at setup time.
+    spd = 48
+    call get_environment_variable('FESOM3_STEP_PER_DAY', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) then
+        read(env, *, iostat=ios) spd_env
+        if (ios == 0 .and. spd_env > 0) spd = spd_env
+    end if
+    dt = 86400.0_WP / real(spd, WP)
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
@@ -243,6 +258,9 @@ program fesom_lifecycle_native_mr
     if (partit%mype == 0) &
         write(*,'(a,i0,a,i0,a,i0,a,i0)') 'fesom_lifecycle_native_mr: nod2D=', mesh%nod2D, &
             ' elem2D=', mesh%elem2D, ' nl=', nl, ' CW swaps=', nsw
+    if (partit%mype == 0) &
+        write(*,'(a,i0,a,f0.1,a)') 'fesom_lifecycle_native_mr: step_per_day=', spd, &
+            ' dt=', dt, ' s'
 
     !===========================================================================
     ! ALE depth/thickness state (linfs full cells; local sizes) — as fesom_lifecycle_mr.
@@ -563,8 +581,8 @@ program fesom_lifecycle_native_mr
     else
         forc_calendar = 'noleap';    include_fleapyear = .false.
     end if
-    step_per_day    = 48
-    cfg_dt          = dt              ! 86400/48 = 1800 s; clock + forcing_sbc_do read mod_config%dt
+    step_per_day    = spd
+    cfg_dt          = dt              ! 86400/spd (default 48 = 1800 s); clock + forcing_sbc_do read mod_config%dt
     run_length      = 2
     run_length_unit = 'y'
     call get_environment_variable('FESOM3_RUN_LENGTH', env, length=env_len, status=ios)
