@@ -417,7 +417,7 @@ contains
         type(t_partit), intent(in), optional  :: partit
         integer :: n, k, elem, nz, nl1, ul1
         integer :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: Tx, Ty, vd_flux(mesh%nl)
+        real(kind=WP) :: Tx, Ty, tvol, vd_flux(mesh%nl)
         real(kind=WP) :: zbar_n(mesh%nl), z_n(mesh%nl-1)
         real(kind=WP), allocatable :: tr_xynodes(:,:,:)
         real(kind=MP), dimension(:,:), pointer :: del_ttf
@@ -430,22 +430,41 @@ contains
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         allocate(tr_xynodes(2, mesh%nl-1, nNodL))
 
-        ! node-averaged element gradients (no halo exchange of tr_xynodes is needed)
+        ! Node-averaged element gradients (no halo exchange of tr_xynodes is needed).
+        !
+        ! This is an AVERAGE of the adjacent element gradients, so it must be normalised
+        ! by the area that actually contributed. FESOM2 wrote Tx/3/areasvol(nz,n), which
+        ! was the same thing only because areasvol was itself the depth-gathered sum over
+        ! exactly the wet elements. Under the FESOM3 vertex bottom areasvol is the FULL
+        ! prism area at every wet layer, so dividing by it would scale the gradient by
+        ! wet_area/full_area < 1 wherever some adjacent element is dry -- most deep
+        ! levels. Accumulate the contributing area instead, as compute_vel_nodes
+        ! (oce_ale.F90:84-89) and smooth_nod (oce_pressure_bv.F90:303-311) already do.
+        !
+        ! tvol is the same /3 median-dual share the old divisor carried, so for a fully
+        ! wet neighbourhood this reproduces the previous value.
         do n = 1, nNodO
             nl1 = mesh%nlevels_nod2D(n)-1
             ul1 = mesh%ulevels_nod2D(n)
             do nz = ul1, nl1
                 Tx = 0.0_WP
                 Ty = 0.0_WP
+                tvol = 0.0_WP
                 do k = 1, mesh%nod_in_elem2D_num(n)
                     elem = mesh%nod_in_elem2D(k,n)
                     if (nz <= (mesh%nlevels(elem)-1) .and. nz >= mesh%ulevels(elem)) then
+                        tvol = tvol + mesh%elem_area(elem)
                         Tx = Tx + tr_xy(1,nz,elem)*mesh%elem_area(elem)
                         Ty = Ty + tr_xy(2,nz,elem)*mesh%elem_area(elem)
                     end if
                 end do
-                tr_xynodes(1,nz,n) = Tx/3.0_WP/mesh%areasvol(nz,n)
-                tr_xynodes(2,nz,n) = Ty/3.0_WP/mesh%areasvol(nz,n)
+                if (tvol > 0.0_WP) then
+                    tr_xynodes(1,nz,n) = Tx/tvol
+                    tr_xynodes(2,nz,n) = Ty/tvol
+                else
+                    tr_xynodes(1,nz,n) = 0.0_WP
+                    tr_xynodes(2,nz,n) = 0.0_WP
+                end if
             end do
         end do
 

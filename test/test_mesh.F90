@@ -52,6 +52,19 @@ program test_mesh
     call check(all(mesh%nlevels >= 1 .and. mesh%nlevels <= mesh%nl), 'pi: nlevels in range')
     call check(adjacency_consistent(mesh), 'pi: nod_in_elem2D consistent')
     call check(all(mesh%area(1, 1:mesh%nod2D) > 0.0_MP), 'pi: surface control areas > 0')
+    ! FESOM3 bottom at vertices: the scalar cell is a straight prism, so its horizontal
+    ! area is the SAME at every wet layer of the column, and the entry at the bottom
+    ! interface level nlevels_nod2D(n) is a deliberate zero (closed bottom).
+    call check(area_depth_independent(mesh), 'pi: area constant over each wet column')
+    call check(area_zero_at_bottom_interface(mesh), 'pi: area == 0 at nlevels_nod2D')
+    call check(areasvol_inv_usable(mesh), 'pi: areasvol_inv finite and > 0 over wet range')
+    ! The node-average denominator used by tr_xynodes (oce_ale_tracer.F90) is the area of
+    ! the elements that ACTUALLY contribute at level nz, not areasvol. At the surface every
+    ! adjacent element is wet, so the two agree; deeper they must not, or the change from
+    ! /3/areasvol to /tvol would be a no-op and the average would be silently scaled by
+    ! wet_area/full_area.
+    call check(wet_area_matches_at_surface(mesh), 'pi: wet element area == areasvol at surface')
+    call check(wet_area_differs_at_depth(mesh),   'pi: wet element area < areasvol somewhere deep')
 
     ! ================= analytic (Cartesian) =================
     call generate_analytic_mesh(amesh, partit, nx=9, ny=7, nl=5, &
@@ -96,6 +109,90 @@ contains
             call trim_cyclic(b1); call trim_cyclic(c1)
             r = b1*c2 - b2*c1
             if (r > 1.0e-12_WP) no_positive_orientation = .false.
+        end do
+    end function
+
+    logical function area_depth_independent(m)
+        ! area(nz,n) must equal the surface value across the vertex's whole wet range.
+        type(t_mesh), intent(in) :: m
+        integer :: n, nz
+        area_depth_independent = .true.
+        do n = 1, m%nod2D
+            do nz = m%ulevels_nod2D(n), m%nlevels_nod2D(n)-1
+                if (m%area(nz,n) /= m%area(m%ulevels_nod2D(n), n)) then
+                    area_depth_independent = .false.; return
+                end if
+            end do
+        end do
+    end function
+
+    logical function area_zero_at_bottom_interface(m)
+        type(t_mesh), intent(in) :: m
+        integer :: n
+        area_zero_at_bottom_interface = .true.
+        do n = 1, m%nod2D
+            if (m%area(m%nlevels_nod2D(n), n) /= 0.0_MP) then
+                area_zero_at_bottom_interface = .false.; return
+            end if
+        end do
+    end function
+
+    logical function areasvol_inv_usable(m)
+        ! every wet scalar cell must have a usable reciprocal area (it divides every
+        ! tracer tendency), and it must be finite.
+        type(t_mesh), intent(in) :: m
+        integer :: n, nz
+        areasvol_inv_usable = .true.
+        do n = 1, m%nod2D
+            do nz = m%ulevels_nod2D(n), m%nlevels_nod2D(n)-1
+                if (.not. (m%areasvol_inv(nz,n) > 0.0_MP) .or. &
+                    .not. (abs(m%areasvol_inv(nz,n)) <= huge(1.0_MP))) then
+                    areasvol_inv_usable = .false.; return
+                end if
+            end do
+        end do
+    end function
+
+    real(kind=MP) function wet_elem_area(m, n, nz)
+        ! sum of elem_area over the adjacent elements wet at level nz (the tr_xynodes tvol)
+        type(t_mesh), intent(in) :: m
+        integer,      intent(in) :: n, nz
+        integer :: k, elem
+        wet_elem_area = 0.0_MP
+        do k = 1, m%nod_in_elem2D_num(n)
+            elem = m%nod_in_elem2D(k, n)
+            if (nz <= m%nlevels(elem)-1 .and. nz >= m%ulevels(elem)) &
+                wet_elem_area = wet_elem_area + m%elem_area(elem)
+        end do
+    end function
+
+    logical function wet_area_matches_at_surface(m)
+        type(t_mesh), intent(in) :: m
+        integer :: n, nz
+        real(kind=MP) :: tvol, ref
+        wet_area_matches_at_surface = .true.
+        do n = 1, m%nod2D
+            nz   = m%ulevels_nod2D(n)
+            tvol = wet_elem_area(m, n, nz) / 3.0_MP
+            ref  = m%areasvol(nz, n)
+            if (abs(tvol - ref) > 1.0e-9_MP*max(abs(ref), 1.0_MP)) then
+                wet_area_matches_at_surface = .false.; return
+            end if
+        end do
+    end function
+
+    logical function wet_area_differs_at_depth(m)
+        type(t_mesh), intent(in) :: m
+        integer :: n, nz
+        real(kind=MP) :: tvol
+        wet_area_differs_at_depth = .false.
+        do n = 1, m%nod2D
+            do nz = m%ulevels_nod2D(n), m%nlevels_nod2D(n)-1
+                tvol = wet_elem_area(m, n, nz) / 3.0_MP
+                if (tvol < m%areasvol(nz, n) * 0.999_MP) then
+                    wet_area_differs_at_depth = .true.; return
+                end if
+            end do
         end do
     end function
 

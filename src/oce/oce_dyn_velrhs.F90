@@ -292,7 +292,15 @@ contains
         end do
 
         !______________________________________________________________________
-        ! 3rd. divide the total nodal advection by the scalar control-volume area
+        ! 3rd. divide the total nodal advection by the scalar control-volume area.
+        !
+        ! FESOM3 bottom at vertices: this is a FLUX DIVERGENCE over the control volume
+        ! (wu/wv above accumulate UV*elem_area, i.e. a transport), not an average, so the
+        ! full prism area is the correct divisor and it is deliberately NOT renormalised
+        ! by the wet element area the way tr_xynodes is (oce_ale_tracer.F90). Under the
+        ! vertex bottom the CV is the full prism at every wet layer and the lateral walls
+        ! run through the velocity points, so a dry adjacent element contributes no flux
+        ! and needs no share of the area.
         do n = 1, nNodO
             nl1 = mesh%nlevels_nod2D(n) - 1
             ul1 = mesh%ulevels_nod2D(n)

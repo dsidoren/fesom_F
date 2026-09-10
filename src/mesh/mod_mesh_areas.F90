@@ -330,31 +330,52 @@ contains
     end subroutine compute_edge_geometry
 
     subroutine compute_node_areas(mesh, nNodO, nNodL, partit)
-        ! Control-volume area per level (oce_mesh.F90:2252-2351). area(nz,n) gathers
-        ! elem_area/nv from adjacent elements deep enough to reach level nz. The
-        ! accumulation runs on UNSCALED elem_area; then elem_area, area and areasvol
-        ! are all multiplied by r_earth^2 together (a single deferred scaling, as in
-        ! FESOM2 mesh_areas:2313-2315) so the per-node sums round identically. Owned
-        ! nodes are accumulated locally (the partition guarantees a complete owned
-        ! element-neighbourhood); the area halo exchange is deferred to M2.12b.
+        ! Control-volume area per level. The accumulation runs on UNSCALED elem_area;
+        ! then elem_area, area and areasvol are all multiplied by r_earth^2 together (a
+        ! single deferred scaling, as in FESOM2 mesh_areas:2313-2315) so the per-node
+        ! sums round identically. Owned nodes are accumulated locally (the partition
+        ! guarantees a complete owned element-neighbourhood); the halo exchange is done
+        ! by the caller.
+        !
+        ! FESOM3 BOTTOM AT VERTICES: the scalar cell of vertex n is a STRAIGHT PRISM --
+        ! one bottom level, and the FULL median-dual area at every wet layer. So area is
+        ! depth-independent over the vertex's wet range, which is the design note's
+        ! `area(1:myDim+eDim)`.
+        !
+        ! FESOM2 instead gathered elem_area/nv only from elements deep enough to reach
+        ! level nz (oce_mesh.F90:2252-2351), so the cell narrowed with depth as its
+        ! elements bottomed out. That is exactly what a vertex-defined bottom removes:
+        ! with nlevels(e) = min over the element's nodes, every adjacent element is at
+        ! most as deep as the node, and a depth-gathered area would shrink to the
+        ! deepest element's share alone rather than the cell's true area.
+        !
+        ! The array stays 2-D. The entry at nz = nlevels_nod2D(n) is deliberately left
+        ! ZERO: area(nz,n) doubles as the INTERFACE area at level nz, so a zero there is
+        ! a closed bottom. Nothing depends on it today -- cal_shortwave_rad already
+        ! forces sw_3d(nzmax,n)=0 (oce_shortwave_pene.F90:77-81) and the vertical
+        ! advection hard-zeroes its own bottom flux (oce_adv_tra_ver.F90:68-69, :120-121)
+        ! -- but it costs nothing and keeps the idiom available.
         type(t_mesh),   intent(inout) :: mesh
         integer,        intent(in)    :: nNodO, nNodL
         type(t_partit), intent(in)    :: partit
-        integer :: n, j, elem, nz, nzmin, nzmax
+        integer       :: n, j, elem, nz, nzmin, nzmax
+        real(kind=MP) :: acell
         allocate(mesh%area(mesh%nl, nNodL), mesh%area_inv(mesh%nl, nNodL))
         allocate(mesh%areasvol(mesh%nl, nNodL), mesh%areasvol_inv(mesh%nl, nNodL))
         mesh%area = 0.0_MP
         do n = 1, nNodO
+            ! full median-dual area: EVERY adjacent element, no depth test.
+            acell = 0.0_MP
             do j = 1, mesh%nod_in_elem2D_num(n)
                 elem = mesh%nod_in_elem2D(j, n)
-                nzmin = mesh%ulevels(elem)
-                nzmax = mesh%nlevels(elem) - 1
-                do nz = nzmin, nzmax
-                    ! literal 3.0_MP divisor (FESOM2 mesh_areas:2266; -no-prec-div
-                    ! arity caveat — see elem_center). Triangles only at the anchor.
-                    mesh%area(nz, n) = mesh%area(nz, n) &
-                        + mesh%elem_area(elem) / 3.0_MP
-                end do
+                ! literal 3.0_MP divisor (FESOM2 mesh_areas:2266; -no-prec-div
+                ! arity caveat — see elem_center). Triangles only at the anchor.
+                acell = acell + mesh%elem_area(elem) / 3.0_MP
+            end do
+            nzmin = mesh%ulevels_nod2D(n)
+            nzmax = mesh%nlevels_nod2D(n) - 1
+            do nz = nzmin, nzmax
+                mesh%area(nz, n) = acell
             end do
         end do
         ! non-cavity: "mid" cell area == upper-edge area
