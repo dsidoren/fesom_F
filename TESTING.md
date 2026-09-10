@@ -107,7 +107,7 @@ assembled step — data flow and dispatch — is byte-faithful, not just the ker
 
 ### 5. The `ctest` self-test suite
 
-`test/CMakeLists.txt` registers **21 ctest cases** across 13 test programs, run on the Intel and GNU
+`test/CMakeLists.txt` registers **26 ctest cases** across 15 test programs, run on the Intel and GNU
 builds:
 
 | Test | Ranks | Checks |
@@ -116,7 +116,9 @@ builds:
 | `test_partit` | 1, 2, 8 | partition invariants (owned nodes partition exactly; elements/edges boundary-redundant) |
 | `test_halo` | 1, 2, 8 | halo exchange identity; stale-halo corruption probe |
 | `test_dump` | 1 | the gid-keyed dump binary round-trip |
-| `test_mesh` | 1 | mesh infrastructure |
+| `test_mesh` | 1 | mesh infrastructure; depth-independent scalar-cell area |
+| `test_bottom` | 1, 2, 8 | the bottom-at-vertices contract (§6a); element bounds derived from vertex columns, edge interval, `hnode` column sums, `edge_len` units |
+| `fesom_conserve_zstar` | 1, 2 | conservation + no-leakage gate (§6a) |
 | `test_io_decomp` | 1, 2, 8 | output redistribution to writer subset, chunking, partial chunks |
 | `test_io_decomp_gather` | 1, 2 | the inverse (restart-read) redistribution |
 | `test_io_posix` | 1 | the `bind(C)` POSIX shims (rename/fsync/rmtree) |
@@ -133,6 +135,18 @@ cd build_intel_dp && ctest --output-on-failure
 
 ### 6. The byte-gate catalog
 
+> **Bottom at vertices retires the oracle-dependent gates.** FESOM_F now derives each element's
+> bottom from its vertex columns instead of reading `elvls.out`, which makes the model
+> deliberately different from FESOM2 — so every gate that compares against the **oracle** is no
+> longer meaningful and is retired: `run_step_gate.sh`, `run_geom_gate*.sh`,
+> `run_lifecycle_*_gate_*`, `run_advhor_gate*`, `run_pressure_gate*`, `run_ic*_gate*`,
+> `run_ice*_gate*`.
+>
+> The **self-consistency** gates are not oracle-dependent and remain the live net:
+> `run_conserve_pi.sh` (§6a), `run_restartroundtrip.sh`, `run_output_gate.sh` (partition
+> independence), the restart straight-vs-resume gates, and `run_bottom_audit.sh` (§6a).
+> The table below documents the gates as they were built; treat the oracle rows as history.
+
 Beyond the self-tests, byte-gates cover each subsystem as it was built. They live in `tools/` as
 `run_*_gate*.sh`; representative ones:
 
@@ -147,6 +161,45 @@ Beyond the self-tests, byte-gates cover each subsystem as it was built. They liv
 
 Each gate is `max|Δ| = 0` at its stated anchor (the multi-rank element floor of §1/§7 aside). The
 HANDOFF log lists the exact field/record counts per gate.
+
+### 6a. The bottom-at-vertices gates
+
+With the oracle gates retired, two FESOM_F-internal checks carry the numerical validation of the
+vertex-bottom scheme.
+
+**`tools/run_conserve_pi.sh` — conservation and no-leakage.** Runs `fesom_conserve` (an unforced
+20-step pi run) and checks four per-step invariants: total heat/salt content, `UV(:,nz,e) == 0` for
+`nz >= nlevels(e)` (no velocity in a partly-land prism), `helem == mean(hnode over elnodes)` across
+the element's full range, and finiteness of `UV`/`w`/`hnode`/tracers. Registered as ctest at np 1
+and 2.
+
+The conservation part gates on **zstar only**, at a relative tolerance of `1e-12`:
+
+| mode | np | heat drift | salt drift |
+|---|---|---|---|
+| zstar | 1 | `-5.97e-15` | `-1.04e-15` |
+| zstar | 2 | `+1.34e-14` | `-1.43e-14` |
+| linfs | 1 | `-2.17e-04` | `-1.09e-06` |
+
+**`linfs` is not tracer-conserving and cannot be gated on drift.** The linear free surface freezes
+`hnode`, so the surface vertical advective flux `-w*T*area` at `nzmin` (`oce_adv_tra_ver.F90:66`) is
+a real source/sink with no thickness change to balance it — the textbook reason `zlevel`/`zstar`
+exist. Its drift is also non-monotone, i.e. a free-surface adjustment transient. So `linfs` runs for
+the invariants only, with drift reported and never gated. `zstar` is the production mode, so the
+gate covers the path that matters.
+
+**`tools/run_bottom_audit.sh` — mesh delta.** Dumps the built geometry on pi and core2 and checks
+the element-bottom shift against numbers measured from the mesh files *before* any code was
+written, so the code answers back to the prediction rather than defining it:
+
+| mesh | elements changed | volume | stagnant bottom cells |
+|---|---|---|---|
+| pi | 651 / 5839 | `+1.55 %` | 0 |
+| core2 | 10465 / 244659 | `+0.38 %` | 0 |
+
+Zero stagnant bottom cells is a hard requirement, not a quality metric: three unguarded divides
+(`oce_ale.F90:88`, `oce_ale.F90:377`, `oce_pressure_bv.F90:310`) produce NaN without it, which is
+why the mesh setup also asserts it at runtime.
 
 ### 7. Multi-rank and partition independence
 

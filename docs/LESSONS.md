@@ -2244,3 +2244,57 @@ The transferable lessons:
   speed confirmation waits for `compute`.
 - **The permanent `mod_timer` breakdown (L-infra) is what made this legible** — it localizes the gap to one
   component and is directly comparable to F2's `rtime_*` (after the unit conversion).
+
+## L53 — Bottom at vertices: the min∘max asymmetry that decided the bathymetry, the "pure alias" that was a wetness guard, and the regression net that was a step counter
+
+**Context.** Moving the bottom from elements to vertices (`nlevels(e) = min` over the element's
+vertex columns, `elvls.out` no longer read). Four things bit, and the first three are the kind that
+look settled until you measure them.
+
+**1. `min ∘ max` and `min ∘ min` are not two flavours of the same choice.** The element reduction is
+fixed at `min` by the physics — velocity must vanish at a land corner — so it is not negotiable.
+That makes `blayer = max over adjacent elvls` compose as `min ∘ max`, a morphological **closing**
+where the dilation and erosion cancel; and `blayer = min over adjacent elvls` compose as `min ∘ min`,
+a **double erosion** with nothing to undo it. Measured on core2: `+0.38 %` volume, 0 stagnant cells
+versus `-9.27 %` volume, 3966 nodes whose deepest cell has no wet adjacent element and can only
+exchange vertically. The "conservative" option was the destructive one. **Always compose the two
+reductions on paper before picking the vertex rule, and measure both on the real mesh.**
+
+**2. "It becomes a pure alias" is a claim about values, so measure it.** `nlevels_nod2D_min` looked
+like it would collapse onto `nlevels_nod2D` under the vertex bottom — both mean "the range where the
+cell is a full prism", surely. On pi they differ by **mean -4.0 levels, min -30, at 88% of nodes**.
+Worse, at `oce_muscl_adv.F90:303` the array is not a range at all but the **only wetness guard** on
+```fortran
+edge_up_dn_grad(1:2,nz,edge) = tr_xy(1, nz, edge_up_dn_tri(:,edge))
+```
+which has no wetness test of its own and reads `tr_xy` — an `intent(out)` array written only over
+`ulevels(elem)..nlevels(elem)-1`, so uninitialised heap below an element's bottom. Substituting the
+node column would have read past the up/downwind triangles' bottoms on ~85% of pi's interior edges.
+**Before retiring an array as redundant, grep its consumers for the one that is using it as a guard
+rather than as a bound.**
+
+**3. A latent inequality flipped and took `helem` with it.** `update_thickness_ale` rebuilt `helem`
+one layer short of the element's bottom, which was safe because `nlevels_nod2D_min(n) <= nlevels(e)`
+meant no node ever stretched that layer. The vertex bottom reverses it to
+`nlevels(e) <= nlevels_nod2D(n)`, so the deepest layer *is* stretched at the element's deeper nodes
+while `helem` stays frozen — silently putting the SSH/continuity budget and the tracer volume out of
+agreement under zstar. **When a scheme inverts a producer, enumerate the inequalities that held
+between the old and new quantities; the loop bounds that quietly relied on them are the bugs.**
+
+**4. The regression net was a step counter.** `fesom_analytic` was written into the plan as "the
+single most valuable free check" — flat-bottom, so bit-identical across the change. It runs no
+physics: `model_step` is `model%nsteps_done = model%nsteps_done + 1` (`mod_step_oce`'s real step is
+`model_ocean_step`, which that driver never calls). Five tasks were going to gate on it. **Open the
+driver and read its step function before calling anything a regression net.**
+
+**What replaced it.** A conservation gate (`tools/run_conserve_pi.sh`) built and baselined *before*
+any behaviour changed, checking total heat/salt content plus three invariants per step. Building it
+first is what made every later task measurable — and it earned its keep immediately: reverting just
+the `helem` loop bound reproduces
+`helem VIOLATED elem 1 nz 18 helem/mean= 6.0000000000000000E+01 6.0000195317207513E+01`.
+
+**And one thing that is not a trap.** `linfs` drifts `-2.2e-04` in heat over 20 unforced pi steps
+and that is correct behaviour, not a leak: the linear free surface freezes `hnode`, so the surface
+vertical advective flux `-w*T*area` at `nzmin` (`oce_adv_tra_ver.F90:66`) is a real source/sink with
+no thickness change to balance it. The drift is non-monotone — a free-surface adjustment transient.
+Gate conservation on **zstar** (round-off, `~1e-15`) and run `linfs` for the invariants only.

@@ -6,9 +6,15 @@ FESOM2 configuration **bit-for-bit**; the surrounding "plumbing" (data types, th
 configuration, I/O) is redesigned for clarity and future flexibility. The guiding rule is
 *"first reproduce exactly, then optimize."*
 
-**Status:** v1 is feature-complete and byte-exact against FESOM2. Milestones M0–M10 are done and
-tagged (`m0`, `m1`, `m2-mvp`, `m3` … `m10`): dynamical core, sea-ice EVP/mEVP, GM/Redi, KPP, zstar
-ALE, TKE, multi-year production runs, Zarr output, and restart/checkpoint. The next milestone is open.
+**Status:** v1 is feature-complete. Milestones M0–M10 are done and tagged (`m0`, `m1`, `m2-mvp`,
+`m3` … `m10`): dynamical core, sea-ice EVP/mEVP, GM/Redi, KPP, zstar ALE, TKE, multi-year production
+runs, Zarr output, and restart/checkpoint. Through M10 the model was byte-exact against FESOM2.
+
+> **The bottom now sits at vertices**, which makes FESOM_F deliberately different from FESOM2 —
+> `nlvls.out` is authoritative and each element's bottom is derived as the shallowest of its three
+> vertices, so velocities touching topography vanish by construction. Bit-identity with the oracle
+> is therefore retired, and conservation, mesh-delta and self-consistency gates take its place.
+> See [IMPLEMENTATION.md](IMPLEMENTATION.md) §Bottom at vertices and [TESTING.md](TESTING.md) §6a.
 
 See **[IMPLEMENTATION.md](IMPLEMENTATION.md)** for the architecture and design decisions, and
 **[TESTING.md](TESTING.md)** for how it is validated against FESOM2 and how it scales.
@@ -76,12 +82,17 @@ Run the self-test suite on a login node:
 cd build_intel_dp && ctest --output-on-failure
 ```
 
-For a stronger check that FESOM_F still reproduces FESOM2 bit-for-bit, run one byte-gate — it drives
-the real FESOM2 timestep and the FESOM_F timestep on identical state and compares every value:
+For a stronger check, run the conservation gate — an unforced 20-step pi run that verifies total
+heat and salt content hold to round-off under `zstar`, that no velocity survives in a partly-land
+prism, and that the layer thicknesses stay consistent:
 
 ```bash
-bash tools/run_step_gate.sh        # expect: max|Δ| = 0
+bash tools/run_conserve_pi.sh      # expect: GATE OK
+bash tools/run_bottom_audit.sh     # mesh-delta audit on pi + core2
 ```
+
+The FESOM2 oracle byte-gates (`run_step_gate.sh` and friends) are retired — see
+[TESTING.md](TESTING.md) §6.
 
 What these checks mean — and the full validation story — is in [TESTING.md](TESTING.md).
 
@@ -153,9 +164,16 @@ rank count:
 
 ```
 core2/
-  nod2d.out  elem2d.out  aux3d.out  nlvls.out  elvls.out  edges.out  edge_tri.out  edgenum.out
+  nod2d.out  elem2d.out  aux3d.out  nlvls.out  edges.out  edge_tri.out  edgenum.out
+  elvls.out                                       # present but NOT read (see below)
   dist_1/  dist_2/  dist_8/  dist_864/   ...      # one per rank count (partition files)
 ```
+
+> **`elvls.out` is no longer read.** FESOM_F places the bottom at **vertices**: `nlvls.out`
+> (the per-vertex level count) is authoritative and each element's bottom is *derived* as the
+> shallowest of its three vertices, so an element is wet only where all three of its corners
+> are. The file can stay in the mesh directory; nothing opens it. See
+> [IMPLEMENTATION.md](IMPLEMENTATION.md) §Bottom at vertices.
 
 Point `FESOM3_MESH_DIR` at this directory. The driver **auto-selects `dist_<NP>/`** from the number
 of MPI ranks (`srun -n <NP>`); a single-rank run reads the global `nod2d.out`/`elem2d.out` directly.
