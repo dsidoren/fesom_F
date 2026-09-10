@@ -449,20 +449,61 @@ use. Say so in the report.
 - Create: `tools/run_conserve_pi.sh`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] create `fesom_conserve` from `src/drivers/fesom_lifecycle.F90` (already unforced — all
-      surface fluxes are 0 there), dropping the `mod_dump` hooks; duplication is the
-      established driver convention in this repo
-- [ ] per step, print total heat and salt content as
+- [x] create `fesom_conserve` from `src/drivers/fesom_lifecycle_mr.F90` (unforced, and
+      handles np>=1 unlike the 1-rank `fesom_lifecycle`), dropping the `mod_dump` hooks;
+      duplication is the established driver convention in this repo
+- [x] per step, print total heat and salt content as
       `sum over owned n, nz of tr(nz,n)*hnode(nz,n)*areasvol(nz,n)`, `allreduce_sum` at `npes>1`
-- [ ] add the **T10** assertion each step: `UV(:,nz,e) == 0` for all `nz >= nlevels(e)`,
+- [x] add the **T10** assertion each step: `UV(:,nz,e) == 0` for all `nz >= nlevels(e)`,
       aborting with the offending element id
-- [ ] add a finiteness sweep: abort on any non-finite value in `UV`, `Wvel`, `hnode`, `tr`
-- [ ] `tools/run_conserve_pi.sh`: ~20 steps on pi, fail if relative drift of either content
-      exceeds ~1e-13; support `FESOM3_WHICH_ALE` so it can be run for `linfs` **and** `zstar`
-- [ ] register as a ctest at np 1 and np 2
-- [ ] **run it now, on unmodified code, for both `linfs` and `zstar`, and record the baseline
-      drift numbers in this plan** — every later task is measured against them
-- [ ] run tests: `ctest --output-on-failure`
+- [x] add the `helem(nz,e) == sum(hnode(nz,elnodes))/3` and `zbar_e_bot(e) == zbar(nlevels(e))`
+      invariants over the full element range (moved here from Task 4 so the baseline covers them)
+- [x] add a finiteness sweep: abort on any non-finite value in `UV`, `w`, `hnode`, `tr`
+- [x] add `FESOM3_WHICH_ALE` support and `is_nonlinfs = merge(1,0, which_ALE/='linfs')`
+- [x] enforce the tolerance **in the driver** via `FESOM3_CONSERVE_TOL` rather than parsing
+      output in shell — makes the ctest registration trivial
+- [x] `tools/run_conserve_pi.sh`: 20 steps on pi, zstar at np 1 and 2 plus linfs at np 1
+- [x] register as a ctest at np 1 and np 2 (zstar only — see the finding below)
+- [x] **run on unmodified code and record the baseline**
+
+#### ⚠️ Finding: linfs is NOT conservative, so it cannot be gated on drift
+
+Revision 2 assumed both ALE modes would conserve to round-off. Measured on pi, 20 steps
+from the phc3.0 IC, before any bottom change:
+
+```
+zstar  np=1   heat -4.8721936444146653E-15   salt -1.6556314290872313E-14
+zstar  np=2   heat  0.0000000000000000E+00   salt -7.8024008163121374E-15
+linfs  np=1   heat -2.2486275162863836E-04   salt -1.1970160309106803E-06
+```
+
+`linfs` drift is four orders of magnitude too large to be round-off, and it is
+**non-monotone** (heat falls to step 16 then recovers) — a free-surface adjustment
+transient, not a leak. The cause is structural: the linear free surface freezes `hnode`,
+so the surface vertical advective flux `-w*T*area` at `nzmin`
+(`oce_adv_tra_ver.F90:66`) is a real source/sink with no thickness change to balance it.
+That is the textbook reason `zlevel`/`zstar` exist, and it is not something this patch can
+or should fix.
+
+Consequences for the plan:
+
+- **zstar is the conservation gate**, at `TOL=1e-12` (about two orders of headroom over the
+  measured baseline). It must stay green through every remaining task — conservation has to
+  hold both before and after the bottom change, so this is a genuine cross-task invariant
+  and does not need a stored reference value.
+- **linfs runs for the invariants only** (T10, `helem`, `zbar_e_bot`, finiteness). Its drift
+  is reported, never gated.
+- zstar is also the mode the user's production config uses, so the gate covers the path that
+  matters.
+
+Note: np=1 and np=2 totals differ by ~5e-6 relative (`4.62378995e18` vs `4.62381222e18`).
+That is a partition difference in the IC interpolation, not a conservation defect — each
+rank count conserves within itself.
+
+#### Baseline result
+
+All four invariants pass on unmodified code at both rank counts and both ALE modes.
+`ctest` 23/23 (the two new gates add ~3 s).
 
 ### Task 3: Depth-independent scalar-cell area
 
