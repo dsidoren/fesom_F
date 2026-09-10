@@ -295,25 +295,42 @@ contains
     end subroutine compute_gradient_sca
 
     subroutine compute_edge_geometry(mesh, nEdgeO, center_x, center_y)
-        ! edge_dxdy (along-edge, radians) + edge_cross_dxdy (edge-center to elem
-        ! centers, metres). oce_mesh.F90:2534-2573. Uses the precomputed (and, at
-        ! npes>1, halo-exchanged) element centers so an owned edge with a halo (eDim)
-        ! neighbour element resolves its center without elem_center on a halo element.
+        ! edge_dxdy (along-edge) + edge_len + edge_cross_dxdy (edge-center to elem
+        ! centers). ALL THREE IN METRES. Uses the precomputed (and, at npes>1,
+        ! halo-exchanged) element centers so an owned edge with a halo (eDim) neighbour
+        ! element resolves its center without elem_center on a halo element.
+        !
+        ! R7 (FESOM3): FESOM2 stored edge_dxdy in RADIAN measure and multiplied by
+        ! r_earth * mean(elem_cos over the edge's elements) at each point of use --
+        ! oce_adv_tra_hor.F90 computed exactly that `a` inline. FESOM3 folds the factor in
+        ! here, so edge_dxdy is a physical length and the consumers just use it. The mean
+        ! cosine is over the two elements adjacent to the edge, or the one available at a
+        ! boundary edge, which is why the two loops are merged: the radian pass had no
+        ! el1/el2 in hand.
+        !
+        ! No `cartesian` special case is needed: that mode sets elem_cos = 1 while still
+        ! scaling everything else by r_earth, so the same expression is consistent.
         type(t_mesh),  intent(inout) :: mesh
         integer,       intent(in)    :: nEdgeO
         real(kind=WP), intent(in)    :: center_x(:), center_y(:)
         integer :: n, el1, el2
-        real(kind=WP) :: a1, a2, ecx, ecy, b1, b2
+        real(kind=WP) :: a1, a2, ecx, ecy, b1, b2, cosm
         allocate(mesh%edge_dxdy(2, nEdgeO), mesh%edge_cross_dxdy(4, nEdgeO))
-        do n = 1, nEdgeO
-            a1 = mesh%coord_nod2D(1, mesh%edges(2, n)) - mesh%coord_nod2D(1, mesh%edges(1, n))
-            a2 = mesh%coord_nod2D(2, mesh%edges(2, n)) - mesh%coord_nod2D(2, mesh%edges(1, n))
-            call trim_cyclic(a1)
-            mesh%edge_dxdy(1, n) = a1; mesh%edge_dxdy(2, n) = a2
-        end do
+        allocate(mesh%edge_len(nEdgeO))
         do n = 1, nEdgeO
             call edge_center(mesh, n, ecx, ecy)
             el1 = mesh%edge_tri(1, n); el2 = mesh%edge_tri(2, n)
+
+            ! along-edge separation, in metres
+            a1 = mesh%coord_nod2D(1, mesh%edges(2, n)) - mesh%coord_nod2D(1, mesh%edges(1, n))
+            a2 = mesh%coord_nod2D(2, mesh%edges(2, n)) - mesh%coord_nod2D(2, mesh%edges(1, n))
+            call trim_cyclic(a1)
+            cosm = mesh%elem_cos(el1)
+            if (el2 > 0) cosm = 0.5_WP*(cosm + mesh%elem_cos(el2))
+            mesh%edge_dxdy(1, n) = a1 * cosm * r_earth                ! [m]
+            mesh%edge_dxdy(2, n) = a2 * r_earth                       ! [m]
+            mesh%edge_len(n)     = sqrt(real(mesh%edge_dxdy(1,n),WP)**2 &
+                                      + real(mesh%edge_dxdy(2,n),WP)**2)   ! [m]
             b1 = center_x(el1) - ecx; b2 = center_y(el1) - ecy; call trim_cyclic(b1)
             b1 = b1 * mesh%elem_cos(el1)
             mesh%edge_cross_dxdy(1, n) = b1 * r_earth

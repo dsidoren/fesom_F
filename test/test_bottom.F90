@@ -12,12 +12,14 @@ program test_bottom
     ! halo, which is the part elem2D_nodes cannot supply because it is owned-only.
     use mpi
     use mod_precision,     only: WP, MP
+    use mod_constants,     only: r_earth
     use mod_mesh,          only: t_mesh
     use mod_partit,        only: t_partit
     use mod_partitioning,  only: par_init, par_ex, set_partition
     use mod_mesh_read,     only: read_mesh
     use mod_mesh_areas,    only: compute_geometry
     use mod_mesh_analytic, only: generate_analytic_mesh
+    use mod_mesh_rotate,   only: trim_cyclic
     implicit none
 
     character(len=512) :: mesh_dir
@@ -56,6 +58,8 @@ program test_bottom
     call check(hnode_column_sum(mesh, nNodO),        'T6: sum(hnode) == column depth, hnode >= 0')
     call check(zbar_e_bot_derived(mesh, nElemO),     'T9: zbar_e_bot(e) == zbar(nlevels(e))')
     call check(sloping_triangle(mesh, nElemO),      'T2: sloping triangle takes the shallowest vertex')
+    call check(edge_len_is_metres(mesh),            'T7: edge_len matches haversine, edge_dxdy metre-scale')
+    call check(edge_dxdy_fold_exact(mesh),          'T7: edge_dxdy == radian value * r_earth * mean(elem_cos)')
 
     if (partit%npes > 1) then
         ! The halo derivation. elem2D_nodes is owned-only, so halo nlevels can only come
@@ -141,6 +145,84 @@ contains
             (m%nlevels(found) == min(m%nlevels_nod2D(n1), min(m%nlevels_nod2D(n2), m%nlevels_nod2D(n3)))) &
             .and. (m%ulevels(found) == 1) &
             .and. (m%elem_depth(found) == m%zbar(m%nlevels(found)))
+    end function
+
+    logical function edge_len_is_metres(m)
+        ! T7 (R7). edge_dxdy is now stored in PHYSICAL measure and edge_len is the edge
+        ! length in metres. Two independent checks:
+        !   (a) magnitudes are metre-scale, not radian-scale. A radian-measure edge on pi
+        !       is O(1e-2); in metres it is O(1e4-1e5). Anything below 1 m would mean the
+        !       r_earth*cos factor never got folded in.
+        !   (b) edge_len agrees with a haversine great-circle distance between the edge's
+        !       two GEOGRAPHIC vertices, computed here from scratch. The two differ by the
+        !       flat-earth approximation and by edge_dxdy's mean-cosine (evaluated at the
+        !       adjacent element centres, not at the edge), so the tolerance is loose --
+        !       but a missing or doubled r_earth is a factor of 6.4e6 or 2, not 20%.
+        type(t_mesh), intent(in) :: m
+        integer :: ed, n1, n2, nedge, nbad
+        real(kind=WP) :: lon1, lat1, lon2, lat2, dlon, dlat, hav, dist, rel, worst
+        edge_len_is_metres = .true.
+        nedge = size(m%edge_len)
+        if (nedge <= 0) then; edge_len_is_metres = .false.; return; end if
+        if (minval(m%edge_len) <= 1.0_MP) then
+            write(*,'(a,es12.4)') '  edge_len min is not metre-scale: ', minval(m%edge_len)
+            edge_len_is_metres = .false.; return
+        end if
+        if (maxval(abs(m%edge_dxdy)) < 1.0_MP) then
+            write(*,'(a,es12.4)') '  edge_dxdy still radian-scale: ', maxval(abs(m%edge_dxdy))
+            edge_len_is_metres = .false.; return
+        end if
+        nbad = 0; worst = 0.0_WP
+        do ed = 1, nedge
+            n1 = m%edges(1, ed); n2 = m%edges(2, ed)
+            if (n1 <= 0 .or. n2 <= 0) cycle
+            lon1 = real(m%geo_coord_nod2D(1, n1), WP); lat1 = real(m%geo_coord_nod2D(2, n1), WP)
+            lon2 = real(m%geo_coord_nod2D(1, n2), WP); lat2 = real(m%geo_coord_nod2D(2, n2), WP)
+            dlon = lon2 - lon1; dlat = lat2 - lat1
+            hav  = sin(dlat/2.0_WP)**2 + cos(lat1)*cos(lat2)*sin(dlon/2.0_WP)**2
+            dist = 2.0_WP*r_earth*asin(min(1.0_WP, sqrt(max(hav, 0.0_WP))))
+            if (dist <= 0.0_WP) cycle
+            rel = abs(real(m%edge_len(ed), WP) - dist)/dist
+            if (rel > worst) worst = rel
+            if (rel > 0.2_WP) nbad = nbad + 1
+        end do
+        write(*,'(a,es12.4,a,i0)') '  T7: worst |edge_len-haversine|/haversine = ', worst, &
+            '   edges over 20%: ', nbad
+        if (nbad > 0) edge_len_is_metres = .false.
+    end function
+
+    logical function edge_dxdy_fold_exact(m)
+        ! T7, the exact fold. R7 moved r_earth*mean(elem_cos) out of oce_adv_tra_hor's
+        ! inline `a` and into edge_dxdy. Recompute the FESOM2 radian value from the node
+        ! coordinates and require the stored array to be that value times the factor,
+        ! with the mean taken over BOTH adjacent elements interior and over the single
+        ! one at a boundary edge. This is what conservation cannot catch: a wrong metric
+        ! factor changes the MUSCL reconstruction without breaking any tracer budget.
+        type(t_mesh), intent(in) :: m
+        integer :: ed, el1, el2, nedge
+        real(kind=WP) :: a1, a2, cosm, wantx, wanty, rel, worst
+        logical :: bad
+        edge_dxdy_fold_exact = .true.
+        worst = 0.0_WP; bad = .false.
+        nedge = size(m%edge_len)
+        do ed = 1, nedge
+            if (m%edges(1,ed) <= 0 .or. m%edges(2,ed) <= 0) cycle
+            a1 = real(m%coord_nod2D(1, m%edges(2,ed)) - m%coord_nod2D(1, m%edges(1,ed)), WP)
+            a2 = real(m%coord_nod2D(2, m%edges(2,ed)) - m%coord_nod2D(2, m%edges(1,ed)), WP)
+            call trim_cyclic(a1)
+            el1 = m%edge_tri(1, ed); el2 = m%edge_tri(2, ed)
+            if (el1 < 1) cycle
+            cosm = real(m%elem_cos(el1), WP)
+            if (el2 > 0) cosm = 0.5_WP*(cosm + real(m%elem_cos(el2), WP))
+            wantx = a1 * cosm * r_earth
+            wanty = a2 * r_earth
+            rel = max(abs(real(m%edge_dxdy(1,ed),WP) - wantx)/max(abs(wantx), 1.0_WP), &
+                      abs(real(m%edge_dxdy(2,ed),WP) - wanty)/max(abs(wanty), 1.0_WP))
+            if (rel > worst) worst = rel
+            if (rel > 1.0e-12_WP) bad = .true.
+        end do
+        write(*,'(a,es12.4)') '  T7: worst relative deviation from the folded factor = ', worst
+        if (bad) edge_dxdy_fold_exact = .false.
     end function
 
     !-------------------------------------------------------------------------

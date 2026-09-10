@@ -39,7 +39,7 @@ contains
         logical, optional, intent(in) :: o_init_zero
         type(t_partit), intent(in), optional :: partit
         logical       :: l_init_zero
-        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, a, vflux
+        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
         integer       :: nNodO, nNodL, nEdgeO, nElemO
 
@@ -61,14 +61,12 @@ contains
             nu1    = mesh%ulevels(el(1))
             deltaX1 = mesh%edge_cross_dxdy(1, edge)
             deltaY1 = mesh%edge_cross_dxdy(2, edge)
-            a = r_earth * mesh%elem_cos(el(1))
             nl2 = 0; nu2 = 0
             if (el(2) > 0) then
                 deltaX2 = mesh%edge_cross_dxdy(3, edge)
                 deltaY2 = mesh%edge_cross_dxdy(4, edge)
                 nl2 = mesh%nlevels(el(2)) - 1
                 nu2 = mesh%ulevels(el(2))
-                a = 0.5_WP * (a + r_earth * mesh%elem_cos(el(2)))
             end if
             nl12 = min(nl1, nl2)
             nu12 = max(nu1, nu2)
@@ -128,7 +126,7 @@ contains
         logical, optional, intent(in) :: o_init_zero
         type(t_partit), intent(in), optional :: partit
         logical       :: l_init_zero
-        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, a, vflux
+        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
         integer       :: nNodO, nNodL, nEdgeO, nElemO
 
@@ -148,14 +146,12 @@ contains
             nu1    = mesh%ulevels(el(1))
             deltaX1 = mesh%edge_cross_dxdy(1, edge)
             deltaY1 = mesh%edge_cross_dxdy(2, edge)
-            a = r_earth * mesh%elem_cos(el(1))
             nl2 = 0; nu2 = 0
             if (el(2) > 0) then
                 deltaX2 = mesh%edge_cross_dxdy(3, edge)
                 deltaY2 = mesh%edge_cross_dxdy(4, edge)
                 nl2 = mesh%nlevels(el(2)) - 1
                 nu2 = mesh%ulevels(el(2))
-                a = 0.5_WP * (a + r_earth * mesh%elem_cos(el(2)))
             end if
             nl12 = min(nl1, nl2)
             nu12 = max(nu1, nu2)
@@ -200,12 +196,12 @@ contains
             real(kind=WP) :: Tmean1, Tmean2, cHO
             Tmean2 = ttf(nz, enodes(2)) - &
                      (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
-                      mesh%edge_dxdy(1,edge)*a*edge_up_dn_grad(2,nz,edge) + &
-                      mesh%edge_dxdy(2,edge)*r_earth*edge_up_dn_grad(4,nz,edge))/6.0_WP*clo2
+                      mesh%edge_dxdy(1,edge)*edge_up_dn_grad(2,nz,edge) + &
+                      mesh%edge_dxdy(2,edge)*edge_up_dn_grad(4,nz,edge))/6.0_WP*clo2
             Tmean1 = ttf(nz, enodes(1)) + &
                      (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
-                      mesh%edge_dxdy(1,edge)*a*edge_up_dn_grad(1,nz,edge) + &
-                      mesh%edge_dxdy(2,edge)*r_earth*edge_up_dn_grad(3,nz,edge))/6.0_WP*clo1
+                      mesh%edge_dxdy(1,edge)*edge_up_dn_grad(1,nz,edge) + &
+                      mesh%edge_dxdy(2,edge)*edge_up_dn_grad(3,nz,edge))/6.0_WP*clo1
             cHO = (vflux+abs(vflux))*Tmean1 + (vflux-abs(vflux))*Tmean2
             flux(nz,edge) = -0.5_WP*(1.0_WP-num_ord)*cHO - vflux*num_ord*0.5_WP*(Tmean1+Tmean2) - flux(nz,edge)
         end subroutine flux_ho
@@ -226,7 +222,7 @@ contains
         logical, optional, intent(in) :: o_init_zero
         type(t_partit), intent(in), optional :: partit
         logical       :: l_init_zero
-        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, a, vflux
+        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
         integer       :: nNodO, nNodL, nEdgeO, nElemO
 
@@ -246,14 +242,12 @@ contains
             nu1    = mesh%ulevels(el(1))
             deltaX1 = mesh%edge_cross_dxdy(1, edge)
             deltaY1 = mesh%edge_cross_dxdy(2, edge)
-            a = r_earth * mesh%elem_cos(el(1))
             nl2 = 0; nu2 = 0
             if (el(2) > 0) then
                 deltaX2 = mesh%edge_cross_dxdy(3, edge)
                 deltaY2 = mesh%edge_cross_dxdy(4, edge)
                 nl2 = mesh%nlevels(el(2)) - 1
                 nu2 = mesh%ulevels(el(2))
-                a = 0.5_WP * (a + r_earth * mesh%elem_cos(el(2)))
             end if
             nl12 = min(nl1, nl2)
             nu12 = max(nu1, nu2)
@@ -294,12 +288,12 @@ contains
             real(kind=WP) :: Tmean1, Tmean2, cHO
             Tmean2 = ttf(nz, enodes(2)) - &
                      (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
-                      mesh%edge_dxdy(1,edge)*a*edge_up_dn_grad(2,nz,edge) + &
-                      mesh%edge_dxdy(2,edge)*r_earth*edge_up_dn_grad(4,nz,edge))/6.0_WP
+                      mesh%edge_dxdy(1,edge)*edge_up_dn_grad(2,nz,edge) + &
+                      mesh%edge_dxdy(2,edge)*edge_up_dn_grad(4,nz,edge))/6.0_WP
             Tmean1 = ttf(nz, enodes(1)) + &
                      (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
-                      mesh%edge_dxdy(1,edge)*a*edge_up_dn_grad(1,nz,edge) + &
-                      mesh%edge_dxdy(2,edge)*r_earth*edge_up_dn_grad(3,nz,edge))/6.0_WP
+                      mesh%edge_dxdy(1,edge)*edge_up_dn_grad(1,nz,edge) + &
+                      mesh%edge_dxdy(2,edge)*edge_up_dn_grad(3,nz,edge))/6.0_WP
             cHO = (vflux+abs(vflux))*Tmean1 + (vflux-abs(vflux))*Tmean2
             flux(nz,edge) = -0.5_WP*(1.0_WP-num_ord)*cHO - vflux*num_ord*0.5_WP*(Tmean1+Tmean2) - flux(nz,edge)
         end subroutine flux_ho

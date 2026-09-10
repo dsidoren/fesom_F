@@ -56,8 +56,13 @@ module mod_mesh
 
         ! ---- geometry ----
         real(kind=MP), allocatable, dimension(:)   :: elem_area
-        real(kind=MP), allocatable, dimension(:,:) :: edge_dxdy
-        real(kind=MP), allocatable, dimension(:,:) :: edge_cross_dxdy
+        ! R7 (FESOM3): edge_dxdy is in PHYSICAL measure, METRES -- FESOM2 stored radians
+        ! and applied r_earth*mean(elem_cos) at each point of use. edge_len is the edge
+        ! length in METRES, sqrt(edge_dxdy(1)^2 + edge_dxdy(2)^2). edge_cross_dxdy was
+        ! already in metres. See compute_edge_geometry.
+        real(kind=MP), allocatable, dimension(:,:) :: edge_dxdy         ! (2,edge2D) [m]
+        real(kind=MP), allocatable, dimension(:)   :: edge_len          ! (edge2D)   [m]
+        real(kind=MP), allocatable, dimension(:,:) :: edge_cross_dxdy   ! (4,edge2D) [m]
         real(kind=MP), allocatable, dimension(:)   :: elem_cos
         real(kind=MP), allocatable, dimension(:)   :: metric_factor
         real(kind=MP), allocatable, dimension(:,:) :: x_corners, y_corners
@@ -176,6 +181,7 @@ contains
         call write_bin_array(mesh%nod_in_elem2D_num,  unit, iostat, iomsg)
         call write_bin_array(mesh%elem_area,          unit, iostat, iomsg)
         call write_bin_array(mesh%edge_dxdy,          unit, iostat, iomsg)
+        call write_bin_array(mesh%edge_len,           unit, iostat, iomsg)
         call write_bin_array(mesh%edge_cross_dxdy,    unit, iostat, iomsg)
         call write_bin_array(mesh%elem_cos,           unit, iostat, iomsg)
         call write_bin_array(mesh%metric_factor,      unit, iostat, iomsg)
@@ -242,6 +248,7 @@ contains
         call read_bin_array(mesh%nod_in_elem2D_num,  unit, iostat, iomsg)
         call read_bin_array(mesh%elem_area,          unit, iostat, iomsg)
         call read_bin_array(mesh%edge_dxdy,          unit, iostat, iomsg)
+        call read_bin_array(mesh%edge_len,           unit, iostat, iomsg)
         call read_bin_array(mesh%edge_cross_dxdy,    unit, iostat, iomsg)
         call read_bin_array(mesh%elem_cos,           unit, iostat, iomsg)
         call read_bin_array(mesh%metric_factor,      unit, iostat, iomsg)

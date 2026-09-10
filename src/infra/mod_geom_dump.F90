@@ -48,7 +48,8 @@ contains
         call wr_r1(u, 'elem_cos',          mesh%elem_cos(1:ne))
         call wr_r1(u, 'metric_factor',     mesh%metric_factor(1:ne))
         call wr_r2(u, 'gradient_sca',      mesh%gradient_sca(1:6, 1:ne))
-        call wr_r2(u, 'edge_dxdy',         mesh%edge_dxdy(1:2, 1:n2))
+        call wr_r2(u, 'edge_dxdy',         mesh%edge_dxdy(1:2, 1:n2))    ! R7: METRES
+        call wr_r1(u, 'edge_len',          mesh%edge_len(1:n2))          ! R7: METRES
         call wr_r2(u, 'edge_cross_dxdy',   mesh%edge_cross_dxdy(1:4, 1:n2))
         call wr_r2(u, 'area',              mesh%area(1:nl, 1:nn))
         call wr_r2(u, 'areasvol',          mesh%areasvol(1:nl, 1:nn))
