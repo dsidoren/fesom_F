@@ -432,15 +432,15 @@ use. Say so in the report.
 **Files:**
 - Modify: `src/types/mod_mesh.F90`
 
-- [ ] add the contract block (Technical Details) above the `! ---- vertical structure ----`
+- [x] add the contract block (Technical Details) above the `! ---- vertical structure ----`
       declarations, including the `tlayer/blayer` mapping and the `ulayer_edge` note
-- [ ] mark `nlevels`/`ulevels` as DERIVED, never read from file
-- [ ] document `nlevels_nod2D_min`/`ulevels_nod2D_max` as *2-ring* bounds over adjacent
+- [x] mark `nlevels`/`ulevels` as DERIVED, never read from file
+- [x] document `nlevels_nod2D_min`/`ulevels_nod2D_max` as *2-ring* bounds over adjacent
       elements, explicitly **not** aliases of the node column, with the
       `oce_muscl_adv.F90:303` cross-reference
-- [ ] document the required invariant and the three unguarded divides that depend on it
-- [ ] build: `./configure.sh --compiler intel --precision dp --build`
-- [ ] run tests: `cd build_intel_dp && ctest --output-on-failure`
+- [x] document the required invariant and the three unguarded divides that depend on it
+- [x] build: `./configure.sh --compiler intel --precision dp --build`
+- [x] run tests: `cd build_intel_dp && ctest --output-on-failure`
 
 ### Task 2: Conservation + no-leakage gate (baseline before any change)
 

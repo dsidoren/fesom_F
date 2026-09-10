@@ -67,8 +67,56 @@ module mod_mesh
         integer,       allocatable, dimension(:)   :: bc_index_nod2D
 
         ! ---- vertical structure ----
+        !
+        ! FESOM3 BOTTOM AT VERTICES. The VERTEX column is AUTHORITATIVE; the element
+        ! vertical bounds are DERIVED from it and are never read from a mesh file.
+        ! (FESOM2 was the other way round: elvls.out defined the element bottom and the
+        ! node bottom was the MAX over adjacent elements. elvls.out is no longer read.)
+        !
+        ! Design note "Bottom implementation for FESOM3" (10 Sep 2026) name mapping --
+        ! the note's identifiers are conceptual; these are the real ones:
+        !     tlayer(v)      == ulevels_nod2D(v)        blayer(v)      == nlevels_nod2D(v)-1
+        !     tlayer_elem(e) == ulevels(e)              blayer_elem(e) == nlevels(e)-1
+        ! The note's `ulayer_edge` is min(blayer(ednodes)) -- a BOTTOM bound despite the
+        ! `u`. It is never stored, so the naming inconsistency does not reach code.
+        !
+        ! LEVEL indexing (not layer indexing): nlevels* are level COUNTS, and a column's
+        ! layers run from its upper level to its bottom level MINUS ONE:
+        !     layers of vertex v :  nz = ulevels_nod2D(v) .. nlevels_nod2D(v)-1
+        !     layers of element e:  nz = ulevels(e)       .. nlevels(e)-1
+        ! A scalar cell (nz,v) exists iff nz is in the vertex range; hnode(nz,v) is its
+        ! thickness and area(nz,v) its horizontal area (depth-independent, see below).
+        !
+        ! DERIVED in mod_mesh_read (setup_vertical / read_mesh_local):
+        !     ulevels(e) = maxval(ulevels_nod2D(elem2D_nodes(1:nnodes,e)))
+        !     nlevels(e) = minval(nlevels_nod2D(elem2D_nodes(1:nnodes,e)))
+        ! so an element's layer range is exactly its FULLY WET prisms. Velocity DOF
+        ! outside that range are never assembled or updated, which is what makes
+        ! "velocities touching topography are zero" hold by construction rather than by
+        ! scattered if-statements. Bottom drag therefore lands at nlevels(elem)-1 and the
+        ! stiffness integration spans zbar(ulevels(e))..zbar_e_bot(e) with no extra code.
+        !
+        ! RETAINED, and NOT aliases of the vertex column:
+        !     nlevels_nod2D_min(n) = min over e in adj(n) of nlevels(e)   ! 2-ring min
+        !     ulevels_nod2D_max(n) = max over e in adj(n) of ulevels(e)
+        ! These bound work that reaches ADJACENT ELEMENTS from a node, not the node's own
+        ! cell, and they are several levels away from the vertex column over most of a
+        ! real mesh (pi: mean -3.4, min -28). Do NOT substitute nlevels_nod2D for them.
+        ! In particular oce_muscl_adv.F90:303 reads tr_xy at the up/downwind triangles
+        ! with NO wetness test of its own -- nlevels_nod2D_min is that read's only guard,
+        ! and tr_xy is uninitialized below an element's bottom.
+        !
+        ! REQUIRED INVARIANT, asserted in setup_vertical / setup_vertical_local:
+        !     maxval over e in adj(n) of nlevels(e) == nlevels_nod2D(n)
+        ! i.e. every vertex's deepest scalar cell has at least one wet adjacent element.
+        ! It holds because nlvls.out is exactly the max over adjacent elvls.out. This is
+        ! not a quality metric: three UNGUARDED divides depend on it and a mesh that
+        ! violates it yields NaN at oce_ale.F90:88 (tx/tvol), oce_ale.F90:377
+        ! (Wvel/area) and oce_pressure_bv.F90:310 (1/(3*vol)).
+        !
         integer :: nl = 0
         real(kind=MP), allocatable, dimension(:) :: zbar, Z, elem_depth
+        ! ulevels/nlevels are DERIVED (see above), never read from file.
         integer, allocatable, dimension(:) :: ulevels, ulevels_nod2D, ulevels_nod2D_max
         integer, allocatable, dimension(:) :: nlevels, nlevels_nod2D, nlevels_nod2D_min
 
