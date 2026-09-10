@@ -9,7 +9,7 @@ module mod_mesh_analytic
     use mod_partit,    only: t_partit
     use mod_mesh_areas,  only: compute_geometry
     use mod_mesh_rotate, only: init_mesh_rotation
-    use mod_mesh_read,   only: enforce_cw_orientation
+    use mod_mesh_read,   only: enforce_cw_orientation, derive_vertical_bounds
     implicit none
     private
     public :: generate_analytic_mesh, build_edges
@@ -71,8 +71,13 @@ contains
         allocate(mesh%ulevels(mesh%elem2D), mesh%ulevels_nod2D(mesh%nod2D))
         allocate(mesh%ulevels_nod2D_max(mesh%nod2D), mesh%nlevels_nod2D_min(mesh%nod2D))
         allocate(mesh%elem_depth(mesh%elem2D), mesh%depth(mesh%nod2D))
-        mesh%nlevels = nl; mesh%nlevels_nod2D = nl
-        mesh%ulevels = 1; mesh%ulevels_nod2D = 1; mesh%ulevels_nod2D_max = 1
+        ! FESOM3 bottom at vertices: only the VERTEX columns are set here; the element
+        ! bounds and the node ring bounds are derived (below, once nod_in_elem2D exists).
+        ! This mesh is flat-bottomed -- every vertex at nl -- so the derived values equal
+        ! the old hard-set ones and nothing moves; the point is that the contract lives in
+        ! exactly one place.
+        mesh%nlevels_nod2D = nl; mesh%ulevels_nod2D = 1
+        mesh%nlevels = 0; mesh%ulevels = 1; mesh%ulevels_nod2D_max = 1
         mesh%nlevels_nod2D_min = nl; mesh%elem_depth = -max_depth; mesh%depth = -max_depth
 
         ! ---- orientation, topology, 1-rank partition, geometry ----
@@ -82,6 +87,7 @@ contains
         call init_mesh_rotation(0.0_WP, 0.0_WP, 0.0_WP, 1.0e12_WP)
         call enforce_cw_orientation(mesh, el)
         call build_nod_in_elem_local(mesh)
+        call derive_vertical_bounds(mesh, mesh%elem2D, mesh%nod2D, 'generate_analytic_mesh')
         call build_edges(mesh)
         call synth_partit(mesh, partit)
         call compute_geometry(mesh, partit, cartesian=.true.)

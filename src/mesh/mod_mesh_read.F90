@@ -12,7 +12,7 @@ module mod_mesh_read
     use mod_mesh_rotate, only: init_mesh_rotation, g2r, r2g, trim_cyclic
     implicit none
     private
-    public :: read_mesh, enforce_cw_orientation
+    public :: read_mesh, derive_vertical_bounds, enforce_cw_orientation
 
 contains
 
@@ -90,13 +90,10 @@ contains
         ! (oce_mesh.F90:1885-1887) zeroes the negatives. el(2)==0 marks a boundary edge.
         where (mesh%edge_tri < 0) mesh%edge_tri = 0
 
-        ! ---- vertical level counts: elvls.out (elem), nlvls.out (node) ----
-        allocate(mesh%nlevels(mesh%elem2D), mesh%nlevels_nod2D(mesh%nod2D))
-        open(newunit=u, file=trim(mesh_dir)//'/elvls.out', status='old', action='read', iostat=ios)
-        do i = 1, mesh%elem2D
-            read(u,*) mesh%nlevels(i)
-        end do
-        close(u)
+        ! ---- vertical level counts: nlvls.out (node) ONLY ----
+        ! FESOM3 bottom at vertices: the vertex column is authoritative, so elvls.out is
+        ! NOT read. The element bounds are derived in setup_vertical below.
+        allocate(mesh%nlevels_nod2D(mesh%nod2D))
         open(newunit=u, file=trim(mesh_dir)//'/nlvls.out', status='old', action='read', iostat=ios)
         do i = 1, mesh%nod2D
             read(u,*) mesh%nlevels_nod2D(i)
@@ -183,22 +180,87 @@ contains
     end subroutine enforce_cw_orientation
 
     subroutine setup_vertical(mesh)
-        ! ulevels (no cavity => 1); nlevels_nod2D_min = min over adjacent elements;
-        ! elem_depth = zbar(nlevels). (oce_mesh.F90:1103-1106, 1656-1665)
+        ! 1-rank vertical structure. ulevels_nod2D = 1 (no cavity); everything else is
+        ! derived from the vertex columns by derive_vertical_bounds.
         type(t_mesh), intent(inout) :: mesh
-        integer :: n, k
+        allocate(mesh%nlevels(mesh%elem2D))
         allocate(mesh%ulevels(mesh%elem2D), mesh%ulevels_nod2D(mesh%nod2D))
         allocate(mesh%ulevels_nod2D_max(mesh%nod2D), mesh%nlevels_nod2D_min(mesh%nod2D))
         allocate(mesh%elem_depth(mesh%elem2D))
-        mesh%ulevels = 1; mesh%ulevels_nod2D = 1; mesh%ulevels_nod2D_max = 1
-        do n = 1, mesh%nod2D
-            k = mesh%nod_in_elem2D_num(n)
-            mesh%nlevels_nod2D_min(n) = minval(mesh%nlevels(mesh%nod_in_elem2D(1:k, n)))
-        end do
-        do n = 1, mesh%elem2D
-            mesh%elem_depth(n) = mesh%zbar(mesh%nlevels(n))
-        end do
+        mesh%ulevels_nod2D = 1                          ! no cavity
+        call derive_vertical_bounds(mesh, mesh%elem2D, mesh%nod2D, 'setup_vertical')
     end subroutine setup_vertical
+
+    subroutine derive_vertical_bounds(mesh, nElem, nNod, where, derive_elems)
+        ! FESOM3 BOTTOM AT VERTICES. Shared by all three mesh paths (1-rank read,
+        ! analytic, multi-rank). The element vertical bounds are DERIVED from the vertex
+        ! columns -- elvls.out is never read:
+        !     ulevels(e) = maxval(ulevels_nod2D(elnodes))     (all 1: no cavity)
+        !     nlevels(e) = minval(nlevels_nod2D(elnodes))
+        ! so an element's layer range ulevels(e)..nlevels(e)-1 is exactly its FULLY WET
+        ! prisms. See the contract block in mod_mesh.F90.
+        !
+        ! nlevels_nod2D_min / ulevels_nod2D_max are then rebuilt from the DERIVED element
+        ! bounds. They are NOT aliases of the vertex column: they bound work that reaches
+        ! ADJACENT ELEMENTS from a node (oce_muscl_adv.F90:303, oce_fer_gm.F90:82/231).
+        !
+        ! derive_elems=.false. (multi-rank): nlevels/ulevels were already filled for the
+        ! full element halo from the GLOBAL node levels during the mesh scatter, because
+        ! elem2D_nodes is populated for OWNED elements only. Only elem_depth, the node
+        ! ring bounds and the invariant are done here.
+        type(t_mesh),      intent(inout) :: mesh
+        integer,           intent(in)    :: nElem, nNod
+        character(len=*),  intent(in)    :: where
+        logical, optional, intent(in)    :: derive_elems
+        integer :: n, k, nv
+        logical :: do_elems
+        do_elems = .true.
+        if (present(derive_elems)) do_elems = derive_elems
+        do n = 1, nElem
+            if (do_elems) then
+                nv = mesh%elem2D_nnodes(n)
+                if (nv <= 0) cycle
+                mesh%ulevels(n) = maxval(mesh%ulevels_nod2D(mesh%elem2D_nodes(1:nv, n)))
+                mesh%nlevels(n) = minval(mesh%nlevels_nod2D(mesh%elem2D_nodes(1:nv, n)))
+            end if
+            if (mesh%nlevels(n) > 0) mesh%elem_depth(n) = mesh%zbar(mesh%nlevels(n))
+        end do
+        do n = 1, nNod
+            k = mesh%nod_in_elem2D_num(n)
+            if (k <= 0) cycle
+            mesh%nlevels_nod2D_min(n) = minval(mesh%nlevels(mesh%nod_in_elem2D(1:k, n)))
+            mesh%ulevels_nod2D_max(n) = maxval(mesh%ulevels(mesh%nod_in_elem2D(1:k, n)))
+        end do
+        call assert_bottom_invariant(mesh, nNod, where)
+    end subroutine derive_vertical_bounds
+
+    subroutine assert_bottom_invariant(mesh, nNod, where)
+        ! REQUIRED INVARIANT of the vertex-bottom scheme:
+        !     maxval over e in adj(n) of nlevels(e) == nlevels_nod2D(n)
+        ! i.e. every vertex's deepest scalar cell has at least one wet adjacent element.
+        ! It holds whenever the mesh's nlvls.out is the max over adjacent elvls.out
+        ! (verified on pi and core2). This is NOT a quality metric: three UNGUARDED
+        ! divides depend on it -- oce_ale.F90:88 (tx/tvol), oce_ale.F90:377 (Wvel/area)
+        ! and oce_pressure_bv.F90:310 (1/(3*vol)) -- so a mesh that violates it produces
+        ! NaN rather than a wrong-but-finite answer. Fail loudly at setup instead.
+        type(t_mesh),     intent(in) :: mesh
+        integer,          intent(in) :: nNod
+        character(len=*), intent(in) :: where
+        integer :: n, k, deepest
+        do n = 1, nNod
+            k = mesh%nod_in_elem2D_num(n)
+            if (k <= 0) cycle
+            if (mesh%nlevels_nod2D(n) <= 0) cycle
+            deepest = maxval(mesh%nlevels(mesh%nod_in_elem2D(1:k, n)))
+            if (deepest /= mesh%nlevels_nod2D(n)) then
+                write(*,'(a,i0,a,i0,a,i0)') trim(where)//': bottom invariant VIOLATED at node ', &
+                    n, ': deepest adjacent nlevels=', deepest, ' but nlevels_nod2D=', &
+                    mesh%nlevels_nod2D(n)
+                write(*,'(a)') '  the vertex bottom cell would have no wet adjacent element'
+                error stop 1
+            end if
+        end do
+    end subroutine assert_bottom_invariant
 
     !==========================================================================
     ! M2.12a: multi-rank local-mesh remap. Builds the per-rank LOCAL mesh from the
