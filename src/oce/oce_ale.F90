@@ -386,14 +386,19 @@ contains
         !   Wvel(nz)      -= (zbar_3d_n(nz)-zbar_3d_n(nzmax)) * dd/dt   (W from the bottom-up
         !                                                                integration of the stretch)
         !   hnode_new(nz)  = hnode(nz) + (zbar_3d_n(nz)-zbar_3d_n(nz+1)) * dd
-        ! All divides scalar (no L29 trap). nzmax uses nlevels_nod2D_MIN (stretch only over
-        ! the part of the column where area(nz)=area(1), i.e. full prisms not cut by the
-        ! bottom). linfs leaves hnode_new=hnode. (Cavity nzmin>1 DEAD; water_flux term is
-        ! M6a-3 forced — omitted here since unforced water_flux=0.)
+        ! All divides scalar (no L29 trap). linfs leaves hnode_new=hnode. (Cavity nzmin>1
+        ! DEAD; water_flux term is M6a-3 forced — omitted here since unforced water_flux=0.)
+        !
+        ! FESOM3 bottom at vertices: nzmax is the vertex's OWN column bottom, not
+        ! nlevels_nod2D_min. The stretch is meant to span the part of the column where
+        ! area(nz)=area(1) -- with the scalar cell now a straight prism that is the WHOLE
+        ! column, so more of it is stretched than under FESOM2. (A real physics change,
+        ! not a rename: nlevels_nod2D_min is several levels shallower than nlevels_nod2D
+        ! over most of a real mesh.)
         if (trim(which_ALE)=='zstar') then
             do n = 1, nNodO
                 nzmin = mesh%ulevels_nod2D(n)
-                nzmax = mesh%nlevels_nod2D_min(n) - 1
+                nzmax = mesh%nlevels_nod2D(n) - 1
                 if (nzmin == 1) then
                     dd1  = mesh%zbar_3d_n(nzmax, n)
                     dd   = mesh%zbar_3d_n(nzmin, n) - dd1
@@ -514,7 +519,7 @@ contains
         !  - M6a-2 zstar (FESOM2 :1378-1436): the stretch from vert_vel_ale is committed.
         !    Node loop (owned+halo: hnode_new was exchange_nod'd in vert_vel_ale) rebuilds
         !    hnode + the depth levels BOTTOM-UP from the fixed anchor zbar_3d_n(nzmax+1)
-        !    (nzmax=nlevels_nod2D_min-2; bottom region not stretched). Element loop (owned)
+        !    (nzmax=nlevels_nod2D-2; deepest layer not stretched). Element loop (owned)
         !    averages hnode -> helem, then exchange_elem(helem). ldiag_DVD off (no
         !    rescue_hnode_old bookkeeping); cavity off (nzmin>1 dead). zlevel not ported
         !    (not a target — see docs/plans/2026-06-24-m6-zstar.md).
@@ -531,7 +536,7 @@ contains
             ! commit layer thickness + depth levels at node (owned+halo)
             do n = 1, nNodL
                 nzmin = mesh%ulevels_nod2D(n)
-                nzmax = mesh%nlevels_nod2D_min(n) - 2
+                nzmax = mesh%nlevels_nod2D(n) - 2      ! vertex's own column (see vert_vel_ale)
                 if (nzmin > 1) cycle                       ! cavity (dead)
                 do nz = nzmax, nzmin, -1                   ! bottom-up: zbar_3d_n(nz+1) already updated
                     mesh%hnode(nz,n)     = mesh%hnode_new(nz,n)
@@ -546,7 +551,15 @@ contains
                 nzmax = mesh%nlevels(elem) - 1
                 if (nzmin > 1) cycle                       ! cavity (dead)
                 elnodes = mesh%elem2D_nodes(1:3, elem)
-                do nz = nzmin, nzmax-1
+                ! FULL element range. FESOM2 stopped one layer short (nzmax-1) and was
+                ! safe: nlevels_nod2D_min(n) <= nlevels(e) for every e adjacent to n, so
+                ! no node ever stretched layer nlevels(e)-1 and the frozen helem there
+                ! still matched. Under the vertex bottom that flips to nlevels(e) <=
+                ! nlevels_nod2D(n) -- the element's deepest layer IS stretched at its
+                ! deeper nodes, so a frozen helem would break helem == sum(hnode)/3, and
+                ! helem is the thickness compute_hbar_ale, vert_vel_ale and adv_tra_hor
+                ! all use: the SSH/continuity budget and the tracer volume would disagree.
+                do nz = nzmin, nzmax
                     mesh%helem(nz,elem) = sum(mesh%hnode(nz,elnodes))/3.0_WP
                 end do
             end do
