@@ -287,7 +287,7 @@ contains
         integer :: nNodG, nElemG, nEdgeG, edge2D_in_g
         integer :: nNodL, nElemO, nElemF, nEdgeL
         real(kind=WP) :: lon, lat, gx, gy, dval
-        integer, allocatable :: imap_nod(:), imap_elem(:), imap_edge(:)
+        integer, allocatable :: imap_nod(:), imap_elem(:), imap_edge(:), nlvls_g(:)
 
         call init_mesh_rotation(alpha_deg, beta_deg, gamma_deg, cyclic_deg)
 
@@ -332,7 +332,30 @@ contains
                      mesh%coord_nod2D(1,i), mesh%coord_nod2D(2,i))
         end do
 
+        ! ---- vertex level counts: nlvls.out (node) ONLY ----
+        ! FESOM3 bottom at vertices: the vertex column is authoritative and elvls.out is
+        ! NOT read. Kept here in a GLOBAL temp because the element derivation below needs
+        ! the levels of an element's three nodes by their GLOBAL ids.
+        allocate(mesh%nlevels(nElemF), mesh%nlevels_nod2D(nNodL), mesh%ulevels(nElemF))
+        mesh%nlevels = 0; mesh%nlevels_nod2D = 0; mesh%ulevels = 0
+        allocate(nlvls_g(nNodG))
+        nlvls_g = 0
+        open(newunit=u, file=trim(mesh_dir)//'/nlvls.out', status='old', action='read', iostat=ios)
+        do g = 1, nNodG
+            read(u,*) lev
+            nlvls_g(g) = lev
+            lid = imap_nod(g); if (lid > 0) mesh%nlevels_nod2D(lid) = lev
+        end do
+        close(u)
+
         ! ---- elements: elem2d.out (global node ids); store OWNED, localize nodes ----
+        ! The SAME pass derives nlevels/ulevels for EVERY local element -- owned AND halo.
+        ! It has to: elem2D_nodes is stored for owned elements only, but oce_adv_tra_hor
+        ! and vert_vel_ale read nlevels(el(2)) where el(2) can be a halo element, so the
+        ! halo entries must be valid. Deriving them here from the global vertex levels
+        ! needs no MPI at all and is bit-identical on every rank; the alternative,
+        ! exchange_elem_full_2D_i, would add a collective to a path that does not need one.
+        ! ulevels is 1 everywhere (no cavity), i.e. maxval over the element's vertices.
         allocate(mesh%elem2D_nodes(MAX_NV, nElemO), mesh%elem2D_nnodes(nElemO))
         mesh%elem2D_nodes = 0
         open(newunit=u, file=trim(mesh_dir)//'/elem2d.out', status='old', action='read', iostat=ios)
@@ -340,7 +363,11 @@ contains
         do g = 1, nElemG
             read(u,*) gn1, gn2, gn3
             lid = imap_elem(g)
-            if (lid > 0 .and. lid <= nElemO) then     ! owned element
+            if (lid > 0) then                         ! ANY local element (owned or halo)
+                mesh%nlevels(lid) = min(nlvls_g(gn1), min(nlvls_g(gn2), nlvls_g(gn3)))
+                mesh%ulevels(lid) = 1
+            end if
+            if (lid > 0 .and. lid <= nElemO) then     ! owned element: also the node list
                 mesh%elem2D_nodes(1, lid) = imap_nod(gn1)
                 mesh%elem2D_nodes(2, lid) = imap_nod(gn2)
                 mesh%elem2D_nodes(3, lid) = imap_nod(gn3)
@@ -348,6 +375,7 @@ contains
             end if
         end do
         close(u)
+        deallocate(nlvls_g)
 
         ! ---- edges + edge_tri: all local edges; localize node + element ids ----
         allocate(mesh%edges(2, nEdgeL), mesh%edge_tri(2, nEdgeL))
@@ -373,20 +401,6 @@ contains
                     mesh%edge_tri(2, lid) = 0
                 end if
             end if
-        end do
-        close(u)
-
-        ! ---- vertical level counts: elvls.out (elem), nlvls.out (node) ----
-        allocate(mesh%nlevels(nElemF), mesh%nlevels_nod2D(nNodL))
-        mesh%nlevels = 0; mesh%nlevels_nod2D = 0
-        open(newunit=u, file=trim(mesh_dir)//'/elvls.out', status='old', action='read', iostat=ios)
-        do g = 1, nElemG
-            read(u,*) lev; lid = imap_elem(g); if (lid > 0) mesh%nlevels(lid) = lev
-        end do
-        close(u)
-        open(newunit=u, file=trim(mesh_dir)//'/nlvls.out', status='old', action='read', iostat=ios)
-        do g = 1, nNodG
-            read(u,*) lev; lid = imap_nod(g); if (lid > 0) mesh%nlevels_nod2D(lid) = lev
         end do
         close(u)
 
@@ -499,29 +513,30 @@ contains
     end subroutine complete_nod_in_elem_halo
 
     subroutine setup_vertical_local(mesh, partit)
-        ! Local vertical structure (FESOM2 oce_mesh.F90:1656-1670 + setup). ulevels=1
-        ! (no cavity); nlevels_nod2D_min = min over OWNED adjacent elements, then
-        ! exchange_nod fills the halo; elem_depth = zbar(nlevels).
+        ! Local vertical structure. nlevels/ulevels were already derived for the FULL
+        ! element halo during the mesh scatter (from the global vertex levels -- see
+        ! read_mesh_local), because elem2D_nodes is owned-only. Here we only add
+        ! elem_depth, the node ring bounds and the invariant, hence derive_elems=.false.
+        !
+        ! nlevels_nod2D_min / ulevels_nod2D_max are computed on OWNED nodes and then
+        ! halo-exchanged: an owned node's element neighbourhood is complete, a halo
+        ! node's is not.
         type(t_mesh),   intent(inout) :: mesh
         type(t_partit), intent(in)    :: partit
-        integer :: n, k, nNodL, nElemO, nElemF, nNodO
+        integer :: nNodL, nElemF, nNodO
         nNodO  = partit%myDim_nod2D
         nNodL  = partit%myDim_nod2D + partit%eDim_nod2D
-        nElemO = partit%myDim_elem2D
         nElemF = partit%myDim_elem2D + partit%eDim_elem2D + partit%eXDim_elem2D
-        allocate(mesh%ulevels(nElemF), mesh%ulevels_nod2D(nNodL))
+        allocate(mesh%ulevels_nod2D(nNodL))
         allocate(mesh%ulevels_nod2D_max(nNodL), mesh%nlevels_nod2D_min(nNodL))
         allocate(mesh%elem_depth(nElemF))
-        mesh%ulevels = 1; mesh%ulevels_nod2D = 1; mesh%ulevels_nod2D_max = 1
+        mesh%ulevels_nod2D = 1; mesh%ulevels_nod2D_max = 1   ! no cavity
         mesh%nlevels_nod2D_min = 0
-        do n = 1, nNodO
-            k = mesh%nod_in_elem2D_num(n)
-            if (k > 0) mesh%nlevels_nod2D_min(n) = minval(mesh%nlevels(mesh%nod_in_elem2D(1:k, n)))
-        end do
+        mesh%elem_depth = 0.0_MP
+        call derive_vertical_bounds(mesh, nElemF, nNodO, 'setup_vertical_local', &
+                                    derive_elems=.false.)
         call exchange_nod(mesh%nlevels_nod2D_min, partit)
-        do n = 1, nElemF
-            if (mesh%nlevels(n) > 0) mesh%elem_depth(n) = mesh%zbar(mesh%nlevels(n))
-        end do
+        call exchange_nod(mesh%ulevels_nod2D_max, partit)
     end subroutine setup_vertical_local
 
 end module mod_mesh_read

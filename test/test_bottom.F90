@@ -58,11 +58,17 @@ program test_bottom
     call check(sloping_triangle(mesh, nElemO),      'T2: sloping triangle takes the shallowest vertex')
 
     if (partit%npes > 1) then
-        ! the halo derivation: elem2D_nodes is owned-only, so halo nlevels can only come
-        ! from the global-node scatter. An unfilled halo entry shows up as 0.
+        ! The halo derivation. elem2D_nodes is owned-only, so halo nlevels can only come
+        ! from the global vertex-level scatter -- and oce_adv_tra_hor / vert_vel_ale read
+        ! nlevels(el(2)) with el(2) possibly in the halo, so a stale halo entry is a real
+        ! bug rather than dead storage.
         call check(all(mesh%nlevels(1:nElemF) > 0), 'MR: nlevels filled over the full element halo')
         call check(all(mesh%ulevels(1:nElemF) > 0), 'MR: ulevels filled over the full element halo')
         call check(all(mesh%nlevels(1:nElemF) <= mesh%nl), 'MR: halo nlevels within [1, nl]')
+        ! and the values must be RIGHT, not merely present: recompute each local element's
+        ! bound from its three GLOBAL node ids read straight from the mesh files.
+        call check(halo_matches_global(mesh, partit, trim(mesh_dir), nElemF), &
+                   'MR: halo nlevels == min over the element global vertex levels')
     end if
 
     !=========================================================================
@@ -235,6 +241,49 @@ contains
                 hnode_column_sum = .false.; return
             end if
         end do
+    end function
+
+    logical function halo_matches_global(m, p, mdir, nElem)
+        ! Independent recomputation: read nlvls.out and elem2d.out directly and check
+        ! every LOCAL element (owned and halo) against min over its three global vertices.
+        type(t_mesh),     intent(in) :: m
+        type(t_partit),   intent(in) :: p
+        character(len=*), intent(in) :: mdir
+        integer,          intent(in) :: nElem
+        integer :: u2, ios2, g, lev, want, e
+        integer :: gn1, gn2, gn3, nNodG, nElemG
+        integer, allocatable :: lvl(:), emap(:)
+        halo_matches_global = .true.
+        nNodG  = m%nod2D
+        nElemG = m%elem2D
+        allocate(lvl(nNodG), emap(nElemG))
+        lvl = 0; emap = 0
+        open(newunit=u2, file=mdir//'/nlvls.out', status='old', action='read', iostat=ios2)
+        if (ios2 /= 0) then; halo_matches_global = .false.; return; end if
+        do g = 1, nNodG
+            read(u2,*) lev; lvl(g) = lev
+        end do
+        close(u2)
+        do e = 1, nElem
+            emap(p%myList_elem2D(e)) = e
+        end do
+        open(newunit=u2, file=mdir//'/elem2d.out', status='old', action='read', iostat=ios2)
+        if (ios2 /= 0) then; halo_matches_global = .false.; return; end if
+        read(u2,*) g
+        do g = 1, nElemG
+            read(u2,*) gn1, gn2, gn3
+            e = emap(g)
+            if (e < 1 .or. e > nElem) cycle
+            want = min(lvl(gn1), min(lvl(gn2), lvl(gn3)))
+            if (m%nlevels(e) /= want) then
+                write(*,'(a,i0,a,i0,a,i0,a,i0)') '  MR: elem local ', e, ' global ', g, &
+                    ' nlevels=', m%nlevels(e), ' expected ', want
+                halo_matches_global = .false.
+                close(u2); deallocate(lvl, emap); return
+            end if
+        end do
+        close(u2)
+        deallocate(lvl, emap)
     end function
 
     logical function zbar_e_bot_derived(m, nElem)
