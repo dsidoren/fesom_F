@@ -126,6 +126,7 @@ examples. The most common variables:
 | `FESOM3_RUNOFF_FILE`, `FESOM3_SSS_FILE` | runoff and sea-surface-salinity restoring climatologies |
 | `FESOM3_START_CLOCK` | cold-start clock, `"timeofday day year"` |
 | `FESOM3_NSTEPS` | number of time steps (or use `FESOM3_RUN_LENGTH` + `FESOM3_RUN_UNIT`) |
+| `FESOM3_STEP_PER_DAY` | time steps per day (default `48` = 1800 s; CORE2 uses 48, finer meshes need more) |
 | `FESOM3_WHICHEVP` | sea-ice solver: `0` = EVP, `1` = mEVP |
 | `FESOM3_WHICH_ALE` | vertical coordinate: `linfs`, `zlevel`, `zstar` |
 | `FESOM3_FER_GM`, `FESOM3_REDI` | Gent–McWilliams bolus advection, Redi isopycnal diffusion |
