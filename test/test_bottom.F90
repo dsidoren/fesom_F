@@ -61,6 +61,7 @@ program test_bottom
     call check(edge_len_is_metres(mesh),            'T7: edge_len matches haversine, edge_dxdy metre-scale')
     call check(edge_dxdy_fold_exact(mesh),          'T7: edge_dxdy == radian value * r_earth * mean(elem_cos)')
     call check(redi_flux_composes(mesh, nNodO),      'Redi: tr_xynodes*area == sum of per-element shares')
+    call check(edge_flux_lands_in_wet_cells(mesh),   'conservation: edge flux range fits inside both node columns')
 
     if (partit%npes > 1) then
         ! The halo derivation. elem2D_nodes is owned-only, so halo nlevels can only come
@@ -190,6 +191,40 @@ contains
         write(*,'(a,es12.4,a,i0)') '  T7: worst |edge_len-haversine|/haversine = ', worst, &
             '   edges over 20%: ', nbad
         if (nbad > 0) edge_len_is_metres = .false.
+    end function
+
+    logical function edge_flux_lands_in_wet_cells(m)
+        ! CONSERVATION PRECONDITION. The horizontal edge flux is scattered as
+        ! +flux_h(nz,edge) into one edge node and -flux_h(nz,edge) into the other
+        ! (oce_adv_tra_flux.F90:80-81), so the two content changes cancel exactly -- but
+        ! ONLY if both nodes actually have a cell at nz. If the flux range reached past a
+        ! node's bottom it would deposit tracer into a cell that does not exist and the
+        ! cancellation would be lost.
+        !
+        ! The scatter runs to nl12 = max(nlevels(el1)-1, nlevels(el2)-1). Under the vertex
+        ! bottom nlevels(e) = min over the element's vertices, and both edge nodes belong
+        ! to both elements, so nlevels(el) <= nlevels_nod2D(ednode) for either node and
+        ! either element. Check that on the real mesh rather than trusting the argument.
+        type(t_mesh), intent(in) :: m
+        integer :: ed, i, el, nedge, nl12, node_bot
+        edge_flux_lands_in_wet_cells = .true.
+        nedge = size(m%edges, 2)
+        do ed = 1, nedge
+            if (m%edges(1,ed) <= 0 .or. m%edges(2,ed) <= 0) cycle
+            nl12 = 0
+            do i = 1, 2
+                el = m%edge_tri(i, ed)
+                if (el < 1) cycle
+                if (m%nlevels(el) <= 0) cycle
+                nl12 = max(nl12, m%nlevels(el)-1)
+            end do
+            node_bot = min(m%nlevels_nod2D(m%edges(1,ed)), m%nlevels_nod2D(m%edges(2,ed))) - 1
+            if (nl12 > node_bot) then
+                write(*,'(a,i0,a,i0,a,i0)') '  edge ', ed, ': flux range reaches nz=', nl12, &
+                    ' but the shallower node column ends at ', node_bot
+                edge_flux_lands_in_wet_cells = .false.; return
+            end if
+        end do
     end function
 
     logical function redi_flux_composes(m, nNod)

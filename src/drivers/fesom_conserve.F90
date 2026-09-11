@@ -97,6 +97,7 @@ program fesom_conserve
     real(kind=WP), allocatable :: relax_salt(:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
     real(kind=WP) :: content0(2), content(2), conserve_tol, drift(2)
+    real(kind=WP) :: volume0, volume, vdrift
     logical :: use_fer_gm, use_redi, use_kpp, use_tke
     real(kind=WP), allocatable :: stress_node_surf(:,:)
 
@@ -394,6 +395,7 @@ program fesom_conserve
     ! Invariants are checked BEFORE the first step (the IC baseline) and after each step.
     call check_invariants(0)
     content0 = content
+    volume0  = volume
     do n = 1, nsteps
         if (allocated(stress_node_surf)) then
             call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
@@ -409,15 +411,18 @@ program fesom_conserve
 
     drift(1) = reldrift(content(1), content0(1))
     drift(2) = reldrift(content(2), content0(2))
+    vdrift   = reldrift(volume, volume0)
     if (partit%mype == 0) then
         write(*,'(a)') 'fesom_conserve: relative drift over the run'
         write(*,'(a,es24.16)') '  heat: ', drift(1)
         write(*,'(a,es24.16)') '  salt: ', drift(2)
+        write(*,'(a,es24.16)') '  vol : ', vdrift
         write(*,'(a,i0,a,a,a)') 'fesom_conserve: done (', nsteps, ' steps, which_ALE=', &
             trim(which_ALE), ').'
     end if
     if (conserve_tol > 0.0_WP) then
-        if (abs(drift(1)) > conserve_tol .or. abs(drift(2)) > conserve_tol) then
+        if (abs(drift(1)) > conserve_tol .or. abs(drift(2)) > conserve_tol .or. &
+            abs(vdrift)   > conserve_tol) then
             if (partit%mype == 0) &
                 write(*,'(a,es12.4)') 'fesom_conserve: CONSERVATION VIOLATED, tol=', conserve_tol
             call par_ex(partit%MPI_COMM_FESOM, partit%mype)
@@ -461,6 +466,20 @@ contains
             if (partit%npes > 1) call allreduce_sum(acc, partit)
             content(i) = acc
         end do
+
+        !______________________________________________________________________
+        ! 1b. total VOLUME, sum over owned cells of hnode*areasvol. Tracer content can be
+        ! conserved while volume is not (an error in h and an opposite one in T would
+        ! cancel in the product), so this is a separate check, not a corollary.
+        acc = 0.0_WP
+        do j = 1, nNodO
+            if (mesh%nlevels_nod2D(j) <= 0) cycle
+            do k = mesh%ulevels_nod2D(j), mesh%nlevels_nod2D(j)-1
+                acc = acc + real(mesh%hnode(k,j), WP) * real(mesh%areasvol(j), WP)
+            end do
+        end do
+        if (partit%npes > 1) call allreduce_sum(acc, partit)
+        volume = acc
 
         !______________________________________________________________________
         ! 2. T10: no velocity below the element's last FULL prism
