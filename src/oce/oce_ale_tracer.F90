@@ -396,9 +396,9 @@ contains
             ul12 = ul1
             if (ul2 > 0) ul12 = min(ul1, ul2)
             del_ttf(ul12:nl12,enodes(1)) = del_ttf(ul12:nl12,enodes(1)) &
-                + rhs1(ul12:nl12)*dt/mesh%areasvol(ul12:nl12,enodes(1))
+                + rhs1(ul12:nl12)*dt/mesh%areasvol(enodes(1))
             del_ttf(ul12:nl12,enodes(2)) = del_ttf(ul12:nl12,enodes(2)) &
-                + rhs2(ul12:nl12)*dt/mesh%areasvol(ul12:nl12,enodes(2))
+                + rhs2(ul12:nl12)*dt/mesh%areasvol(enodes(2))
         end do
     end subroutine diff_part_hor_redi
 
@@ -417,7 +417,7 @@ contains
         type(t_partit), intent(in), optional  :: partit
         integer :: n, k, elem, nz, nl1, ul1
         integer :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: Tx, Ty, tvol, vd_flux(mesh%nl)
+        real(kind=WP) :: Tx, Ty, vd_flux(mesh%nl)
         real(kind=WP) :: zbar_n(mesh%nl), z_n(mesh%nl-1)
         real(kind=WP), allocatable :: tr_xynodes(:,:,:)
         real(kind=MP), dimension(:,:), pointer :: del_ttf
@@ -432,39 +432,35 @@ contains
 
         ! Node-averaged element gradients (no halo exchange of tr_xynodes is needed).
         !
-        ! This is an AVERAGE of the adjacent element gradients, so it must be normalised
-        ! by the area that actually contributed. FESOM2 wrote Tx/3/areasvol(nz,n), which
-        ! was the same thing only because areasvol was itself the depth-gathered sum over
-        ! exactly the wet elements. Under the FESOM3 vertex bottom areasvol is the FULL
-        ! prism area at every wet layer, so dividing by it would scale the gradient by
-        ! wet_area/full_area < 1 wherever some adjacent element is dry -- most deep
-        ! levels. Accumulate the contributing area instead, as compute_vel_nodes
-        ! (oce_ale.F90:84-89) and smooth_nod (oce_pressure_bv.F90:303-311) already do.
+        ! The denominator is areasvol -- the FULL scalar-cell area -- and NOT the area of
+        ! the elements that happen to be wet at this level. Under the FESOM3 vertex bottom
+        ! an adjacent element that is dry at nz is not MISSING data to be dropped from the
+        ! average: its velocity/flux there is genuinely ZERO (that is what "velocities
+        ! touching topography are zero" means), so it must contribute zero carrying its
+        ! full area weight. Dividing by the wet area instead inflates the result by
+        ! full/wet -- up to 7x on pi, at 10% of node-levels.
         !
-        ! tvol is the same /3 median-dual share the old divisor carried, so for a fully
-        ! wet neighbourhood this reproduces the previous value.
+        ! This is also why it composes correctly downstream: the Redi flux below is
+        ! tr_xynodes*area(nz,n), so with this denominator it collapses to
+        ! sum over wet elements of tr_xy*elem_area, i.e. each element contributing its own
+        ! share and the dry ones nothing. In FESOM2 the same expression was correct for the
+        ! same reason -- areasvol was then the depth-gathered (wet) area, and the two /3
+        ! cancelled; only the definition of areasvol changed, not the intent.
         do n = 1, nNodO
             nl1 = mesh%nlevels_nod2D(n)-1
             ul1 = mesh%ulevels_nod2D(n)
             do nz = ul1, nl1
                 Tx = 0.0_WP
                 Ty = 0.0_WP
-                tvol = 0.0_WP
                 do k = 1, mesh%nod_in_elem2D_num(n)
                     elem = mesh%nod_in_elem2D(k,n)
                     if (nz <= (mesh%nlevels(elem)-1) .and. nz >= mesh%ulevels(elem)) then
-                        tvol = tvol + mesh%elem_area(elem)
                         Tx = Tx + tr_xy(1,nz,elem)*mesh%elem_area(elem)
                         Ty = Ty + tr_xy(2,nz,elem)*mesh%elem_area(elem)
                     end if
                 end do
-                if (tvol > 0.0_WP) then
-                    tr_xynodes(1,nz,n) = Tx/tvol
-                    tr_xynodes(2,nz,n) = Ty/tvol
-                else
-                    tr_xynodes(1,nz,n) = 0.0_WP
-                    tr_xynodes(2,nz,n) = 0.0_WP
-                end if
+                tr_xynodes(1,nz,n) = Tx/3.0_WP/mesh%areasvol(n)
+                tr_xynodes(2,nz,n) = Ty/3.0_WP/mesh%areasvol(n)
             end do
         end do
 
@@ -488,10 +484,10 @@ contains
                 vd_flux(nz) = vd_flux(nz) + &
                               (zbar_n(nz)-z_n(nz))*(slope_tapered(1,nz,n)*tr_xynodes(1,nz,n) &
                             + slope_tapered(2,nz,n)*tr_xynodes(2,nz,n))*Ki(nz,n)
-                vd_flux(nz) = vd_flux(nz)/(z_n(nz-1)-z_n(nz))*mesh%area(nz,n)
+                vd_flux(nz) = vd_flux(nz)/(z_n(nz-1)-z_n(nz))*mesh%area(n)
             end do
             do nz = ul1, nl1
-                del_ttf(nz,n) = del_ttf(nz,n) + (vd_flux(nz)-vd_flux(nz+1))*dt/mesh%areasvol(nz,n)
+                del_ttf(nz,n) = del_ttf(nz,n) + (vd_flux(nz)-vd_flux(nz+1))*dt/mesh%areasvol(n)
             end do
         end do
 
@@ -572,12 +568,12 @@ contains
             if (Redi) Ty1 = (Z_n(nz)     -zbar_n(nz+1))*zinv2*dynamics%work%slope_tapered(3,nz  ,n)**2*dynamics%work%Ki(nz  ,n) &
                           + (zbar_n(nz+1)-Z_n(nz+1)   )*zinv2*dynamics%work%slope_tapered(3,nz+1,n)**2*dynamics%work%Ki(nz+1,n)
             a(nz) = 0.0_WP
-            c(nz) = -(dynamics%work%Kv(nz+1,n)+Ty1)*zinv2*zinv * mesh%area(nz+1,n)/mesh%areasvol(nz,n)
+            c(nz) = -(dynamics%work%Kv(nz+1,n)+Ty1)*zinv2*zinv * mesh%area(n)/mesh%areasvol(n)
             b(nz) = -c(nz) + mesh%hnode_new(nz,n)
             if (do_wimpl) then
-                v_adv = zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
+                v_adv = zinv * ( mesh%area(n)/mesh%areasvol(n) )
                 b(nz) = b(nz) + Wvel_i(nz, n)*v_adv
-                v_adv = zinv * mesh%area(nz+1,n)/mesh%areasvol(nz,n)
+                v_adv = zinv * mesh%area(n)/mesh%areasvol(n)
                 b(nz) = b(nz) - min(0._WP, Wvel_i(nz+1, n))*v_adv
                 c(nz) = c(nz) - max(0._WP, Wvel_i(nz+1, n))*v_adv
             end if
@@ -594,15 +590,15 @@ contains
                     Ty1 = (Z_n(nz     )-zbar_n(nz+1))*zinv2*dynamics%work%slope_tapered(3,nz  ,n)**2*dynamics%work%Ki(nz  ,n) &
                         + (zbar_n(nz+1)-Z_n(nz+1    ))*zinv2*dynamics%work%slope_tapered(3,nz+1,n)**2*dynamics%work%Ki(nz+1,n)
                 end if
-                a(nz) = -(dynamics%work%Kv(nz,n)  +Ty )*zinv1*zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
-                c(nz) = -(dynamics%work%Kv(nz+1,n)+Ty1)*zinv2*zinv *   mesh%area(nz+1,n)/mesh%areasvol(nz,n)
+                a(nz) = -(dynamics%work%Kv(nz,n)  +Ty )*zinv1*zinv * ( mesh%area(n)/mesh%areasvol(n) )
+                c(nz) = -(dynamics%work%Kv(nz+1,n)+Ty1)*zinv2*zinv *   mesh%area(n)/mesh%areasvol(n)
                 b(nz) = -a(nz)-c(nz) + mesh%hnode_new(nz,n)
                 zinv1 = zinv2
                 if (do_wimpl) then
-                    v_adv = zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
+                    v_adv = zinv * ( mesh%area(n)/mesh%areasvol(n) )
                     a(nz) = a(nz) + min(0._WP, Wvel_i(nz, n))*v_adv
                     b(nz) = b(nz) + max(0._WP, Wvel_i(nz, n))*v_adv
-                    v_adv = zinv * mesh%area(nz+1,n)/mesh%areasvol(nz,n)
+                    v_adv = zinv * mesh%area(n)/mesh%areasvol(n)
                     b(nz) = b(nz) - min(0._WP, Wvel_i(nz+1, n))*v_adv
                     c(nz) = c(nz) - max(0._WP, Wvel_i(nz+1, n))*v_adv
                 end if
@@ -614,11 +610,11 @@ contains
             Ty = 0.0_WP
             if (Redi) Ty = (Z_n(nz-1)-zbar_n(nz))*zinv1*dynamics%work%slope_tapered(3,nz-1,n)**2*dynamics%work%Ki(nz-1,n) &
                          + (zbar_n(nz )-Z_n(nz  ))*zinv1*dynamics%work%slope_tapered(3,nz  ,n)**2*dynamics%work%Ki(nz  ,n)
-            a(nz) = -(dynamics%work%Kv(nz,n)+Ty)*zinv1*zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
+            a(nz) = -(dynamics%work%Kv(nz,n)+Ty)*zinv1*zinv * ( mesh%area(n)/mesh%areasvol(n) )
             c(nz) = 0.0_WP
             b(nz) = -a(nz) + mesh%hnode_new(nz,n)
             if (do_wimpl) then
-                v_adv = zinv * ( mesh%area(nz  ,n)/mesh%areasvol(nz,n) )
+                v_adv = zinv * ( mesh%area(n)/mesh%areasvol(n) )
                 a(nz) = a(nz) + min(0._WP, Wvel_i(nz, n))*v_adv
                 b(nz) = b(nz) + max(0._WP, Wvel_i(nz, n))*v_adv
             end if
@@ -646,29 +642,29 @@ contains
                 if (id == 1) then           ! temperature
                     nz = nzmin
                     tr(nz) = tr(nz) + ( -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,2), 1.0_WP) &
-                                        *(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) ) * heat_flux(n) / vcpw * dt
+                                        *(mesh%area(n)/mesh%areasvol(n)) ) * heat_flux(n) / vcpw * dt
                     do nz = nzmin+1, nzmax-2
-                        tr(nz) = tr(nz) + (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,2), 1.0_WP)*(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) &
-                                            -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,2), 1.0_WP)*(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) &
+                        tr(nz) = tr(nz) + (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,2), 1.0_WP)*(mesh%area(n)/mesh%areasvol(n)) &
+                                            -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,2), 1.0_WP)*(mesh%area(n)/mesh%areasvol(n)) &
                                           ) * heat_flux(n) / vcpw * dt
                     end do
                     nz = nzmax-1
                     tr(nz) = tr(nz) + (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,2), 1.0_WP) &
-                                        *(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) ) * heat_flux(n) / vcpw * dt
+                                        *(mesh%area(n)/mesh%areasvol(n)) ) * heat_flux(n) / vcpw * dt
                 else if (id == 2) then      ! salinity
                     rsss = ref_sss
                     if (ref_sss_local) rsss = trarr(1,n)   ! FESOM2 values(1,n): level 1 (=nzmin, no cavity)
                     nz = nzmin
                     tr(nz) = tr(nz) - ( -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,3), 1.0_WP) &
-                                        *(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) ) * rsss * water_flux(n) * dt
+                                        *(mesh%area(n)/mesh%areasvol(n)) ) * rsss * water_flux(n) * dt
                     do nz = nzmin+1, nzmax-2
-                        tr(nz) = tr(nz) - (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,3), 1.0_WP)*(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) &
-                                            -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,3), 1.0_WP)*(mesh%area(nz+1,n)/mesh%areasvol(nz,n)) &
+                        tr(nz) = tr(nz) - (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,3), 1.0_WP)*(mesh%area(n)/mesh%areasvol(n)) &
+                                            -MIN(dynamics%work%ghats(nz+1,n)*dynamics%work%blmc(nz+1,n,3), 1.0_WP)*(mesh%area(n)/mesh%areasvol(n)) &
                                           ) * rsss * water_flux(n) * dt
                     end do
                     nz = nzmax-1
                     tr(nz) = tr(nz) - (  MIN(dynamics%work%ghats(nz  ,n)*dynamics%work%blmc(nz  ,n,3), 1.0_WP) &
-                                        *(mesh%area(nz  ,n)/mesh%areasvol(nz,n)) ) * rsss * water_flux(n) * dt
+                                        *(mesh%area(n)/mesh%areasvol(n)) ) * rsss * water_flux(n) * dt
                 end if
             end if
             !___________________________________________________________________
@@ -682,7 +678,7 @@ contains
                 do nz = nzmin, nzmax-1
                     zinv = 1.0_WP*dt
                     tr(nz) = tr(nz) + (dynamics%work%sw_3d(nz,n) &
-                             - dynamics%work%sw_3d(nz+1,n) * mesh%area(nz+1,n)/mesh%areasvol(nz,n)) * zinv
+                             - dynamics%work%sw_3d(nz+1,n) * mesh%area(n)/mesh%areasvol(n)) * zinv
                 end do
             end if
             !___________________________________________________________________

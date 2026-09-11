@@ -54,3 +54,14 @@ add_test(NAME fesom_conserve_zstar_redi_np1
 set_tests_properties(fesom_conserve_zstar_redi_np1 PROPERTIES
     ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_REDI=1;FESOM3_CONSERVE_TOL=1e-12"
     SKIP_REGULAR_EXPRESSION "cannot open;No such file")
+
+# One case per vertical-mixing scheme: the area/areasvol consumers live in the vertical
+# diffusion TDMA and the KPP non-local / shortwave terms, reachable only with the scheme on.
+foreach(_mix KPP TKE)
+    add_test(NAME fesom_conserve_zstar_${_mix}_np1
+             COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np 1
+                     $<TARGET_FILE:fesom_conserve>)
+    set_tests_properties(fesom_conserve_zstar_${_mix}_np1 PROPERTIES
+        ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_MIX_${_mix}=1;FESOM3_CONSERVE_TOL=1e-12"
+        SKIP_REGULAR_EXPRESSION "cannot open;No such file")
+endforeach()

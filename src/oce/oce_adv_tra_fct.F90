@@ -188,9 +188,9 @@ contains
             nu1=mesh%ulevels_nod2D(n)
             nl1=mesh%nlevels_nod2D(n)
             do nz=nu1, nl1-1
-                flux=fct_plus(nz,n)*dt/mesh%areasvol(nz,n)/mesh%hnode_new(nz,n)+flux_eps
+                flux=fct_plus(nz,n)*dt/mesh%areasvol(n)/mesh%hnode_new(nz,n)+flux_eps
                 fct_plus(nz,n)=min(1.0_WP,fct_ttf_max(nz,n)/flux)
-                flux=fct_minus(nz,n)*dt/mesh%areasvol(nz,n)/mesh%hnode_new(nz,n)-flux_eps
+                flux=fct_minus(nz,n)*dt/mesh%areasvol(n)/mesh%hnode_new(nz,n)-flux_eps
                 fct_minus(nz,n)=min(1.0_WP,fct_ttf_min(nz,n)/flux)
             end do
         end do

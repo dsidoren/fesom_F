@@ -71,17 +71,29 @@ contains
         UVnode => dynamics%uvnode
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
+        ! FESOM3 BOTTOM AT VERTICES. An adjacent element that is dry at level nz is NOT
+        ! dropped from the average: its velocity there is genuinely ZERO -- that is what
+        ! "velocities touching topography are zero" means -- so it contributes zero while
+        ! still carrying its FULL area weight. The denominator is therefore the full
+        ! median-dual area (3*area(n)), not the area of the elements that happen to be wet.
+        ! This is the same statement that makes the scalar column's area depth-independent,
+        ! and it is why area/areasvol are 1-D.
+        !
+        ! Consequence, and it is intended rather than a side effect: a uniform velocity
+        ! field does NOT node-average to the same value at every level -- it decreases where
+        ! the wet fraction does. That is the real damping of the cell-mean velocity by
+        ! topography, not an artefact; UVnode feeds the vertical shear used by PP/KPP/TKE.
         do n = 1, nNodO
             uln = mesh%ulevels_nod2D(n)
             nln = mesh%nlevels_nod2D(n)
+            tvol = 3.0_WP*real(mesh%area(n), WP)      ! full median-dual area at this vertex
             do nz = uln, nln-1
-                tvol = 0.0_WP; tx = 0.0_WP; ty = 0.0_WP
+                tx = 0.0_WP; ty = 0.0_WP
                 do k = 1, mesh%nod_in_elem2D_num(n)
                     elem = mesh%nod_in_elem2D(k, n)
                     ule  = mesh%ulevels(elem)
                     nle  = mesh%nlevels(elem)
-                    if (nle-1 < nz .or. nz < ule) cycle
-                    tvol = tvol + mesh%elem_area(elem)
+                    if (nle-1 < nz .or. nz < ule) cycle   ! dry: contributes 0, weight kept
                     tx   = tx   + UV(1,nz,elem)*mesh%elem_area(elem)
                     ty   = ty   + UV(2,nz,elem)*mesh%elem_area(elem)
                 end do
@@ -218,7 +230,7 @@ contains
         if (trim(which_ALE)/='linfs' .and. present(water_flux)) then
             do n = 1, nNodO
                 if (mesh%ulevels_nod2D(n) > 1) cycle
-                ssh_rhs_old(n) = ssh_rhs_old(n) - water_flux(n)*mesh%areasvol(mesh%ulevels_nod2D(n), n)
+                ssh_rhs_old(n) = ssh_rhs_old(n) - water_flux(n)*mesh%areasvol(n)
             end do
             if (is_multirank(partit)) call exchange_nod(ssh_rhs_old, partit)   ! FESOM2 :2270
         end if
@@ -229,7 +241,7 @@ contains
 
         do n = 1, nNodO
             if (mesh%ulevels_nod2D(n) > 1) cycle          ! cavity node: hbar == hbar_old
-            mesh%hbar(n) = mesh%hbar_old(n) + ssh_rhs_old(n)*dt/mesh%areasvol(mesh%ulevels_nod2D(n), n)
+            mesh%hbar(n) = mesh%hbar_old(n) + ssh_rhs_old(n)*dt/mesh%areasvol(n)
         end do
         if (is_multirank(partit)) call exchange_nod(mesh%hbar, partit)   ! FESOM2 :2293
 
@@ -374,8 +386,8 @@ contains
             nzmin = mesh%ulevels_nod2D(n)
             nzmax = mesh%nlevels_nod2D(n) - 1
             do nz = nzmin, nzmax
-                Wvel(nz, n) = Wvel(nz, n)/mesh%area(nz, n)
-                if (Fer_GM) fer_Wvel(nz, n) = fer_Wvel(nz, n)/mesh%area(nz, n)
+                Wvel(nz, n) = Wvel(nz, n)/mesh%area(n)
+                if (Fer_GM) fer_Wvel(nz, n) = fer_Wvel(nz, n)/mesh%area(n)
             end do
         end do
 

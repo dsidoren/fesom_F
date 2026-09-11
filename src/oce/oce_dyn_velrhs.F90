@@ -304,8 +304,8 @@ contains
         do n = 1, nNodO
             nl1 = mesh%nlevels_nod2D(n) - 1
             ul1 = mesh%ulevels_nod2D(n)
-            UVnode_rhs(1,ul1:nl1,n) = UVnode_rhs(1,ul1:nl1,n)*mesh%areasvol_inv(ul1:nl1,n)
-            UVnode_rhs(2,ul1:nl1,n) = UVnode_rhs(2,ul1:nl1,n)*mesh%areasvol_inv(ul1:nl1,n)
+            UVnode_rhs(1,ul1:nl1,n) = UVnode_rhs(1,ul1:nl1,n)*mesh%areasvol_inv(n)
+            UVnode_rhs(2,ul1:nl1,n) = UVnode_rhs(2,ul1:nl1,n)*mesh%areasvol_inv(n)
         end do
 
         ! M2.12c: share the nodal advection to the halo (FESOM2 :559) — the vertice->

@@ -57,6 +57,14 @@ program fesom_conserve
                                   scaling_GINsea, GMzexp_zref, GMzexp_smin
     use mod_param_phys,     only: Redi_Kmax, Redi_Kmin, Redi_Ktaper, K_hor, &
                                   scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97
+    use mod_param_phys,     only: Ricr, concv, visc_sh_limit, diff_sh_limit
+    use mod_param_phys,     only: tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, &
+                                  tke_kappaM_min, tke_kappaM_max, tke_min, tke_surf_min, &
+                                  tke_mxl_choice, tke_only, tke_use_ubound_dirichlet, &
+                                  tke_use_lbound_dirichlet, tke_dolangmuir
+    use mod_config,         only: use_sw_pene
+    use oce_mixing_kpp,     only: oce_mixing_kpp_init
+    use oce_mixing_tke,     only: tke_init
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
     use mod_partitioning,   only: par_init, par_ex, set_partition
@@ -89,7 +97,8 @@ program fesom_conserve
     real(kind=WP), allocatable :: relax_salt(:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
     real(kind=WP) :: content0(2), content(2), conserve_tol, drift(2)
-    logical :: use_fer_gm, use_redi
+    logical :: use_fer_gm, use_redi, use_kpp, use_tke
+    real(kind=WP), allocatable :: stress_node_surf(:,:)
 
     call get_environment_variable('FESOM3_MESH_DIR', mesh_dir)
     if (len_trim(mesh_dir) == 0) &
@@ -115,6 +124,10 @@ program fesom_conserve
     use_fer_gm = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_REDI', env, length=env_len, status=ios)
     use_redi = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_MIX_KPP', env, length=env_len, status=ios)
+    use_kpp = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_MIX_TKE', env, length=env_len, status=ios)
+    use_tke = (ios == 0 .and. env_len > 0)
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
@@ -322,9 +335,55 @@ program fesom_conserve
         else
             Redi = .false.
         end if
-        if (partit%mype == 0) write(*,'(a,l1,a,l1)') &
-            'fesom_conserve: Fer_GM=', Fer_GM, '  Redi=', Redi
     end if
+
+    !===========================================================================
+    ! KPP (FESOM3_MIX_KPP) / TKE (FESOM3_MIX_TKE), local sizes. Ported from the 1-rank
+    ! fesom_lifecycle. These matter here because the vertical-diffusion TDMA and the KPP
+    ! non-local / shortwave terms are the remaining consumers of area/areasvol, and they
+    ! are only reachable with the corresponding scheme switched on.
+    if (use_kpp) then
+        mix_scheme_nmb = 1
+        use_sw_pene    = .false.
+        Ricr = 0.3_WP; concv = 1.6_WP
+        visc_sh_limit = 5.0e-3_WP; diff_sh_limit = 5.0e-3_WP
+        if (.not. allocated(dyn%work%sw_alpha)) then
+            allocate(dyn%work%sw_alpha(nl-1, nNodL), dyn%work%sw_beta(nl-1, nNodL))
+            dyn%work%sw_alpha = 0.0_WP; dyn%work%sw_beta = 0.0_WP
+        end if
+        allocate(dyn%work%Kv_double(nl, nNodL, tracers%num_tracers))
+        allocate(dyn%work%viscA_kpp(nl, nNodL), dyn%work%blmc(nl, nNodL, 3))
+        allocate(dyn%work%ghats(nl-1, nNodL), dyn%work%dkm1(nNodL, 3))
+        allocate(dyn%work%dbsfc(nl, nNodL), dyn%work%dVsq(nl, nNodL))
+        allocate(dyn%work%sw_3d(nl, nNodL))
+        allocate(dyn%work%hbl(nNodL), dyn%work%bfsfc(nNodL))
+        allocate(dyn%work%stable(nNodL), dyn%work%caseA(nNodL))
+        allocate(dyn%work%ustar(nNodL), dyn%work%Bo(nNodL), dyn%work%kbl(nNodL))
+        dyn%work%Kv_double = 0.0_WP; dyn%work%viscA_kpp = 0.0_WP; dyn%work%blmc = 0.0_WP
+        dyn%work%ghats = 0.0_WP; dyn%work%dkm1 = 0.0_WP; dyn%work%dbsfc = 0.0_WP
+        dyn%work%dVsq = 0.0_WP; dyn%work%sw_3d = 0.0_WP
+        dyn%work%hbl = 0.0_WP; dyn%work%bfsfc = 0.0_WP; dyn%work%stable = 0.0_WP
+        dyn%work%caseA = 0.0_WP; dyn%work%ustar = 0.0_WP; dyn%work%Bo = 0.0_WP
+        dyn%work%kbl = 0
+        if (.not. allocated(stress_node_surf)) then
+            allocate(stress_node_surf(2, nNodL)); stress_node_surf = 0.0_WP
+        end if
+        call oce_mixing_kpp_init(Ricr, concv)
+    end if
+    if (use_tke) then
+        mix_scheme_nmb = 5
+        allocate(dyn%work%tke(nl, nNodL), dyn%work%tke_Av(nl, nNodL), &
+                 dyn%work%tke_Kv(nl, nNodL))
+        dyn%work%tke = 0.0_WP; dyn%work%tke_Av = 0.0_WP; dyn%work%tke_Kv = 0.0_WP
+        if (.not. allocated(stress_node_surf)) then
+            allocate(stress_node_surf(2, nNodL)); stress_node_surf = 0.0_WP
+        end if
+        call tke_init(tke_c_k, tke_c_eps, tke_cd, tke_alpha, tke_mxl_min, tke_kappaM_min, &
+                      tke_kappaM_max, tke_min, tke_surf_min, tke_mxl_choice, tke_only, &
+                      tke_use_ubound_dirichlet, tke_use_lbound_dirichlet, tke_dolangmuir)
+    end if
+    if (partit%mype == 0) write(*,'(a,l1,a,l1,a,l1,a,l1)') &
+        'fesom_conserve: Fer_GM=', Fer_GM, ' Redi=', Redi, ' KPP=', use_kpp, ' TKE=', use_tke
 
     !===========================================================================
     ! SSH stiffness (built ONCE; dt = CORE2 namelist timestep).
@@ -336,9 +395,15 @@ program fesom_conserve
     call check_invariants(0)
     content0 = content
     do n = 1, nsteps
-        call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
-                      heat_flux, water_flux, virtual_salt, relax_salt, &
-                      real_salt_flux, is_nonlinfs, stress_surf, partit)
+        if (allocated(stress_node_surf)) then
+            call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
+                          heat_flux, water_flux, virtual_salt, relax_salt, &
+                          real_salt_flux, is_nonlinfs, stress_surf, partit, stress_node_surf)
+        else
+            call step_oce(n, dt, (n == 1), dyn, tracers, mesh, Ki, &
+                          heat_flux, water_flux, virtual_salt, relax_salt, &
+                          real_salt_flux, is_nonlinfs, stress_surf, partit)
+        end if
         call check_invariants(n)
     end do
 
@@ -390,7 +455,7 @@ contains
                 if (mesh%nlevels_nod2D(j) <= 0) cycle
                 do k = mesh%ulevels_nod2D(j), mesh%nlevels_nod2D(j)-1
                     acc = acc + tracers%data(i)%values(k,j) &
-                              * real(mesh%hnode(k,j), WP) * real(mesh%areasvol(k,j), WP)
+                              * real(mesh%hnode(k,j), WP) * real(mesh%areasvol(j), WP)
                 end do
             end do
             if (partit%npes > 1) call allreduce_sum(acc, partit)

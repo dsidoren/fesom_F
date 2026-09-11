@@ -31,7 +31,7 @@ program fesom_advhordump
     use oce_adv_tra_flux, only: oce_tra_adv_flux2dtracer
     use oce_adv_tra_fct,  only: oce_tra_adv_fct
     use oce_ale_tracer,   only: advect_tracer       ! M1.4 assembled step body
-    use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r2, wr_r3, wr_i1, wr_i2
+    use mod_advhor_dump,  only: advhor_dump_open, advhor_dump_close, wr_r1, wr_r2, wr_r3, wr_i1, wr_i2
     implicit none
 
     ! Controlled-input parameters (must equal the FESOM2 oracle's)
@@ -272,7 +272,7 @@ program fesom_advhordump
         nu1 = mesh%ulevels_nod2D(n); nl1 = mesh%nlevels_nod2D(n)
         do nz = nu1, nl1-1
             fct_LO(nz,n) = (ttf(nz,n)*mesh%hnode(nz,n) &
-                          + (fct_LO(nz,n) + (adf_v(nz,n)-adf_v(nz+1,n)))*dt/mesh%areasvol(nz,n)) &
+                          + (fct_LO(nz,n) + (adf_v(nz,n)-adf_v(nz+1,n)))*dt/mesh%areasvol(n)) &
                           / mesh%hnode_new(nz,n)
         end do
     end do
@@ -369,7 +369,7 @@ program fesom_advhordump
     call wr_r2(u, 'wvel',                   real(wvel, MP))
     call wr_r2(u, 'zbar_3d_n',              mesh%zbar_3d_n(1:nl,   1:mesh%nod2D))
     call wr_r2(u, 'Z_3d_n',                 mesh%Z_3d_n(1:nl-1,    1:mesh%nod2D))
-    call wr_r2(u, 'area',                   mesh%area(1:nl,        1:mesh%nod2D))
+    call wr_r1(u, 'area',                   mesh%area(1:mesh%nod2D))
     call wr_r2(u, 'adv_flux_ver_upw1',      real(aflux_vu, MP))
     call wr_r2(u, 'del_ttf_advvert_upw1',   real(dttf_vu, MP))
     call wr_r2(u, 'adv_flux_ver_qr4c',      real(aflux_vq, MP))

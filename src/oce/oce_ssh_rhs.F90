@@ -197,7 +197,7 @@ contains
             if (mesh%ulevels_nod2D(row) > 1) cycle
             offset = ssh_stiff%rowptr_loc(row)
             ssh_stiff%values(offset) = ssh_stiff%values(offset) &
-                                     + mesh%areasvol(mesh%ulevels_nod2D(row),row)/dt
+                                     + mesh%areasvol(row)/dt
         end do
 
         deallocate(n_pos, n_num)
@@ -342,7 +342,7 @@ contains
         if (trim(which_ALE)/='linfs' .and. present(water_flux)) then
             do n = 1, nNodO
                 if (mesh%ulevels_nod2D(n) > 1) cycle   ! cavity (dead)
-                ssh_rhs(n) = ssh_rhs(n) - alpha*water_flux(n)*mesh%areasvol(mesh%ulevels_nod2D(n),n) &
+                ssh_rhs(n) = ssh_rhs(n) - alpha*water_flux(n)*mesh%areasvol(n) &
                                         + (1.0_WP-alpha)*ssh_rhs_old(n)
             end do
         else

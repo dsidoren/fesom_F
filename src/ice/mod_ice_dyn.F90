@@ -320,7 +320,7 @@ contains
             if (mesh%ulevels_nod2D(n) > 1) cycle
 
             if ((rhoice*m_ice(n)+rhosno*m_snow(n)) > 1.e-3_WP) then
-                inv_areamass(n) = 1.0_WP/(mesh%area(1,n)*(rhoice*m_ice(n)+rhosno*m_snow(n)))
+                inv_areamass(n) = 1.0_WP/(mesh%area(n)*(rhoice*m_ice(n)+rhosno*m_snow(n)))
             else
                 inv_areamass(n) = 0.0_WP
             end if
@@ -369,8 +369,8 @@ contains
 
         do n = 1, nNodO
             if (mesh%ulevels_nod2D(n) > 1) cycle
-            rhs_a(n) = rhs_a(n)/mesh%area(1,n)
-            rhs_m(n) = rhs_m(n)/mesh%area(1,n)
+            rhs_a(n) = rhs_a(n)/mesh%area(n)
+            rhs_m(n) = rhs_m(n)/mesh%area(n)
         end do
 
         !_______________________________________________________________________
@@ -555,11 +555,11 @@ contains
                 inv_thickness(i) = 1.0_WP/max(inv_thickness(i), 9.0_WP)   ! Limit the mass
 
                 mass(i) = (m_ice(i)*rhoice+m_snow(i)*rhosno)
-                mass(i) = mass(i)/((1.0_WP+mass(i)*mass(i))*mesh%area(1,i))
+                mass(i) = mass(i)/((1.0_WP+mass(i)*mass(i))*mesh%area(i))
 
                 ! scale rhs_a, rhs_m, too.
-                rhs_a(i) = rhs_a(i)/mesh%area(1,i)
-                rhs_m(i) = rhs_m(i)/mesh%area(1,i)
+                rhs_a(i) = rhs_a(i)/mesh%area(i)
+                rhs_m(i) = rhs_m(i)/mesh%area(i)
 
                 ice_nod(i) = .true.
             end if

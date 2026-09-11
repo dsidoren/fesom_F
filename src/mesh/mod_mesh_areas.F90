@@ -4,7 +4,9 @@ module mod_mesh_areas
     ! (nv = elem2D_nnodes(elem)); for triangles nv==3 so the anchor is unchanged.
     !
     ! Provides what M1 (tracer advection) needs: elem_cos, metric_factor, elem_area,
-    ! gradient_sca, edge_dxdy, edge_cross_dxdy, area/areasvol(+inv). M2.3 adds
+    ! gradient_sca, edge_dxdy, edge_cross_dxdy, area/areasvol(+inv). FESOM3 bottom at
+    ! vertices: area/areasvol(+inv) are 1-D (per vertex) -- a scalar column's horizontal
+    ! area does not vary with depth. See the contract in mod_mesh.F90. M2.3 adds
     ! coriolis (f=2*omega*sin(lat_geo) at elements + nodes). gradient_vec (M2 momentum
     ! advection) is still deferred. M4 (GM/Redi) adds mesh_resolution (scalar cell
     ! resolution + 3 mass-matrix smoothing sweeps, compute_mesh_resolution) — consumed by
@@ -375,51 +377,30 @@ contains
         type(t_mesh),   intent(inout) :: mesh
         integer,        intent(in)    :: nNodO, nNodL
         type(t_partit), intent(in)    :: partit
-        integer       :: n, j, elem, nz, nzmin, nzmax
+        integer       :: n, j
         real(kind=MP) :: acell
-        allocate(mesh%area(mesh%nl, nNodL), mesh%area_inv(mesh%nl, nNodL))
-        allocate(mesh%areasvol(mesh%nl, nNodL), mesh%areasvol_inv(mesh%nl, nNodL))
+        allocate(mesh%area(nNodL), mesh%area_inv(nNodL))
+        allocate(mesh%areasvol(nNodL), mesh%areasvol_inv(nNodL))
         mesh%area = 0.0_MP
         do n = 1, nNodO
             ! full median-dual area: EVERY adjacent element, no depth test.
             acell = 0.0_MP
             do j = 1, mesh%nod_in_elem2D_num(n)
-                elem = mesh%nod_in_elem2D(j, n)
                 ! literal 3.0_MP divisor (FESOM2 mesh_areas:2266; -no-prec-div
                 ! arity caveat — see elem_center). Triangles only at the anchor.
-                acell = acell + mesh%elem_area(elem) / 3.0_MP
+                acell = acell + mesh%elem_area(mesh%nod_in_elem2D(j, n)) / 3.0_MP
             end do
-            nzmin = mesh%ulevels_nod2D(n)
-            nzmax = mesh%nlevels_nod2D(n) - 1
-            do nz = nzmin, nzmax
-                mesh%area(nz, n) = acell
-            end do
+            mesh%area(n) = acell
         end do
-        ! non-cavity: "mid" cell area == upper-edge area
-        mesh%areasvol = 0.0_MP
-        do n = 1, nNodO
-            nzmin = mesh%ulevels_nod2D(n)
-            nzmax = mesh%nlevels_nod2D(n) - 1
-            do nz = nzmin, nzmax
-                mesh%areasvol(nz, n) = mesh%area(nz, n)
-            end do
-        end do
+        ! non-cavity: the scalar-volume area IS the control-volume area
+        mesh%areasvol = mesh%area
         ! deferred single scaling to physical m^2 (mesh_areas:2313-2315)
         mesh%elem_area = mesh%elem_area * r_earth * r_earth
         mesh%area      = mesh%area      * r_earth * r_earth
         mesh%areasvol  = mesh%areasvol  * r_earth * r_earth
-        ! inverse areas (mesh_areas:2321-2351); non-cavity areasvol_inv == area_inv
         mesh%area_inv = 0.0_MP
         do n = 1, nNodO
-            nzmin = mesh%ulevels_nod2D(n)
-            nzmax = mesh%nlevels_nod2D(n)
-            do nz = nzmin, nzmax
-                if (mesh%area(nz, n) > 0.0_MP) then
-                    mesh%area_inv(nz, n) = 1.0_MP / mesh%area(nz, n)
-                else
-                    mesh%area_inv(nz, n) = 0.0_MP
-                end if
-            end do
+            if (mesh%area(n) > 0.0_MP) mesh%area_inv(n) = 1.0_MP / mesh%area(n)
         end do
         mesh%areasvol_inv = mesh%area_inv
         ! ocean_area / ocean_areawithcav: faithful FESOM2 oce_mesh.F90:2385 sequential
@@ -436,9 +417,9 @@ contains
             real(kind=WP) :: gvol, gvol2
             vol = 0.0_MP; vol2 = 0.0_MP
             do n = 1, nNodO
-                vol2 = vol2 + mesh%areasvol(mesh%ulevels_nod2D(n), n)
+                vol2 = vol2 + mesh%areasvol(n)
                 if (mesh%ulevels_nod2D(n) > 1) cycle
-                vol  = vol + mesh%areasvol(1, n)
+                vol  = vol + mesh%areasvol(n)
             end do
             if (partit%npes > 1) then
                 gvol = real(vol, WP); gvol2 = real(vol2, WP)
@@ -471,7 +452,7 @@ contains
         real(kind=WP), allocatable :: work_array(:)
         allocate(mesh%mesh_resolution(nNodL))
         do n = 1, nNodL
-            mesh%mesh_resolution(n) = sqrt(mesh%areasvol(mesh%ulevels_nod2D(n), n) / pi) * 2.0_WP
+            mesh%mesh_resolution(n) = sqrt(mesh%areasvol(n) / pi) * 2.0_WP
         end do
         allocate(work_array(nNodO))
         do q = 1, 3                                     ! apply mass matrix 3x to smooth

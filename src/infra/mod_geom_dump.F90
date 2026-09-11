@@ -51,10 +51,10 @@ contains
         call wr_r2(u, 'edge_dxdy',         mesh%edge_dxdy(1:2, 1:n2))    ! R7: METRES
         call wr_r1(u, 'edge_len',          mesh%edge_len(1:n2))          ! R7: METRES
         call wr_r2(u, 'edge_cross_dxdy',   mesh%edge_cross_dxdy(1:4, 1:n2))
-        call wr_r2(u, 'area',              mesh%area(1:nl, 1:nn))
-        call wr_r2(u, 'areasvol',          mesh%areasvol(1:nl, 1:nn))
-        call wr_r2(u, 'area_inv',          mesh%area_inv(1:nl, 1:nn))
-        call wr_r2(u, 'areasvol_inv',      mesh%areasvol_inv(1:nl, 1:nn))
+        call wr_r1(u, 'area',              mesh%area(1:nn))
+        call wr_r1(u, 'areasvol',          mesh%areasvol(1:nn))
+        call wr_r1(u, 'area_inv',          mesh%area_inv(1:nn))
+        call wr_r1(u, 'areasvol_inv',      mesh%areasvol_inv(1:nn))
         call wr_r1(u, 'mesh_resolution',   mesh%mesh_resolution(1:nn))    ! M4 GM: scalar cell resolution
         call wr_i2(u, 'edges',             mesh%edges(1:2, 1:n2))
         call wr_i2(u, 'edge_tri',          mesh%edge_tri(1:2, 1:n2))

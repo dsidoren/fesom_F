@@ -63,7 +63,7 @@ contains
             nzmin = mesh%ulevels_nod2D(n)
             ! vert. flux at surface layer
             nz = nzmin
-            flux(nz,n) = -w(nz,n)*ttf(nz,n)*mesh%area(nz,n) - flux(nz,n)
+            flux(nz,n) = -w(nz,n)*ttf(nz,n)*mesh%area(n) - flux(nz,n)
             ! vert. flux at bottom layer --> zero bottom flux
             nz = nzmax
             flux(nz,n) = 0.0_WP - flux(nz,n)
@@ -71,7 +71,7 @@ contains
             do nz = nzmin+1, nzmax-1
                 flux(nz,n) = -0.5*(                                            &
                               ttf(nz  ,n)*(w(nz,n)+abs(w(nz,n))) +             &
-                              ttf(nz-1,n)*(w(nz,n)-abs(w(nz,n))))*mesh%area(nz,n) - flux(nz,n)
+                              ttf(nz-1,n)*(w(nz,n)-abs(w(nz,n))))*mesh%area(n) - flux(nz,n)
             end do
         end do
     end subroutine adv_tra_ver_upw1
@@ -109,13 +109,13 @@ contains
             nzmin = mesh%ulevels_nod2D(n)
             ! vert. flux at surface layer
             nz = nzmin
-            flux(nz,n) = -ttf(nz,n)*w(nz,n)*mesh%area(nz,n) - flux(nz,n)
+            flux(nz,n) = -ttf(nz,n)*w(nz,n)*mesh%area(n) - flux(nz,n)
             ! vert. flux 2nd layer --> centered differences
             nz = nzmin+1
-            flux(nz,n) = -0.5_WP*(ttf(nz-1,n)+ttf(nz,n))*w(nz,n)*mesh%area(nz,n) - flux(nz,n)
+            flux(nz,n) = -0.5_WP*(ttf(nz-1,n)+ttf(nz,n))*w(nz,n)*mesh%area(n) - flux(nz,n)
             ! vert. flux at bottom-1 layer --> centered differences
             nz = nzmax-1
-            flux(nz,n) = -0.5_WP*(ttf(nz-1,n)+ttf(nz,n))*w(nz,n)*mesh%area(nz,n) - flux(nz,n)
+            flux(nz,n) = -0.5_WP*(ttf(nz-1,n)+ttf(nz,n))*w(nz,n)*mesh%area(n) - flux(nz,n)
             ! vert. flux at bottom layer --> zero bottom flux
             nz = nzmax
             flux(nz,n) = 0.0_WP - flux(nz,n)
@@ -128,7 +128,7 @@ contains
                 Tmean1 = ttf(nz  ,n)+(2*qc+qu)*(mesh%zbar_3d_n(nz,n)-mesh%Z_3d_n(nz  ,n))/3.0_WP
                 Tmean2 = ttf(nz-1,n)+(2*qc+qd)*(mesh%zbar_3d_n(nz,n)-mesh%Z_3d_n(nz-1,n))/3.0_WP
                 Tmean  = (w(nz,n)+abs(w(nz,n)))*Tmean1+(w(nz,n)-abs(w(nz,n)))*Tmean2
-                flux(nz,n) = (-0.5_WP*(1.0_WP-num_ord)*Tmean - num_ord*(0.5_WP*(Tmean1+Tmean2))*w(nz,n))*mesh%area(nz,n) - flux(nz,n)
+                flux(nz,n) = (-0.5_WP*(1.0_WP-num_ord)*Tmean - num_ord*(0.5_WP*(Tmean1+Tmean2))*w(nz,n))*mesh%area(n) - flux(nz,n)
             end do
         end do
     end subroutine adv_tra_ver_qr4c

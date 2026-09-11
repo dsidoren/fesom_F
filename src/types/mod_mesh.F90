@@ -126,8 +126,20 @@ module mod_mesh
         integer, allocatable, dimension(:) :: nlevels, nlevels_nod2D, nlevels_nod2D_min
 
         ! ---- control-volume areas ----
-        real(kind=MP), allocatable, dimension(:,:) :: area, area_inv
-        real(kind=MP), allocatable, dimension(:,:) :: areasvol, areasvol_inv
+        !
+        ! FESOM3 BOTTOM AT VERTICES: these are 1-D (per vertex), NOT per level. The
+        ! scalar cell is a straight prism -- one bottom level, and the full median-dual
+        ! area at every wet layer -- so the horizontal area of a scalar column does not
+        ! vary with depth. This is the design note's `area(1:myDim+eDim)`.
+        !
+        ! Keeping them 2-D would be worse than wasteful: `area(nz,n)` still READS as
+        ! level-dependent at every call site, which is exactly how a wrong denominator
+        ! hides. An adjacent element that is dry at some level is not missing data to be
+        ! dropped from a node average -- its velocity/flux there is genuinely ZERO and it
+        ! must contribute that zero carrying its FULL area weight. 1-D makes that the only
+        ! expressible choice.
+        real(kind=MP), allocatable, dimension(:) :: area, area_inv
+        real(kind=MP), allocatable, dimension(:) :: areasvol, areasvol_inv
         real(kind=MP), allocatable, dimension(:)   :: mesh_resolution
 
         ! ---- elevation stiffness matrix ----

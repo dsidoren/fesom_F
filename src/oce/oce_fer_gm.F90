@@ -100,7 +100,7 @@ contains
                 if     (scaling_resolution .and. K_GM_resscalorder==1) then
                     scaling = scaling*(reso/refscalresol)**K_GM_resscalorder
                 elseif (scaling_resolution .and. K_GM_resscalorder==2) then
-                    scaling = scaling*(mesh%area(1,n)/(refscalresol**2)*2)**(1/K_GM_resscalorder)
+                    scaling = scaling*(mesh%area(n)/(refscalresol**2)*2)**(1/K_GM_resscalorder)
                 end if
 
                 ! resolution ramp (work_core K_GM_rampmax=-1 => always skipped; reso>0).
@@ -123,7 +123,7 @@ contains
                 if     (K_GM_resscalorder==1) then
                     Ki(nzmin,n) = K_hor*(reso/refscalresol)**K_GM_resscalorder
                 elseif (K_GM_resscalorder==2) then
-                    Ki(nzmin,n) = K_hor**(mesh%area(1,n)/(refscalresol**2)*2)**(1/K_GM_resscalorder)
+                    Ki(nzmin,n) = K_hor**(mesh%area(n)/(refscalresol**2)*2)**(1/K_GM_resscalorder)
                 end if
             end if
         end do

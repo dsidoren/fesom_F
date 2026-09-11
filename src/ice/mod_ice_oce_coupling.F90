@@ -253,7 +253,7 @@ contains
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         lval = 0.0_WP
         do row = 1, nNodO
-            lval = lval + data(row)*mesh%areasvol(mesh%ulevels_nod2D(row), row)
+            lval = lval + data(row)*mesh%areasvol(row)
         end do
         int2D = lval
         if (is_multirank(partit)) call allreduce_sum(int2D, partit)

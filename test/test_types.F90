@@ -52,7 +52,7 @@ contains
         a%ocean_area = 1234.5_MP
         allocate(a%coord_nod2D(2, a%nod2D), a%elem2D_nodes(4, a%elem2D))
         allocate(a%elem2D_nnodes(a%elem2D), a%nlevels(a%elem2D))
-        allocate(a%area(a%nl, a%nod2D), a%hnode(a%nl, a%nod2D))
+        allocate(a%area(a%nod2D), a%hnode(a%nl, a%nod2D))   ! area is 1-D (bottom at vertices)
         allocate(a%ssh_stiff%rowptr(a%nod2D+1), a%ssh_stiff%values(13))
         a%ssh_stiff%dim = a%nod2D; a%ssh_stiff%nza = 13
         do j = 1, a%nod2D
@@ -66,8 +66,8 @@ contains
                 a%elem2D_nodes(i, j) = i + j
             end do
         end do
-        a%area = reshape([(real(i, MP)*1.5_MP, i=1, a%nl*a%nod2D)], [a%nl, a%nod2D])
-        a%hnode = a%area * 2.0_MP
+        a%area  = [(real(i, MP)*1.5_MP, i=1, a%nod2D)]
+        a%hnode = reshape([(real(i, MP)*3.0_MP, i=1, a%nl*a%nod2D)], [a%nl, a%nod2D])
         a%ssh_stiff%rowptr = [(i, i=1, a%nod2D+1)]
         a%ssh_stiff%values = [(real(i, MP)*3.0_MP, i=1, 13)]
 

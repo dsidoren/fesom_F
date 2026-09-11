@@ -131,7 +131,7 @@ contains
                 nl1 = mesh%nlevels_nod2D(n)
                 do nz = nu1, nl1-1
                     fct_LO(nz,n) = (ttf(nz,n)*mesh%hnode(nz,n) &
-                                  + (fct_LO(nz,n) + (adv_flux_ver(nz,n)-adv_flux_ver(nz+1,n)))*dt/mesh%areasvol(nz,n)) &
+                                  + (fct_LO(nz,n) + (adv_flux_ver(nz,n)-adv_flux_ver(nz+1,n)))*dt/mesh%areasvol(n)) &
                                   / mesh%hnode_new(nz,n)
                 end do
             end do

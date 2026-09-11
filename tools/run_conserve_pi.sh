@@ -56,13 +56,26 @@ for np in 1 2; do
     fi
 done
 
-echo "=== zstar + Redi, np=1, $NSTEPS steps (conservation gate, tol=$TOL) ==="
-if FESOM3_WHICH_ALE=zstar FESOM3_REDI=1 FESOM3_CONSERVE_TOL="$TOL" \
-     mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -6; then
-    :
-else
-    echo "run_conserve_pi: FAILED (zstar+Redi np=1)"; fail=1
-fi
+# Physics combinations. The area/areasvol consumers are spread across the vertical
+# diffusion TDMA, the Redi isoneutral flux and the KPP non-local / shortwave terms, and
+# each is only reachable with its own scheme switched on -- a gate that runs only the
+# default configuration proves nothing about the others.
+while read -r label vars; do
+    [ -z "$label" ] && continue
+    echo "=== zstar + $label, np=1, $NSTEPS steps (conservation gate, tol=$TOL) ==="
+    if env $vars FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
+         mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -7; then
+        :
+    else
+        echo "run_conserve_pi: FAILED (zstar+$label np=1)"; fail=1
+    fi
+done <<'CFG'
+Redi FESOM3_REDI=1
+KPP FESOM3_MIX_KPP=1
+TKE FESOM3_MIX_TKE=1
+GM+Redi+TKE FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1
+GM+KPP FESOM3_FER_GM=1 FESOM3_MIX_KPP=1
+CFG
 
 echo "=== linfs, np=1, $NSTEPS steps (invariants only; drift reported, not gated) ==="
 if FESOM3_WHICH_ALE=linfs mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -5; then

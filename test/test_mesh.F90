@@ -51,13 +51,14 @@ program test_mesh
     call check(max_grad_const(mesh) < 1.0e-6_WP, 'pi: gradient_sca annihilates constant')
     call check(all(mesh%nlevels >= 1 .and. mesh%nlevels <= mesh%nl), 'pi: nlevels in range')
     call check(adjacency_consistent(mesh), 'pi: nod_in_elem2D consistent')
-    call check(all(mesh%area(1, 1:mesh%nod2D) > 0.0_MP), 'pi: surface control areas > 0')
-    ! FESOM3 bottom at vertices: the scalar cell is a straight prism, so its horizontal
-    ! area is the SAME at every wet layer of the column, and the entry at the bottom
-    ! interface level nlevels_nod2D(n) is a deliberate zero (closed bottom).
-    call check(area_depth_independent(mesh), 'pi: area constant over each wet column')
-    call check(area_zero_at_bottom_interface(mesh), 'pi: area == 0 at nlevels_nod2D')
-    call check(areasvol_inv_usable(mesh), 'pi: areasvol_inv finite and > 0 over wet range')
+    ! FESOM3 bottom at vertices: area/areasvol(+inv) are 1-D -- a scalar column's
+    ! horizontal area does not vary with depth, so depth-independence is now structural
+    ! rather than something to assert. What is left to check is that every column has a
+    ! usable area and reciprocal, since areasvol divides every tracer tendency.
+    call check(all(mesh%area(1:mesh%nod2D) > 0.0_MP), 'pi: control areas > 0')
+    call check(all(mesh%areasvol(1:mesh%nod2D) == mesh%area(1:mesh%nod2D)), &
+               'pi: areasvol == area (no cavity)')
+    call check(areasvol_inv_usable(mesh), 'pi: areasvol_inv finite and > 0')
     ! The node-average denominator used by tr_xynodes (oce_ale_tracer.F90) is the area of
     ! the elements that ACTUALLY contribute at level nz, not areasvol. At the surface every
     ! adjacent element is wet, so the two agree; deeper they must not, or the change from
@@ -112,49 +113,26 @@ contains
         end do
     end function
 
-    logical function area_depth_independent(m)
-        ! area(nz,n) must equal the surface value across the vertex's whole wet range.
-        type(t_mesh), intent(in) :: m
-        integer :: n, nz
-        area_depth_independent = .true.
-        do n = 1, m%nod2D
-            do nz = m%ulevels_nod2D(n), m%nlevels_nod2D(n)-1
-                if (m%area(nz,n) /= m%area(m%ulevels_nod2D(n), n)) then
-                    area_depth_independent = .false.; return
-                end if
-            end do
-        end do
-    end function
-
-    logical function area_zero_at_bottom_interface(m)
+    logical function areasvol_inv_usable(m)
+        ! areasvol_inv divides every tracer tendency, so every node needs a finite,
+        ! positive reciprocal area.
         type(t_mesh), intent(in) :: m
         integer :: n
-        area_zero_at_bottom_interface = .true.
+        areasvol_inv_usable = .true.
         do n = 1, m%nod2D
-            if (m%area(m%nlevels_nod2D(n), n) /= 0.0_MP) then
-                area_zero_at_bottom_interface = .false.; return
+            if (.not. (m%areasvol_inv(n) > 0.0_MP) .or. &
+                .not. (abs(m%areasvol_inv(n)) <= huge(1.0_MP))) then
+                areasvol_inv_usable = .false.; return
             end if
         end do
     end function
 
-    logical function areasvol_inv_usable(m)
-        ! every wet scalar cell must have a usable reciprocal area (it divides every
-        ! tracer tendency), and it must be finite.
-        type(t_mesh), intent(in) :: m
-        integer :: n, nz
-        areasvol_inv_usable = .true.
-        do n = 1, m%nod2D
-            do nz = m%ulevels_nod2D(n), m%nlevels_nod2D(n)-1
-                if (.not. (m%areasvol_inv(nz,n) > 0.0_MP) .or. &
-                    .not. (abs(m%areasvol_inv(nz,n)) <= huge(1.0_MP))) then
-                    areasvol_inv_usable = .false.; return
-                end if
-            end do
-        end do
-    end function
-
     real(kind=MP) function wet_elem_area(m, n, nz)
-        ! sum of elem_area over the adjacent elements wet at level nz (the tr_xynodes tvol)
+        ! sum of elem_area over the adjacent elements wet at level nz -- the denominator
+        ! the POINTWISE node averages use (UVnode, edge_up_dn_grad, sigma_xy, smooth_nod),
+        ! as opposed to the full areasvol the FLUX-forming ones use (tr_xynodes,
+        ! momentum_adv_scalar). The two genuinely differ under a vertex bottom and each
+        ! is right for its own job; see the checks below.
         type(t_mesh), intent(in) :: m
         integer,      intent(in) :: n, nz
         integer :: k, elem
@@ -167,14 +145,14 @@ contains
     end function
 
     logical function wet_area_matches_at_surface(m)
+        ! at the surface every adjacent element is wet, so the two denominators agree
         type(t_mesh), intent(in) :: m
-        integer :: n, nz
+        integer :: n
         real(kind=MP) :: tvol, ref
         wet_area_matches_at_surface = .true.
         do n = 1, m%nod2D
-            nz   = m%ulevels_nod2D(n)
-            tvol = wet_elem_area(m, n, nz) / 3.0_MP
-            ref  = m%areasvol(nz, n)
+            tvol = wet_elem_area(m, n, m%ulevels_nod2D(n)) / 3.0_MP
+            ref  = m%areasvol(n)
             if (abs(tvol - ref) > 1.0e-9_MP*max(abs(ref), 1.0_MP)) then
                 wet_area_matches_at_surface = .false.; return
             end if
@@ -182,14 +160,13 @@ contains
     end function
 
     logical function wet_area_differs_at_depth(m)
+        ! ... and deeper they must NOT, or the pointwise/flux distinction would be vacuous
         type(t_mesh), intent(in) :: m
         integer :: n, nz
-        real(kind=MP) :: tvol
         wet_area_differs_at_depth = .false.
         do n = 1, m%nod2D
             do nz = m%ulevels_nod2D(n), m%nlevels_nod2D(n)-1
-                tvol = wet_elem_area(m, n, nz) / 3.0_MP
-                if (tvol < m%areasvol(nz, n) * 0.999_MP) then
+                if (wet_elem_area(m, n, nz)/3.0_MP < m%areasvol(n) * 0.999_MP) then
                     wet_area_differs_at_depth = .true.; return
                 end if
             end do

@@ -175,13 +175,13 @@ contains
             cn   = clo2 - clo + 1
             location(1:cn) = ssh_stiff%colind_loc(clo:clo2)
             m_icel(row)  = (rhs_m(row) +gamma*sum(mass_matrix(clo:clo2)* &
-                            m_ice(location(1:cn))))/mesh%area(1,row) + &
+                            m_ice(location(1:cn))))/mesh%area(row) + &
                            (1.0_WP-gamma)*m_ice(row)
             a_icel(row)  = (rhs_a(row) +gamma*sum(mass_matrix(clo:clo2)* &
-                            a_ice(location(1:cn))))/mesh%area(1,row) + &
+                            a_ice(location(1:cn))))/mesh%area(row) + &
                            (1.0_WP-gamma)*a_ice(row)
             m_snowl(row) = (rhs_ms(row)+gamma*sum(mass_matrix(clo:clo2)* &
-                            m_snow(location(1:cn))))/mesh%area(1,row) + &
+                            m_snow(location(1:cn))))/mesh%area(row) + &
                            (1.0_WP-gamma)*m_snow(row)
         end do
         end associate
@@ -229,9 +229,9 @@ contains
         ! the first approximation
         do row = 1, nNodO
             if (mesh%ulevels_nod2D(row) > 1) cycle
-            dm_ice(row)  = rhs_m(row) /mesh%area(1,row)
-            da_ice(row)  = rhs_a(row) /mesh%area(1,row)
-            dm_snow(row) = rhs_ms(row)/mesh%area(1,row)
+            dm_ice(row)  = rhs_m(row) /mesh%area(row)
+            da_ice(row)  = rhs_a(row) /mesh%area(row)
+            dm_snow(row) = rhs_ms(row)/mesh%area(row)
         end do
         if (lmr) then
             call exchange_nod(dm_ice,  partit)
@@ -249,11 +249,11 @@ contains
                 cn   = clo2 - clo + 1
                 location(1:cn) = ssh_stiff%colind_loc(clo:clo2)
                 rhs_new      = rhs_m(row)  - sum(mass_matrix(clo:clo2)*dm_ice(location(1:cn)))
-                m_icel(row)  = dm_ice(row) + rhs_new/mesh%area(1,row)
+                m_icel(row)  = dm_ice(row) + rhs_new/mesh%area(row)
                 rhs_new      = rhs_a(row)  - sum(mass_matrix(clo:clo2)*da_ice(location(1:cn)))
-                a_icel(row)  = da_ice(row) + rhs_new/mesh%area(1,row)
+                a_icel(row)  = da_ice(row) + rhs_new/mesh%area(row)
                 rhs_new      = rhs_ms(row) - sum(mass_matrix(clo:clo2)*dm_snow(location(1:cn)))
-                m_snowl(row) = dm_snow(row)+ rhs_new/mesh%area(1,row)
+                m_snowl(row) = dm_snow(row)+ rhs_new/mesh%area(row)
             end do
 
             do row = 1, nNodO
@@ -334,19 +334,19 @@ contains
             if (tr_array_id == 1) then
                 do q = 1, 3
                     icefluxes(elem,q) = -sum(icoef(:,q)*(gamma*m_ice(elnodes) + &
-                                dm_ice(elnodes)))*(vol/mesh%area(1,elnodes(q)))/12.0_WP
+                                dm_ice(elnodes)))*(vol/mesh%area(elnodes(q)))/12.0_WP
                 end do
             end if
             if (tr_array_id == 2) then
                 do q = 1, 3
                     icefluxes(elem,q) = -sum(icoef(:,q)*(gamma*a_ice(elnodes) + &
-                                da_ice(elnodes)))*(vol/mesh%area(1,elnodes(q)))/12.0_WP
+                                da_ice(elnodes)))*(vol/mesh%area(elnodes(q)))/12.0_WP
                 end do
             end if
             if (tr_array_id == 3) then
                 do q = 1, 3
                     icefluxes(elem,q) = -sum(icoef(:,q)*(gamma*m_snow(elnodes) + &
-                                dm_snow(elnodes)))*(vol/mesh%area(1,elnodes(q)))/12.0_WP
+                                dm_snow(elnodes)))*(vol/mesh%area(elnodes(q)))/12.0_WP
                 end do
             end if
         end do

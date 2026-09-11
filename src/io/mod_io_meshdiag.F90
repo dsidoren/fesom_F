@@ -160,7 +160,13 @@ contains
 
         ! nod_area (node, nl levels, real)
         allocate(r3(nl, max(1,nNodO)))
-        do i = 1, nNodO; r3(1:nl, i) = real(mesh%area(1:nl, i), WP); end do
+        ! FESOM3 bottom at vertices: mesh%area is 1-D (depth-independent). The diag file
+        ! keeps its (nl, nod) schema, so broadcast the column value over the WET levels and
+        ! leave the rest zero -- same shape, and still a faithful picture of the cell.
+        r3 = 0.0_WP
+        do i = 1, nNodO
+            r3(mesh%ulevels_nod2D(i):mesh%nlevels_nod2D(i)-1, i) = real(mesh%area(i), WP)
+        end do
         call wr3_r(store, a_nod_area, Dn, r3, nl, 0.0_WP)
         deallocate(r3)
 
