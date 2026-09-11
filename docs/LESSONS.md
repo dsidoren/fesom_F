@@ -2293,6 +2293,21 @@ first is what made every later task measurable — and it earned its keep immedi
 the `helem` loop bound reproduces
 `helem VIOLATED elem 1 nz 18 helem/mean= 6.0000000000000000E+01 6.0000195317207513E+01`.
 
+**5. A gate that never runs the code path proves nothing — check the feature flags.** The
+`tr_xynodes` denominator was the one change flagged as a physics judgement, yet every gate run
+against it had `Redi = .false.`: `diff_ver_part_redi_expl` is its only caller, it is guarded by
+`if (Redi)` (`oce_ale_tracer.F90:225`), and the driver inherited the `.false.` default because it
+was derived from a *reduced-config* lifecycle driver that had no GM/Redi knobs. Zero coverage, and
+nothing failed to say so. **After building a gate, list the `if (feature)` guards around the code
+you changed and confirm the gate actually turns them on.**
+
+And when it did run: conservation still could not tell right from wrong, because the Redi tendency
+is a telescoping flux divergence (`del_ttf += (vd_flux(nz)-vd_flux(nz+1))*dt/areasvol`) that
+conserves for *any* `tr_xynodes`. The discriminating test is a value test, not a budget test — feed
+a constant element gradient and require the node average to return it: wet-area `4.4e-16`, `areasvol`
+off by `8.6e-01`. **A conservative operator launders a wrong coefficient; budget checks cannot see
+inside one.**
+
 **And one thing that is not a trap.** `linfs` drifts `-2.2e-04` in heat over 20 unforced pi steps
 and that is correct behaviour, not a leak: the linear free surface freezes `hnode`, so the surface
 vertical advective flux `-w*T*area` at `nzmin` (`oce_adv_tra_ver.F90:66`) is a real source/sink with

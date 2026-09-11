@@ -168,7 +168,8 @@ With the oracle gates retired, two FESOM_F-internal checks carry the numerical v
 vertex-bottom scheme.
 
 **`tools/run_conserve_pi.sh` — conservation and no-leakage.** Runs `fesom_conserve` (an unforced
-20-step pi run) and checks four per-step invariants: total heat/salt content, `UV(:,nz,e) == 0` for
+20-step pi run) at `zstar` np 1/2, `zstar`+Redi np 1, and `linfs` np 1, checking four per-step
+invariants: total heat/salt content, `UV(:,nz,e) == 0` for
 `nz >= nlevels(e)` (no velocity in a partly-land prism), `helem == mean(hnode over elnodes)` across
 the element's full range, and finiteness of `UV`/`w`/`hnode`/tracers. Registered as ctest at np 1
 and 2.
@@ -179,7 +180,20 @@ The conservation part gates on **zstar only**, at a relative tolerance of `1e-12
 |---|---|---|---|
 | zstar | 1 | `-5.97e-15` | `-1.04e-15` |
 | zstar | 2 | `+1.34e-14` | `-1.43e-14` |
+| zstar + Redi | 1 | `-1.07e-15` | `-6.91e-16` |
 | linfs | 1 | `-2.17e-04` | `-1.09e-06` |
+
+**The Redi case is not optional coverage.** `diff_ver_part_redi_expl` is the only caller of the
+`tr_xynodes` node-average whose denominator the depth-independent area changed, and it runs only
+under `if (Redi)` (`oce_ale_tracer.F90:225`), which defaults to `.false.`. Without `FESOM3_REDI` that
+code path never executes.
+
+**And conservation alone does not validate that denominator.** The Redi tendency is a telescoping
+flux divergence — `del_ttf += (vd_flux(nz)-vd_flux(nz+1))*dt/areasvol` — so the column total is
+conserved whatever `tr_xynodes` contains. The denominator is pinned separately by `test_bottom`'s
+*Redi: node-averaged gradient is exact on the WET area*: fed a constant element gradient (what a
+linear tracer field produces), averaging over the elements that actually contribute returns it to
+`4.4e-16`, while dividing by `areasvol` is off by up to `8.6e-01` — 86 % at the worst pi node.
 
 **`linfs` is not tracer-conserving and cannot be gated on drift.** The linear free surface freezes
 `hnode`, so the surface vertical advective flux `-w*T*area` at `nzmin` (`oce_adv_tra_ver.F90:66`) is

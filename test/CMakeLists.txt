@@ -45,3 +45,12 @@ foreach(_np 1 2)
         ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_CONSERVE_TOL=1e-12"
         SKIP_REGULAR_EXPRESSION "cannot open;No such file")
 endforeach()
+
+# Redi variant: diff_ver_part_redi_expl is the only caller of the tr_xynodes node-average
+# whose denominator this change touched, and it runs only when Redi is on.
+add_test(NAME fesom_conserve_zstar_redi_np1
+         COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np 1
+                 $<TARGET_FILE:fesom_conserve>)
+set_tests_properties(fesom_conserve_zstar_redi_np1 PROPERTIES
+    ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_REDI=1;FESOM3_CONSERVE_TOL=1e-12"
+    SKIP_REGULAR_EXPRESSION "cannot open;No such file")

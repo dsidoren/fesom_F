@@ -60,6 +60,7 @@ program test_bottom
     call check(sloping_triangle(mesh, nElemO),      'T2: sloping triangle takes the shallowest vertex')
     call check(edge_len_is_metres(mesh),            'T7: edge_len matches haversine, edge_dxdy metre-scale')
     call check(edge_dxdy_fold_exact(mesh),          'T7: edge_dxdy == radian value * r_earth * mean(elem_cos)')
+    call check(redi_node_average_exact(mesh, nNodO), 'Redi: node-averaged gradient is exact on the WET area')
 
     if (partit%npes > 1) then
         ! The halo derivation. elem2D_nodes is owned-only, so halo nlevels can only come
@@ -189,6 +190,59 @@ contains
         write(*,'(a,es12.4,a,i0)') '  T7: worst |edge_len-haversine|/haversine = ', worst, &
             '   edges over 20%: ', nbad
         if (nbad > 0) edge_len_is_metres = .false.
+    end function
+
+    logical function redi_node_average_exact(m, nNod)
+        ! The tr_xynodes denominator (oce_ale_tracer.F90, diff_ver_part_redi_expl).
+        !
+        ! Conservation cannot test this: the Redi tendency is a telescoping flux
+        ! divergence, del_ttf += (vd_flux(nz)-vd_flux(nz+1))*dt/areasvol, so the column
+        ! total is conserved whatever tr_xynodes contains. The denominator only shows up
+        ! in the VALUE of the averaged gradient.
+        !
+        ! Feed a CONSTANT element gradient -- what a linear tracer field produces -- and
+        ! require the node average to return that constant exactly. Averaging over the
+        ! elements that actually contribute does; dividing by areasvol, which is now the
+        ! FULL prism area, scales it by wet_area/full_area < 1 wherever an adjacent
+        ! element is dry. The second loop proves the test can tell them apart, so a
+        ! regression here cannot pass silently.
+        type(t_mesh), intent(in) :: m
+        integer,      intent(in) :: nNod
+        integer :: n, nz, k, elem
+        real(kind=WP), parameter :: G = 3.0_WP        ! the constant gradient
+        real(kind=WP) :: tx, tvol, avg_wet, avg_old, worst, worst_old
+        logical :: discriminates
+        redi_node_average_exact = .true.
+        worst = 0.0_WP; worst_old = 0.0_WP; discriminates = .false.
+        do n = 1, nNod
+            if (m%nlevels_nod2D(n) <= 0) cycle
+            do nz = m%ulevels_nod2D(n), m%nlevels_nod2D(n)-1
+                tx = 0.0_WP; tvol = 0.0_WP
+                do k = 1, m%nod_in_elem2D_num(n)
+                    elem = m%nod_in_elem2D(k, n)
+                    if (nz <= m%nlevels(elem)-1 .and. nz >= m%ulevels(elem)) then
+                        tvol = tvol + real(m%elem_area(elem), WP)
+                        tx   = tx   + G*real(m%elem_area(elem), WP)
+                    end if
+                end do
+                if (tvol <= 0.0_WP) cycle
+                avg_wet = tx/tvol                                        ! current code
+                avg_old = tx/3.0_WP/real(m%areasvol(nz,n), WP)           ! FESOM2 form
+                worst     = max(worst,     abs(avg_wet - G)/G)
+                worst_old = max(worst_old, abs(avg_old - G)/G)
+                if (abs(avg_old - G)/G > 1.0e-6_WP) discriminates = .true.
+            end do
+        end do
+        write(*,'(a,es12.4,a,es12.4)') '  Redi: worst |avg-G|/G  wet-area ', worst, &
+            '   areasvol ', worst_old
+        if (worst > 1.0e-12_WP) then
+            write(*,'(a)') '  FAIL: the wet-area average does not reproduce a constant gradient'
+            redi_node_average_exact = .false.
+        end if
+        if (.not. discriminates) then
+            write(*,'(a)') '  FAIL: test cannot distinguish the two denominators on this mesh'
+            redi_node_average_exact = .false.
+        end if
     end function
 
     logical function edge_dxdy_fold_exact(m)

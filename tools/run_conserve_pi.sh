@@ -5,6 +5,12 @@
 # and must stay green through every task of that plan.
 #
 # What it checks, via src/drivers/fesom_conserve.F90:
+#   zstar + Redi, np 1 -> the Redi path. diff_ver_part_redi_expl is the ONLY caller of
+#       the tr_xynodes node-average whose denominator the depth-independent area changed,
+#       and it never runs unless Redi is on. Note that conservation alone does NOT validate
+#       that denominator -- the Redi tendency is a telescoping flux divergence, so it
+#       conserves whatever tr_xynodes contains. The denominator is pinned by test_bottom's
+#       'Redi: node-averaged gradient is exact on the WET area' check instead.
 #   zstar, np 1 and 2 -> HARD conservation gate. Total heat and salt content must not
 #       drift beyond TOL. This is the sharp test of the bottom change: if the flux areas
 #       and the cell volumes ever disagree -- the central risk when area() becomes
@@ -49,6 +55,14 @@ for np in 1 2; do
         echo "run_conserve_pi: FAILED (zstar np=$np)"; fail=1
     fi
 done
+
+echo "=== zstar + Redi, np=1, $NSTEPS steps (conservation gate, tol=$TOL) ==="
+if FESOM3_WHICH_ALE=zstar FESOM3_REDI=1 FESOM3_CONSERVE_TOL="$TOL" \
+     mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -6; then
+    :
+else
+    echo "run_conserve_pi: FAILED (zstar+Redi np=1)"; fail=1
+fi
 
 echo "=== linfs, np=1, $NSTEPS steps (invariants only; drift reported, not gated) ==="
 if FESOM3_WHICH_ALE=linfs mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -5; then
