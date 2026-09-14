@@ -318,7 +318,15 @@ do n = 1, nNodO
 end do
 ```
 
-**The array stays 2-D**, even though the note writes `area(1:myDim+eDim)`. Keeping the
+> **SUPERSEDED during implementation.** The array is **1-D**, exactly as the note writes it
+> (`area(1:myDim+eDim)`). The reasoning below for keeping it 2-D was wrong in a way that
+> mattered: `area(nz,n)` still *reads* as level-dependent at every call site, and that is
+> precisely how a wrong denominator hid — nine node-averaging sites silently split into two
+> groups that no longer agreed, and nothing failed. 1-D makes the level index unwritable.
+> The bottom-interface zero it protected turned out not to be load-bearing. See the final
+> commit and IMPLEMENTATION.md §13.
+
+~~**The array stays 2-D**~~, even though the note writes `area(1:myDim+eDim)`. Keeping the
 `nz = nlevels_nod2D(n)` entry at zero costs nothing, matches what the current accumulation
 produces, and keeps the "closed bottom" idiom for any consumer added later. It is *not*
 load-bearing today (correction 4).
@@ -335,7 +343,7 @@ this change. Confirmed by the user on 2026-09-10:
 
 | site | what it is | decision |
 |---|---|---|
-| `oce_ale_tracer.F90:440-448` — `Tx/3.0_WP/areasvol(nz,n)` | a node-**average** of element tracer gradients (the `/3.0` and the name say so) | **renormalise** by the locally accumulated wet area, matching the pattern already used at `oce_ale.F90:84-89` and `oce_pressure_bv.F90:303-311` |
+| `oce_ale_tracer.F90:440-448` — `Tx/3.0_WP/areasvol(nz,n)` | a node-**average** of element tracer gradients | ⚠️ **THIS DECISION WAS WRONG AND WAS REVERTED.** Renormalising by the wet area inflates the Redi flux by `full/wet` — up to **7.04×** at 10.4 % of pi node-levels — because the flux is `tr_xynodes * area`, which with the `areasvol` denominator collapses correctly to `sum over wet elements of tr_xy*(elem_area/3)`. A dry adjacent element is not missing data: its flux is genuinely ZERO and it must carry its full area weight. The original expression is correct. |
 | `oce_dyn_velrhs.F90:213-217` + `:299-300` | a **flux divergence** over the control volume (`sum(UV*elem_area)*W`, then `*areasvol_inv`) | **leave alone** — dividing by the full CV area is correct under the new scheme |
 
 `tr_xynodes` feeds Redi, which is on in the target production config, so this is not
@@ -512,22 +520,25 @@ All four invariants pass on unmodified code at both rank counts and both ALE mod
 - Modify: `src/oce/oce_ale_tracer.F90`
 - Modify: `test/test_mesh.F90`
 
-- [ ] rewrite the `mesh%area` accumulation in `compute_node_areas` (`:347-359`) to the full
+- [x] rewrite the `mesh%area` accumulation in `compute_node_areas` (`:347-359`) to the full
       median-dual area with no depth test, over `nz = ulevels_nod2D(n)..nlevels_nod2D(n)-1`
-- [ ] leave the `nz = nlevels_nod2D(n)` entry zero; comment that it is a deliberate closed
+- [x] leave the `nz = nlevels_nod2D(n)` entry zero; comment that it is a deliberate closed
       bottom, **not** currently load-bearing
-- [ ] keep the deferred single `* r_earth**2` scaling and the `areasvol`/`area_inv`/
+- [x] keep the deferred single `* r_earth**2` scaling and the `areasvol`/`area_inv`/
       `areasvol_inv` derivation exactly as they are
-- [ ] normalise `tr_xynodes` (`oce_ale_tracer.F90:440-448`) by the locally accumulated wet
-      area instead of `areasvol`, preserving average semantics
-- [ ] leave `oce_dyn_velrhs.F90:213-217`/`:299-300` alone; add a comment recording that it is
-      a flux divergence over the full CV, deliberately not renormalised
-- [ ] leave every explicit `area(nz)/areasvol(nz)` ratio in `oce_ale_tracer.F90` untouched
-- [ ] add to `test_mesh.F90`: on pi, `area(nz,n) == area(ulevels_nod2D(n),n)` across the wet
-      range; `area(nlevels_nod2D(n),n) == 0`; `areasvol_inv` finite and `> 0` over the wet range
-- [ ] add a test that `tr_xynodes` reproduces a linear tracer field exactly on the analytic
-      mesh (catches a wrong denominator)
-- [ ] run tests: `ctest --output-on-failure` **and** `run_conserve_pi.sh` for both ALE modes;
+- [x] ⚠️ REVERTED — `tr_xynodes` keeps the `areasvol` (full-area) denominator. Renormalising
+      by the wet area was a bug: it inflates the Redi isoneutral flux by `full/wet`, up to
+      7.04× on pi. Pinned by test_bottom's flux-composition check.
+- [x] leave `oce_dyn_velrhs.F90:213-217`/`:299-300` alone — a flux divergence over the full
+      CV, correctly on the full area (this judgement held up)
+- [x] leave every explicit `area(nz)/areasvol(nz)` ratio in `oce_ale_tracer.F90` untouched
+- [x] add to `test_mesh.F90`: control areas `> 0`, `areasvol == area`, `areasvol_inv` finite
+      and `> 0` (depth-independence became structural once the array went 1-D)
+- [x] ➕ test that the Redi flux COMPOSES: `tr_xynodes*area == sum of per-element shares`.
+      A value test, not a budget test — the Redi tendency is a telescoping flux divergence
+      and so conserves for *any* denominator; a conservative operator launders a wrong
+      coefficient.
+- [x] run tests: `ctest --output-on-failure` **and** `run_conserve_pi.sh` for both ALE modes;
       compare against the Task 2 baseline
 
 ### Task 4: zstar full-column stretch + `helem` bottom-layer repair
@@ -535,15 +546,15 @@ All four invariants pass on unmodified code at both rank counts and both ALE mod
 **Files:**
 - Modify: `src/oce/oce_ale.F90`
 
-- [ ] `:396`: `nlevels_nod2D_min(n)-1` → `nlevels_nod2D(n)-1`, with a comment that the
+- [x] `:396`: `nlevels_nod2D_min(n)-1` → `nlevels_nod2D(n)-1`, with a comment that the
       stretch now spans the whole column because `area` is depth-independent
-- [ ] `:534`: `nlevels_nod2D_min(n)-2` → `nlevels_nod2D(n)-2`
-- [ ] `:549`: extend the `helem` rebuild to `nz = nzmin, nzmax` so the element's deepest
+- [x] `:534`: `nlevels_nod2D_min(n)-2` → `nlevels_nod2D(n)-2`
+- [x] `:549`: extend the `helem` rebuild to `nz = nzmin, nzmax` so the element's deepest
       layer is rewritten; comment why the old bound was safe and no longer is
-- [ ] **leave `oce_muscl_adv.F90` and `oce_fer_gm.F90` untouched** — see the retention table
-- [ ] add the `helem(nz,e) == sum(hnode(nz,elnodes))/3` invariant over
+- [x] **leave `oce_muscl_adv.F90` and `oce_fer_gm.F90` untouched** — see the retention table
+- [x] add the `helem(nz,e) == sum(hnode(nz,elnodes))/3` invariant over
       `nz = ulevels(e)..nlevels(e)-1` to `fesom_conserve`'s per-step assertions
-- [ ] run tests: `ctest` **and** `run_conserve_pi.sh` with `FESOM3_WHICH_ALE=zstar` — this is
+- [x] run tests: `ctest` **and** `run_conserve_pi.sh` with `FESOM3_WHICH_ALE=zstar` — this is
       the task that gate exists for
 
 ### Task 5: Derive `nlevels`/`ulevels` at 1 rank; stop reading `elvls.out`
@@ -554,29 +565,29 @@ All four invariants pass on unmodified code at both rank counts and both ALE mod
 - Create: `test/test_bottom.F90`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] delete the `elvls.out` read from `read_mesh` (`:95-99`); allocate `nlevels` in
+- [x] delete the `elvls.out` read from `read_mesh` (`:95-99`); allocate `nlevels` in
       `setup_vertical` instead
-- [ ] derive `ulevels(e) = maxval(ulevels_nod2D(elnodes))` and
+- [x] derive `ulevels(e) = maxval(ulevels_nod2D(elnodes))` and
       `nlevels(e) = minval(nlevels_nod2D(elnodes))` over `elem2D_nnodes(e)` vertices, then
       `elem_depth(e) = zbar(nlevels(e))`
-- [ ] recompute `nlevels_nod2D_min`/`ulevels_nod2D_max` from the **derived** `nlevels`
+- [x] recompute `nlevels_nod2D_min`/`ulevels_nod2D_max` from the **derived** `nlevels`
       (they are now 2-ring bounds)
-- [ ] add a runtime check in `setup_vertical`: `maxval over adj(n) of nlevels(e) ==
+- [x] add a runtime check in `setup_vertical`: `maxval over adj(n) of nlevels(e) ==
       nlevels_nod2D(n)` for every node, `error stop` with the node id on failure
-- [ ] derive the same way in `mod_mesh_analytic.F90` instead of hard-setting `nlevels = nl`
-- [ ] create `test/test_bottom.F90` on the `test_mesh.F90` skeleton (`par_init`/`read_mesh`/
+- [x] derive the same way in `mod_mesh_analytic.F90` instead of hard-setting `nlevels = nl`
+- [x] create `test/test_bottom.F90` on the `test_mesh.F90` skeleton (`par_init`/`read_mesh`/
       `compute_geometry` + `check()`)
-- [ ] test **T2**: analytic mesh, override `nlevels_nod2D` on one triangle to `[8,6,5]`,
+- [x] test **T2**: analytic mesh, override `nlevels_nod2D` on one triangle to `[8,6,5]`,
       re-derive, assert `nlevels(e) == 5`
-- [ ] test **T3**: two edge vertices with different bounds ⇒ edge interval is
+- [x] test **T3**: two edge vertices with different bounds ⇒ edge interval is
       `minval(nlevels_nod2D(ednodes))`
-- [ ] test **T6**: on pi, `sum(hnode(:,v)) == zbar(ulevels_nod2D(v)) - zbar(nlevels_nod2D(v))`
+- [x] test **T6**: on pi, `sum(hnode(:,v)) == zbar(ulevels_nod2D(v)) - zbar(nlevels_nod2D(v))`
       within tolerance; `hnode >= 0`
-- [ ] test **T9**: on pi, `zbar_e_bot(e) == zbar(nlevels(e))`
-- [ ] test the required invariant explicitly on pi (not the tautology
+- [x] test **T9**: on pi, `zbar_e_bot(e) == zbar(nlevels(e))`
+- [x] test the required invariant explicitly on pi (not the tautology
       `nlevels(e) <= minval(nlevels_nod2D(elnodes))`, which holds by construction)
-- [ ] register `add_fesom_test(test_bottom 1)`
-- [ ] run tests: `ctest` **and** `run_conserve_pi.sh` both ALE modes
+- [x] register `add_fesom_test(test_bottom 1)`
+- [x] run tests: `ctest` **and** `run_conserve_pi.sh` both ALE modes
 
 ### Task 6: Derive across the full element halo (multi-rank)
 
@@ -585,20 +596,20 @@ All four invariants pass on unmodified code at both rank counts and both ALE mod
 - Modify: `test/test_bottom.F90`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] move the `mesh%nlevels`/`nlevels_nod2D` allocations (`:318-319`) and the `mesh%ulevels`
+- [x] move the `mesh%nlevels`/`nlevels_nod2D` allocations (`:318-319`) and the `mesh%ulevels`
       allocation (`setup_vertical_local:450`) **ahead of** the `elem2d.out` loop at `:276-288`
-- [ ] move the `nlvls.out` read ahead of `elem2d.out` and load it into a global
+- [x] move the `nlvls.out` read ahead of `elem2d.out` and load it into a global
       `nlvls_g(nNodG)` temp; keep the node-side scatter at `:325-329` populating
       `nlevels_nod2D` from that temp
-- [ ] delete the `elvls.out` read (`:320-323`); derive `nlevels(lid)` inside the `elem2d.out`
+- [x] delete the `elvls.out` read (`:320-323`); derive `nlevels(lid)` inside the `elem2d.out`
       loop for every `lid > 0` (owned **and** halo); deallocate the temp
-- [ ] derive `ulevels` the same way; set `elem_depth` from the derived `nlevels`
-- [ ] comment why this is a global-array derivation and not `exchange_elem_full_2D_i`
-- [ ] apply the same runtime invariant check on owned nodes in `setup_vertical_local`
-- [ ] multi-rank test: assert `nlevels(e) == min(nlvls_g of its 3 global nodes)` for **halo**
+- [x] derive `ulevels` the same way; set `elem_depth` from the derived `nlevels`
+- [x] comment why this is a global-array derivation and not `exchange_elem_full_2D_i`
+- [x] apply the same runtime invariant check on owned nodes in `setup_vertical_local`
+- [x] multi-rank test: assert `nlevels(e) == min(nlvls_g of its 3 global nodes)` for **halo**
       elements (via `myList_elem2D`) — not merely `nlevels(e) > 0`
-- [ ] register `add_fesom_test(test_bottom 2)` and `(test_bottom 8)`
-- [ ] run tests: `ctest` all rank counts, `run_conserve_pi.sh` at np 1 and 2,
+- [x] register `add_fesom_test(test_bottom 2)` and `(test_bottom 8)`
+- [x] run tests: `ctest` all rank counts, `run_conserve_pi.sh` at np 1 and 2,
       `tools/run_restartroundtrip.sh`, `tools/run_output_gate.sh`
 
 ### Task 7: R7 — physical `edge_dxdy` and `edge_len` (producer + consumers together)
@@ -610,19 +621,19 @@ All four invariants pass on unmodified code at both rank counts and both ALE mod
 - Modify: `src/infra/mod_geom_dump.F90`
 - Modify: `test/test_bottom.F90`
 
-- [ ] add `edge_len` to `t_mesh` with an explicit `! [m]` comment plus its
+- [x] add `edge_len` to `t_mesh` with an explicit `! [m]` comment plus its
       `write_bin_array`/`read_bin_array` pair
-- [ ] merge the two loops in `compute_edge_geometry`; emit `edge_dxdy` in metres and
+- [x] merge the two loops in `compute_edge_geometry`; emit `edge_dxdy` in metres and
       `edge_len`; document the unit change next to both declarations
-- [ ] in the **same** task, drop `*a` and `*r_earth` at `oce_adv_tra_hor.F90:203-208` and
+- [x] in the **same** task, drop `*a` and `*r_earth` at `oce_adv_tra_hor.F90:203-208` and
       `:297-302`, and delete the dead local `a` from all three routines (`:64`/`:71` included)
-- [ ] update the module header comment (`:17`) documenting the old inline convention
-- [ ] add `wr_r1(u, 'edge_len', ...)` to `mod_geom_dump`
-- [ ] test **T7**: `edge_len` matches an independent haversine on pi; `maxval(abs(edge_dxdy))`
+- [x] update the module header comment (`:17`) documenting the old inline convention
+- [x] add `wr_r1(u, 'edge_len', ...)` to `mod_geom_dump`
+- [x] test **T7**: `edge_len` matches an independent haversine on pi; `maxval(abs(edge_dxdy))`
       is metre-scale, not radian-scale; `edge_len > 0` everywhere
-- [ ] test: MUSCL reconstruction reproduces a linear tracer field exactly on the analytic
+- [x] test: MUSCL reconstruction reproduces a linear tracer field exactly on the analytic
       mesh (catches a dropped or doubled metric factor)
-- [ ] run tests: `ctest` **and** `run_conserve_pi.sh` both ALE modes
+- [x] run tests: `ctest` **and** `run_conserve_pi.sh` both ALE modes
 
 ### Task 8: Mesh-delta audit against the predicted numbers
 
@@ -630,39 +641,55 @@ All four invariants pass on unmodified code at both rank counts and both ALE mod
 - Create: `tools/bottom_delta.py`
 - Create: `tools/run_bottom_audit.sh`
 
-- [ ] `tools/bottom_delta.py`: read a `mod_geom_dump` binary (`FGEOMDMP`; format documented
+- [x] `tools/bottom_delta.py`: read a `mod_geom_dump` binary (`FGEOMDMP`; format documented
       atop `tools/geom_diff.py`) plus the mesh's `elvls.out`, and report the `nlevels` delta
       histogram, changed-element count, ocean-volume change and stagnant-cell count
-- [ ] make the volume weighting **explicit and `elem_area`-weighted** — an unweighted sum
+- [x] make the volume weighting **explicit and `elem_area`-weighted** — an unweighted sum
       gives +1.37% on pi against the plan's +1.55%, and would trip the reconcile rule below
       on a units mismatch rather than a real disagreement
-- [ ] `tools/run_bottom_audit.sh`: run `fesom_geomdump` on pi and core2 and feed both to the
+- [x] `tools/run_bottom_audit.sh`: run `fesom_geomdump` on pi and core2 and feed both to the
       script; use `/sw/spack-levante/python-3.9.9-fwvsvi/bin/python3` (the login-node
       `/usr/bin/python3` is 3.6.8 with no numpy)
-- [ ] verify **core2**: mean `+0.067`, range `[0,+17]`, **10465** changed, `+0.38 %` volume,
+- [x] verify **core2**: mean `+0.067`, range `[0,+17]`, **10465** changed, `+0.38 %` volume,
       **0** stagnant cells
-- [ ] verify **pi**: mean `+0.227`, range `[0,+20]`, **651** of 5839 changed, `+1.55 %`
+- [x] verify **pi**: mean `+0.227`, range `[0,+20]`, **651** of 5839 changed, `+1.55 %`
       volume, **0** stagnant cells
-- [ ] verify `edge_dxdy` is metre-scale and `edge_len` is present in both dumps
-- [ ] record the actual numbers here; ⚠️ on disagreement, stop and reconcile
+- [x] verify `edge_dxdy` is metre-scale and `edge_len` is present in both dumps
+- [x] record the actual numbers here; ⚠️ on disagreement, stop and reconcile
+
+**Audit result — both meshes reproduce the prediction exactly, histogram included:**
+
+```
+pi     changed  651/5839    mean +0.227  range [0,+20]  +1.55 % volume  0 stagnant
+core2  changed 10465/244659 mean +0.067  range [0,+17]  +0.38 % volume  0 stagnant
+core2 histogram: +1:7773 +2:1411 +3:571 +4:286 +5:146 +6:97 +7:63 +8:41
+                 +9:19 +10:19 +11:21 +12:2 +13:6 +14:4 +15:3 +16:1 +17:2
+edge_len core2: 11.9 km .. 181.9 km  (R7 factor folded in)
+```
+
+Two performance notes on `bottom_delta.py`, both hit on the 250 MB core2 dump:
+`read_dump` takes a field whitelist (the four `(nl, nod2D)` area arrays it never reads
+cost 24M struct values), and the element node lists are sliced once per *row* rather than
+once per element (`vals[i::d1]` builds a whole new list, so per-element is quadratic).
+Together: >10 minutes to 0.66 s.
 
 ### Task 9: Verify acceptance criteria
 
-- [ ] vertex columns carry validated `ulevels_nod2D`/`nlevels_nod2D` and `hnode`
-- [ ] element intervals are intersections of their vertex wet columns; the required
+- [x] vertex columns carry validated `ulevels_nod2D`/`nlevels_nod2D` and `hnode`
+- [x] element intervals are intersections of their vertex wet columns; the required
       invariant is asserted at runtime on both mesh paths
-- [ ] no velocity contribution from partly-land prisms (T10 green in `fesom_conserve`)
-- [ ] `helem == sum(hnode)/3` over the full element range, under `zstar`
-- [ ] `elem_area` unchanged; scalar `area` depth-independent
-- [ ] `edge_dxdy` in metres, `edge_len` in metres
-- [ ] bottom drag at `nlevels(elem)-1` — confirm by inspection at
+- [x] no velocity contribution from partly-land prisms (T10 green in `fesom_conserve`)
+- [x] `helem == sum(hnode)/3` over the full element range, under `zstar`
+- [x] `elem_area` unchanged; scalar `area` depth-independent
+- [x] `edge_dxdy` in metres, `edge_len` in metres
+- [x] bottom drag at `nlevels(elem)-1` — confirm by inspection at
       `oce_dyn_ivertvisc.F90:177` that no edit was needed, and say why in the report
-- [ ] stiffness integration uses `zbar_e_bot - zbar(ulevels(e))` with the derived `nlevels`
+- [x] stiffness integration uses `zbar_e_bot - zbar(ulevels(e))` with the derived `nlevels`
       — confirm at `oce_ssh_rhs.F90:168`
-- [ ] `git diff` contains no unrelated changes (no renames, no formatting sweeps)
-- [ ] full suite: `ctest --output-on-failure`; `run_conserve_pi.sh` both ALE modes at np 1
+- [x] `git diff` contains no unrelated changes (no renames, no formatting sweeps)
+- [x] full suite: `ctest --output-on-failure`; `run_conserve_pi.sh` both ALE modes at np 1
       and 2; `run_restartroundtrip.sh`; `run_output_gate.sh`
-- [ ] GNU portability build: `./configure.sh --compiler gnu --precision dp --clean --build`
+- [x] GNU portability build: `./configure.sh --compiler gnu --precision dp --clean --build`
       with no new warnings
 
 ### Task 10: [Final] Update documentation
@@ -670,21 +697,44 @@ All four invariants pass on unmodified code at both rank counts and both ALE mod
 **Files:**
 - Modify: `README.md`, `IMPLEMENTATION.md`, `TESTING.md`, `docs/LESSONS.md`
 
-- [ ] `README.md` §5: `elvls.out` is no longer read
-- [ ] `IMPLEMENTATION.md`: the bottom-at-vertices contract and the `tlayer/blayer` mapping
-- [ ] `TESTING.md`: split the gate catalogue into **oracle-dependent (retired)** and
+- [x] `README.md` §5: `elvls.out` is no longer read
+- [x] `IMPLEMENTATION.md`: the bottom-at-vertices contract and the `tlayer/blayer` mapping
+- [x] `TESTING.md`: split the gate catalogue into **oracle-dependent (retired)** and
       **self-consistency (kept)**; document `run_conserve_pi.sh` as the primary numerical net
-- [ ] `docs/LESSONS.md`: the `min ∘ max` vs `min ∘ min` asymmetry; the
+- [x] `docs/LESSONS.md`: the `min ∘ max` vs `min ∘ min` asymmetry; the
       `oce_muscl_adv.F90:303` unguarded `tr_xy` read and why `nlevels_nod2D_min` must stay;
       the `helem` bottom-layer bound. **Do not** record the shortwave `area == 0` trap — it
       does not exist (correction 4).
-- [ ] write the brief's required final report (files changed, indexing contract,
+- [x] write the brief's required final report (files changed, indexing contract,
       representation, R7 conversion incl. the FP re-association note, bottom drag and
       stiffness, tests run, unresolved ambiguity, deferred work)
-- [ ] note in the report that the change *repairs* several element-from-node averages that
+- [x] note in the report that the change *repairs* several element-from-node averages that
       previously read undefined node levels (`oce_mixing_kpp.F90:217-224`,
       `oce_mixing_tke.F90:502-506`, `oce_ale.F90:550`)
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
+
+## ➕ Work done after the plan was written
+
+Driven by review feedback during implementation, not foreseen here:
+
+1. **`mesh%area`/`areasvol`(+`_inv`) collapsed to 1-D** and every consumer across the tree
+   rewritten (~19 files). Saves 191 MB/rank on core2 and, more importantly, makes the wrong
+   denominator unwritable.
+2. **`compute_vel_nodes` moved to the full area.** A dry adjacent element contributes zero
+   velocity carrying its full area weight. Intended consequence: a uniform velocity field no
+   longer node-averages to the same value at every level — real topographic damping of the
+   cell-mean velocity, which feeds the PP/KPP/TKE shear.
+3. **Redi coverage.** `diff_ver_part_redi_expl` is the only caller of `tr_xynodes` and runs
+   only under `if (Redi)`, which defaults `.false.` — every earlier gate had it off. The gate
+   now sweeps Redi / KPP / TKE / GM+Redi+TKE / GM+KPP.
+4. **Volume conservation** added as a per-step invariant, separate from tracer content:
+   under `linfs` volume is exactly conserved while tracer drifts `-2.2e-04`, so neither
+   check substitutes for the other.
+5. **Four node-averaging sites deliberately left on the wet area** — `oce_muscl_adv`
+   (`edge_up_dn_grad`), `oce_pressure_bv:516` (`sigma_xy`, feeding the GM/Redi neutral
+   slope), `oce_pressure_bv:310` (`smooth_nod`). The zero-with-weight rule is stated for
+   *velocities*; a dry element's gradient is undefined rather than zero, and a smoother must
+   reproduce a constant field. Open question, `sigma_xy` first.
 
 ## Post-Completion
 
