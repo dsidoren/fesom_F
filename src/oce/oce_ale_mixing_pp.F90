@@ -63,11 +63,10 @@ contains
         type(t_partit), intent(in), optional :: partit
         integer       :: node, nz, nzmax, nzmin, elem, elnodes(3)
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: dz_inv, shear, Kv0_b
-        real(kind=WP), dimension(:,:,:), pointer :: UVnode
-        real(kind=WP), dimension(:,:),   pointer :: Kv, Av, bvfreq
+        real(kind=WP) :: shear, Kv0_b
+        real(kind=WP), dimension(:,:),   pointer :: Kv, Av, bvfreq, shear2
 
-        UVnode => dyn%uvnode
+        shear2 => dyn%work%shear2
         Kv     => dyn%work%Kv
         Av     => dyn%work%Av
         bvfreq => dyn%work%bvfreq
@@ -80,10 +79,10 @@ contains
             nzmax = mesh%nlevels_nod2D(node)
             ! ALE: changing zlevel at every node (Z_3d_n is per-node).
             do nz = nzmin+1, nzmax-1
-                dz_inv = 1.0_WP/(mesh%Z_3d_n(nz-1,node) - mesh%Z_3d_n(nz,node))
-                shear  = (UVnode(1,nz-1,node)-UVnode(1,nz,node))**2 + &
-                         (UVnode(2,nz-1,node)-UVnode(2,nz,node))**2
-                shear  = shear*dz_inv*dz_inv
+                ! shear now comes from the shared producer (oce_vert_spline::compute_shear2),
+                ! which reproduces the previous inline two-point form bit for bit when
+                ! shear_splines=.false. and splines it when .true.
+                shear  = shear2(nz,node)
                 Kv(nz,node) = shear/(shear + 5._WP*max(bvfreq(nz,node),0.0_WP) + 1.0e-14_WP)  ! avoid NaN at start
             end do
         end do

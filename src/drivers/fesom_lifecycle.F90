@@ -178,7 +178,7 @@ program fesom_lifecycle
     allocate(dyn%w(nl, mesh%nod2D), dyn%w_e(nl, mesh%nod2D), dyn%w_i(nl, mesh%nod2D))
     allocate(dyn%cfl_z(nl, mesh%nod2D))
     allocate(dyn%work%density_ref(nl-1, mesh%nod2D), dyn%work%density_m_rho0(nl-1, mesh%nod2D))
-    allocate(dyn%work%hpressure(nl, mesh%nod2D), dyn%work%bvfreq(nl, mesh%nod2D))
+    allocate(dyn%work%hpressure(nl, mesh%nod2D), dyn%work%bvfreq(nl, mesh%nod2D), dyn%work%bvfreq_raw(nl, mesh%nod2D), dyn%work%shear2(nl, mesh%nod2D))
     allocate(dyn%work%pgf_x(nl-1, mesh%elem2D), dyn%work%pgf_y(nl-1, mesh%elem2D))
     allocate(dyn%work%u_c(nl-1, mesh%elem2D), dyn%work%v_c(nl-1, mesh%elem2D))
     allocate(dyn%work%uvnode_rhs(2, nl-1, mesh%nod2D))
@@ -187,7 +187,7 @@ program fesom_lifecycle
     dyn%eta_n = 0.0_WP; dyn%d_eta = 0.0_WP
     dyn%ssh_rhs = 0.0_WP; dyn%ssh_rhs_old = 0.0_WP
     dyn%w = 0.0_WP; dyn%w_e = 0.0_WP; dyn%w_i = 0.0_WP; dyn%cfl_z = 0.0_WP
-    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP
+    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP; dyn%work%bvfreq_raw = 0.0_WP; dyn%work%shear2 = 0.0_WP
     dyn%work%pgf_x = 0.0_WP; dyn%work%pgf_y = 0.0_WP
     dyn%work%u_c = 0.0_WP; dyn%work%v_c = 0.0_WP; dyn%work%uvnode_rhs = 0.0_WP
     dyn%work%Kv = 0.0_WP; dyn%work%Av = 0.0_WP

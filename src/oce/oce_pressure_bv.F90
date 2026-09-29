@@ -40,7 +40,8 @@ module oce_pressure_bv
     use mod_mesh,        only: t_mesh
     use mod_constants,   only: density_0, g, pi
     use mod_config,      only: which_ALE
-    use mod_param_phys,  only: state_equation, N2smth_h, N2smth_v, N2smth_hidx, &
+    use oce_vert_spline, only: spline_eval
+    use mod_param_phys,  only: state_equation, N2smth_h, N2smth_v, N2smth_hidx, N2_splines, &
                                scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97, &
                                LDD97_c, LDD97_rmin, LDD97_rmax, Fer_GM, Redi, Redi_Ktaper
     use mod_partit,      only: t_partit
@@ -55,7 +56,7 @@ module oce_pressure_bv
 contains
 
     !===========================================================================
-    subroutine pressure_bv(temp, salt, density_ref, mesh, density_m_rho0, hpressure, bvfreq, partit, dbsfc)
+    subroutine pressure_bv(temp, salt, density_ref, mesh, density_m_rho0, hpressure, bvfreq, partit, dbsfc, bvfreq_raw)
         ! temp/salt/density_ref: (nl-1, nod2D) inputs. density_m_rho0: (nl-1, nod2D)
         ! out. hpressure/bvfreq: (nl, nod2D) out (only 1..nzmax used). The caller
         ! pre-zeros the three outputs (see header).
@@ -75,6 +76,9 @@ contains
         real(kind=WP), intent(inout) :: bvfreq(mesh%nl, mesh%nod2D)
         type(t_partit), intent(in), optional :: partit
         real(kind=WP), intent(inout), optional :: dbsfc(mesh%nl, mesh%nod2D)
+        ! M?: optional copy of N^2 BEFORE the horizontal smoother, for consumers whose
+        ! answer depends on the true local sign (mo_convect). Absent -> nothing written.
+        real(kind=WP), intent(inout), optional :: bvfreq_raw(mesh%nl, mesh%nod2D)
 
         integer       :: node, nz, nzmax, nzmin
         integer       :: nNodO, nNodL, nEdgeO, nElemO
@@ -82,6 +86,11 @@ contains
         real(kind=WP) :: bulk_up, bulk_dn, rho_surf
         real(kind=WP) :: rhopot(mesh%nl), bulk_0(mesh%nl), bulk_pz(mesh%nl)
         real(kind=WP) :: bulk_pz2(mesh%nl), rho(mesh%nl), bv1(mesh%nl), dbsfc1(mesh%nl)
+        ! N2_splines scratch (one column)
+        integer       :: n_sp, k_sp
+        real(kind=WP) :: alpha_sp, beta_sp
+        real(kind=WP) :: xc_sp(mesh%nl), xi_sp(mesh%nl), tc_sp(mesh%nl), sc_sp(mesh%nl)
+        real(kind=WP) :: ti_sp(mesh%nl), si_sp(mesh%nl), dt_sp(mesh%nl), ds_sp(mesh%nl)
 
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
@@ -190,6 +199,37 @@ contains
                 bvfreq(nz,node)  = -g*dz_inv*(rho_up-rho_dn)/density_0
             end do
 
+            !___________________________________________________________________
+            ! N2_splines: overwrite the interior levels with the spline form
+            !     N2 = g*(beta*dS/dx - alpha*dT/dx),   x = depth (increasing downward)
+            ! evaluated AT the interface zbar (the two-point form above is centred on the
+            ! midpoint of the two layer centres, which on this stretched grid sits up to
+            ! ~17% of the local dz away from the interface). There is no single rho(z)
+            ! column to spline -- each interface re-references both parcels to its own
+            ! zmean -- so the derivative is taken through the chain rule with alpha/beta at
+            ! the interface state. Sign check: T decreasing with depth -> dT/dx<0 -> N2>0.
+            ! Same natural cubic spline as the shear (oce_vert_spline), for like-by-like
+            ! ratios downstream. Columns with a single layer have no interior level.
+            if (N2_splines) then
+                n_sp = nzmax - nzmin
+                if (n_sp >= 2) then
+                    do k_sp = 1, n_sp
+                        xc_sp(k_sp) = -mesh%Z_3d_n(nzmin+k_sp-1, node)
+                        tc_sp(k_sp) =  temp(nzmin+k_sp-1, node)
+                        sc_sp(k_sp) =  salt(nzmin+k_sp-1, node)
+                    end do
+                    do k_sp = 1, n_sp-1
+                        xi_sp(k_sp) = -mesh%zbar_3d_n(nzmin+k_sp, node)
+                    end do
+                    call spline_eval(n_sp, xc_sp(1:n_sp), tc_sp(1:n_sp), xi_sp(1:n_sp-1), ti_sp(1:n_sp-1), dt_sp(1:n_sp-1))
+                    call spline_eval(n_sp, xc_sp(1:n_sp), sc_sp(1:n_sp), xi_sp(1:n_sp-1), si_sp(1:n_sp-1), ds_sp(1:n_sp-1))
+                    do k_sp = 1, n_sp-1
+                        call sw_alpha_beta_point(ti_sp(k_sp), si_sp(k_sp), xi_sp(k_sp), alpha_sp, beta_sp)
+                        bvfreq(nzmin+k_sp, node) = g*(beta_sp*ds_sp(k_sp) - alpha_sp*dt_sp(k_sp))
+                    end do
+                end if
+            end if
+
             bvfreq(nzmin,node)=bvfreq(nzmin+1,node)
             bvfreq(nzmax,node)=bvfreq(nzmax-1,node)
 
@@ -208,7 +248,23 @@ contains
         end do
 
         !_______________________________________________________________________
-        ! apply horizontal smoothing of the N^2 buoyancy frequency
+        ! hand out the UNSMOOTHED N^2 first -- smooth_nod overwrites bvfreq in place, and
+        ! its 1/3-own + 2/3-neighbour stencil can flip the SIGN of N^2 near convection,
+        ! which is exactly what a static-instability test must not see.
+        ! BOUNDED BY nNodL, NOT a whole-array assignment: the dummy is declared with the
+        ! GLOBAL mesh%nod2D while the MR drivers allocate (nl, nNodL) with nNodL =
+        ! myDim+eDim. The over-declared dummy is only a view, safe as long as every access
+        ! stays inside nNodL like the rest of this routine -- `bvfreq_raw = bvfreq` did not,
+        ! and wrote nl*nod2D elements into an nl*nNodL array (heap corruption at 512 ranks,
+        ! invisible at np=1 where nNodL == nod2D).
+        if (present(bvfreq_raw)) then
+            do node = 1, nNodL
+                bvfreq_raw(:, node) = bvfreq(:, node)
+            end do
+        end if
+
+        ! apply horizontal smoothing of the N^2 buoyancy frequency (GM/Redi + the
+        ! mixing schemes consume this smoothed field)
         if (N2smth_h) call smooth_nod(bvfreq, N2smth_hidx, mesh, partit)
 
     end subroutine pressure_bv
@@ -442,33 +498,48 @@ contains
             nzmin = mesh%ulevels_nod2D(n)
             nzmax = mesh%nlevels_nod2D(n)
             do nz = nzmin, nzmax-1
-                t1 = temp(nz,n)*1.00024_WP
-                s1 = salt(nz,n)
-                p1 = abs(mesh%Z_3d_n(nz,n))
-                t1_2 = t1*t1; t1_3 = t1_2*t1; t1_4 = t1_3*t1
-                p1_2 = p1*p1; p1_3 = p1_2*p1
-                s35  = s1-35.0_WP; s35_2 = s35*s35
-                sw_beta(nz,n) = 0.785567e-3_WP - 0.301985e-5_WP*t1 &
-                     + 0.555579e-7_WP*t1_2 - 0.415613e-9_WP*t1_3 &
-                     + s35*(-0.356603e-6_WP + 0.788212e-8_WP*t1 &
-                     + 0.408195e-10_WP*p1 - 0.602281e-15_WP*p1_2) &
-                     + s35_2*(0.515032e-8_WP) &
-                     + p1*(-0.121555e-7_WP + 0.192867e-9_WP*t1 - 0.213127e-11_WP*t1_2) &
-                     + p1_2*(0.176621e-12_WP - 0.175379e-14_WP*t1) &
-                     + p1_3*(0.121551e-17_WP)
-                a_over_b = 0.665157e-1_WP + 0.170907e-1_WP*t1 &
-                     - 0.203814e-3_WP*t1_2 + 0.298357e-5_WP*t1_3 &
-                     - 0.255019e-7_WP*t1_4 &
-                     + s35*(0.378110e-2_WP - 0.846960e-4_WP*t1 &
-                     - 0.164759e-6_WP*p1 - 0.251520e-11_WP*p1_2) &
-                     + s35_2*(-0.678662e-5_WP) &
-                     + p1*(0.380374e-4_WP - 0.933746e-6_WP*t1 + 0.791325e-8_WP*t1_2) &
-                     + p1_2*t1_2*(0.512857e-12_WP) &
-                     - p1_3*(0.302285e-13_WP)
-                sw_alpha(nz,n) = a_over_b*sw_beta(nz,n)
+                call sw_alpha_beta_point(temp(nz,n), salt(nz,n), abs(mesh%Z_3d_n(nz,n)), &
+                                         sw_alpha(nz,n), sw_beta(nz,n))
             end do
         end do
     end subroutine sw_alpha_beta
+
+    !===========================================================================
+    pure subroutine sw_alpha_beta_point(t, s, p, alpha, beta)
+        ! One (T, S, p) -> (alpha, beta). McDougall 1987, the polynomial sw_alpha_beta
+        ! used inline before it was factored out here; the N2_splines path calls it at the
+        ! INTERFACE state (spline-interpolated T,S, p = interface depth) so that the vertical
+        ! density gradient is linearised exactly the way compute_sigma_xy linearises the
+        ! horizontal one -- the neutral slope then divides like by like.
+        ! t in ITS-90 degC (the 1.00024 IPTS-68 factor is applied here), s in psu, p in db
+        ! (= depth in m, as the callers pass |Z|).
+        real(kind=WP), intent(in)  :: t, s, p
+        real(kind=WP), intent(out) :: alpha, beta
+        real(kind=WP) :: t1, t1_2, t1_3, t1_4, p1, p1_2, p1_3, s35, s35_2, a_over_b
+        t1 = t*1.00024_WP
+        p1 = p
+        t1_2 = t1*t1; t1_3 = t1_2*t1; t1_4 = t1_3*t1
+        p1_2 = p1*p1; p1_3 = p1_2*p1
+        s35  = s-35.0_WP; s35_2 = s35*s35
+        beta = 0.785567e-3_WP - 0.301985e-5_WP*t1 &
+             + 0.555579e-7_WP*t1_2 - 0.415613e-9_WP*t1_3 &
+             + s35*(-0.356603e-6_WP + 0.788212e-8_WP*t1 &
+             + 0.408195e-10_WP*p1 - 0.602281e-15_WP*p1_2) &
+             + s35_2*(0.515032e-8_WP) &
+             + p1*(-0.121555e-7_WP + 0.192867e-9_WP*t1 - 0.213127e-11_WP*t1_2) &
+             + p1_2*(0.176621e-12_WP - 0.175379e-14_WP*t1) &
+             + p1_3*(0.121551e-17_WP)
+        a_over_b = 0.665157e-1_WP + 0.170907e-1_WP*t1 &
+             - 0.203814e-3_WP*t1_2 + 0.298357e-5_WP*t1_3 &
+             - 0.255019e-7_WP*t1_4 &
+             + s35*(0.378110e-2_WP - 0.846960e-4_WP*t1 &
+             - 0.164759e-6_WP*p1 - 0.251520e-11_WP*p1_2) &
+             + s35_2*(-0.678662e-5_WP) &
+             + p1*(0.380374e-4_WP - 0.933746e-6_WP*t1 + 0.791325e-8_WP*t1_2) &
+             + p1_2*t1_2*(0.512857e-12_WP) &
+             - p1_3*(0.302285e-13_WP)
+        alpha = a_over_b*beta
+    end subroutine sw_alpha_beta_point
 
     !===========================================================================
     subroutine compute_sigma_xy(temp, salt, sw_alpha, sw_beta, mesh, sigma_xy, partit)

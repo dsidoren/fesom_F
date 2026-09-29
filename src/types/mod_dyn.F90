@@ -38,6 +38,14 @@ module mod_dyn
         real(kind=WP), allocatable, dimension(:,:)   :: density_ref     ! (nl-1,nod2D) reference density
         real(kind=WP), allocatable, dimension(:,:)   :: hpressure       ! (nl,  nod2D) hydrostatic pressure
         real(kind=WP), allocatable, dimension(:,:)   :: bvfreq          ! (nl,  nod2D) N^2 (squared Brunt-Vaisala)
+        ! N^2 as pressure_bv computed it, BEFORE the horizontal smooth_nod pass. Consumers
+        ! that must see the true local stratification (mo_convect's static-instability ramp)
+        ! read this; GM/Redi + PP/KPP/TKE keep reading the smoothed bvfreq above.
+        real(kind=WP), allocatable, dimension(:,:)   :: bvfreq_raw      ! (nl,  nod2D) N^2 pre-smoothing
+        ! Squared vertical velocity shear |d(uvnode)/dz|^2 at LEVELS, produced once per
+        ! step by oce_vert_spline::compute_shear2 and shared by PP, KPP's ri_iwmix and
+        ! TKE (which each formed it separately before, with slightly different rounding).
+        real(kind=WP), allocatable, dimension(:,:)   :: shear2          ! (nl,  nod2D) |du/dz|^2
         real(kind=WP), allocatable, dimension(:,:)   :: pgf_x, pgf_y    ! (nl-1,elem2D) PGF (M2.2 oce_pgf), from hpressure
         ! M2.8 PP vertical mixing coefficients (oce_ale_mixing_pp). FESOM2 o_ARRAYS
         ! names Kv/Av; recomputed each step from N^2 + uvnode shear, NOT serialized.

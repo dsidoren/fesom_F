@@ -121,12 +121,12 @@ program fesom_stepdump
     allocate(dyn%cfl_z(nl, mesh%nod2D))
     ! work scratch (zeroed at setup, mirroring FESOM2 arrays_init; pressure_bv/PP overwrite)
     allocate(dyn%work%density_ref(nl-1, mesh%nod2D), dyn%work%density_m_rho0(nl-1, mesh%nod2D))
-    allocate(dyn%work%hpressure(nl, mesh%nod2D), dyn%work%bvfreq(nl, mesh%nod2D))
+    allocate(dyn%work%hpressure(nl, mesh%nod2D), dyn%work%bvfreq(nl, mesh%nod2D), dyn%work%bvfreq_raw(nl, mesh%nod2D), dyn%work%shear2(nl, mesh%nod2D))
     allocate(dyn%work%pgf_x(nl-1, mesh%elem2D), dyn%work%pgf_y(nl-1, mesh%elem2D))
     allocate(dyn%work%u_c(nl-1, mesh%elem2D), dyn%work%v_c(nl-1, mesh%elem2D))
     allocate(dyn%work%uvnode_rhs(2, nl-1, mesh%nod2D))
     allocate(dyn%work%Kv(nl, mesh%nod2D), dyn%work%Av(nl, mesh%elem2D))
-    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP
+    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP; dyn%work%bvfreq_raw = 0.0_WP; dyn%work%shear2 = 0.0_WP
     dyn%work%pgf_x = 0.0_WP; dyn%work%pgf_y = 0.0_WP
     dyn%work%u_c = 0.0_WP; dyn%work%v_c = 0.0_WP; dyn%work%uvnode_rhs = 0.0_WP
     dyn%work%Kv = 0.0_WP; dyn%work%Av = 0.0_WP    ! surface/bottom stay 0 (PP sets interior)

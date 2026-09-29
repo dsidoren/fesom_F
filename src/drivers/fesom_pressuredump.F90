@@ -36,6 +36,7 @@ program fesom_pressuredump
     use oce_ssh_solve,    only: solve_ssh_ale
     use oce_ale,          only: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
     use oce_ale_mixing_pp, only: oce_mixing_pp
+    use oce_vert_spline,   only: compute_shear2
     use oce_mixing_kpp,   only: ri_iwmix, bldepth, oce_mixing_kpp_init, blmix_kpp, enhance
     use mod_constants,    only: density_0_r, vcpw, g
     use mod_param_phys,   only: Ricr, concv
@@ -310,6 +311,7 @@ program fesom_pressuredump
     ! M2.1 local bvfreq), and the Kv/Av output fields.
     allocate(dyn%uvnode(2, nl-1, mesh%nod2D))                   ! nodal velocity (PP shear input)
     allocate(dyn%work%bvfreq(nl, mesh%nod2D))                   ! smoothed N^2 (PP reads it)
+    allocate(dyn%work%shear2(nl, mesh%nod2D))                   ! shared |du/dz|^2 (PP reads it)
     allocate(dyn%work%Kv(nl, mesh%nod2D), dyn%work%Av(nl, mesh%elem2D))
     dyn%AB_order          = 2
     dyn%momadv_opt        = 2     ! M2.4: enable momentum_adv_scalar (pi production value)
@@ -601,6 +603,8 @@ program fesom_pressuredump
     dyn%work%bvfreq = bvfreq                 ! the M2.1 SMOOTHED N^2 (PP reads dyn%work%bvfreq)
     dyn%work%Kv = 0.0_WP                      ! caller pre-zeros (PP writes only nzmin+1..nzmax-1)
     dyn%work%Av = 0.0_WP
+    dyn%work%shear2 = 0.0_WP
+    call compute_shear2(dyn, mesh)
     call oce_mixing_pp(dyn, mesh)
 
     ! gate-strength diagnostic (NOT dumped): re-derive the Ri factor (the pass-1 Kv) to

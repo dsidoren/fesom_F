@@ -358,14 +358,14 @@ contains
 
         real(kind=WP), parameter :: Riinfty = 0.8_WP   ! local Ri limit for shear instability
         integer :: node, nz, nzmin, nzmax, nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: dz_inv, shear, Rigg, ratio, frit, Kv0_b
+        real(kind=WP) :: shear, Rigg, ratio, frit, Kv0_b
         real(kind=WP), pointer :: vA(:,:), bvf(:,:)
-        real(kind=WP), pointer :: dK(:,:,:), UVn(:,:,:)
+        real(kind=WP), pointer :: dK(:,:,:), sh2(:,:)
 
         vA  => viscA
         dK  => diffK
         bvf => dyn%work%bvfreq
-        UVn => dyn%uvnode
+        sh2 => dyn%work%shear2
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         !_______________________________________________________________________
@@ -374,10 +374,9 @@ contains
             nzmin = mesh%ulevels_nod2D(node)
             nzmax = mesh%nlevels_nod2D(node)
             do nz = nzmin+1, nzmax-1
-                dz_inv = 1.0_WP / (mesh%Z_3d_n(nz-1,node) - mesh%Z_3d_n(nz,node))  ! > 0
-                shear  = ( UVn(1,nz-1,node) - UVn(1,nz,node) )**2 + &
-                         ( UVn(2,nz-1,node) - UVn(2,nz,node) )**2
-                shear  = shear * dz_inv * dz_inv
+                ! shared shear (oce_vert_spline::compute_shear2) -- this is the direct
+                ! analogue of the Rig that ROMS reconstructs under RI_SPLINES.
+                shear  = sh2(nz,node)
                 dK(nz,node,1) = MAX( bvf(nz,node), 0.0_WP ) / (shear + epsln)  ! avoid NaN at start
             end do
             ! surface/bottom are not used by the model (diffK @ zbar)

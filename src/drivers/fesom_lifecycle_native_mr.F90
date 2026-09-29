@@ -43,7 +43,7 @@ program fesom_lifecycle_native_mr
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use mod_precision,      only: WP, MP, MPI_WP
     use mod_constants,      only: density_0
-    use mod_param_phys,     only: N2smth_h, alpha, theta
+    use mod_param_phys,     only: N2smth_h, alpha, theta, scale_area, shear_splines, N2_splines
     use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const, mix_scheme_nmb
     use mod_param_phys,     only: use_instabmix, instabmix_kv, use_momix, use_windmix
     ! M4f: GM bolus (FESOM3_FER_GM) + Redi isopycnal diffusion (FESOM3_REDI) at MULTI-RANK —
@@ -193,6 +193,17 @@ program fesom_lifecycle_native_mr
     use_tke = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_SW_PENE', env, length=env_len, status=ios)
     do_swpene = (ios == 0 .and. env_len > 0)
+    ! Vertical cubic-spline reconstruction of the shear (oce_vert_spline) and of N^2
+    ! (oce_pressure_bv), FESOM's RI_SPLINES analogue. Presence-based like the rest.
+    ! Set BOTH for like-by-like Ri and neutral-slope ratios; one alone re-creates the
+    ! numerator/denominator asymmetry the pair exists to remove.
+    call get_environment_variable('FESOM3_SHEAR_SPLINES', env, length=env_len, status=ios)
+    shear_splines = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_N2_SPLINES', env, length=env_len, status=ios)
+    N2_splines = (ios == 0 .and. env_len > 0)
+    if (partit%mype == 0 .and. (shear_splines .or. N2_splines)) write(*,'(a,l1,a,l1,a)') &
+        'fesom_lifecycle_native_mr: vertical splines ENABLED (shear=', shear_splines, &
+        ', N2=', N2_splines, ')'
     ! M8c: FESOM3_CHL_SWEENEY -> read the Sweeney monthly chlorophyll climatology (production) instead
     ! of the const-0.1 fallback. Only meaningful with shortwave penetration (use_sw_pene) on.
     call get_environment_variable('FESOM3_CHL_SWEENEY', env, length=env_len, status=ios)
@@ -310,7 +321,7 @@ program fesom_lifecycle_native_mr
     allocate(dyn%w(nl, nNodL), dyn%w_e(nl, nNodL), dyn%w_i(nl, nNodL))
     allocate(dyn%cfl_z(nl, nNodL))
     allocate(dyn%work%density_ref(nl-1, nNodL), dyn%work%density_m_rho0(nl-1, nNodL))
-    allocate(dyn%work%hpressure(nl, nNodL), dyn%work%bvfreq(nl, nNodL))
+    allocate(dyn%work%hpressure(nl, nNodL), dyn%work%bvfreq(nl, nNodL), dyn%work%bvfreq_raw(nl, nNodL), dyn%work%shear2(nl, nNodL))
     allocate(dyn%work%pgf_x(nl-1, nElemF), dyn%work%pgf_y(nl-1, nElemF))
     allocate(dyn%work%u_c(nl-1, nElemF), dyn%work%v_c(nl-1, nElemF))
     allocate(dyn%work%uvnode_rhs(2, nl-1, nNodL))
@@ -318,7 +329,7 @@ program fesom_lifecycle_native_mr
     dyn%uv = 0.0_WP; dyn%uv_rhs = 0.0_WP; dyn%uv_rhsAB = 0.0_WP; dyn%uvnode = 0.0_WP
     dyn%eta_n = 0.0_WP; dyn%d_eta = 0.0_WP; dyn%ssh_rhs = 0.0_WP; dyn%ssh_rhs_old = 0.0_WP
     dyn%w = 0.0_WP; dyn%w_e = 0.0_WP; dyn%w_i = 0.0_WP; dyn%cfl_z = 0.0_WP
-    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP
+    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP; dyn%work%bvfreq_raw = 0.0_WP; dyn%work%shear2 = 0.0_WP
     dyn%work%pgf_x = 0.0_WP; dyn%work%pgf_y = 0.0_WP
     dyn%work%u_c = 0.0_WP; dyn%work%v_c = 0.0_WP; dyn%work%uvnode_rhs = 0.0_WP
     dyn%work%Kv = 0.0_WP; dyn%work%Av = 0.0_WP
@@ -388,6 +399,14 @@ program fesom_lifecycle_native_mr
     ! reduced-M2 module config (= the FESOM2 oracle / CORE2 namelist).
     alpha = 1.0_WP; theta = 1.0_WP
     N2smth_h     = .true.
+    ! &oce_dyn scale_area: the CORE2 namelist.oce value, NOT the o_PARAM default
+    ! 2.0e8. read_param_phys() is never called here, so the default used to stand.
+    ! The ice FCT is its only consumer (diff = ice_diff*sqrt(elem_area/scale_area),
+    ! mod_ice_fct.F90); inert while ice_diff=0, but at ice_diff/=0 the default gives
+    ! sqrt(5.8e9/2e8) = 5.4x the reference ice diffusion -- the cause of the C port's
+    ! systematic bi-hemispheric ice loss and Southern Ocean warming drift over 63-yr
+    ! hindcasts (port2 21da79e).
+    scale_area   = 5.8e9_WP
     mix_scheme_nmb = 2           ! reduced-M2 mixing = PP (KPP is M5c/M5d)
     mix_coeff_PP = 0.01_WP
     A_ver        = 1.0e-4_WP

@@ -46,7 +46,10 @@ export FESOM3_MESH_DIR="$PIMESH" FESOM3_IC_FILE="$ICFILE" FESOM3_NSTEPS="$NSTEPS
 
 fail=0
 
-for np in 1 2; do
+# np=8 matters beyond conservation: at np=1 nNodL == mesh%nod2D, so a routine that
+# over-runs a LOCAL-sized array using a dummy declared with the GLOBAL nod2D is exactly
+# in-bounds and cannot fail. Only a rank count where nNodL << nod2D exposes it.
+for np in 1 2 8; do
     echo "=== zstar, np=$np, $NSTEPS steps (conservation gate, tol=$TOL) ==="
     if FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
          mpirun $MPIFLAGS -n "$np" "$BIN" 2>&1 | tail -6; then
@@ -60,7 +63,9 @@ done
 # diffusion TDMA, the Redi isoneutral flux and the KPP non-local / shortwave terms, and
 # each is only reachable with its own scheme switched on -- a gate that runs only the
 # default configuration proves nothing about the others.
-while read -r label vars; do
+# NOTE read from fd 3: mpirun inherits stdin and CONSUMES the heredoc, so a plain
+# `while read ... done <<CFG` silently runs only the FIRST config and drops the rest.
+while read -r -u 3 label vars; do
     [ -z "$label" ] && continue
     echo "=== zstar + $label, np=1, $NSTEPS steps (conservation gate, tol=$TOL) ==="
     if env $vars FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
@@ -69,12 +74,17 @@ while read -r label vars; do
     else
         echo "run_conserve_pi: FAILED (zstar+$label np=1)"; fail=1
     fi
-done <<'CFG'
+done 3<<'CFG'
 Redi FESOM3_REDI=1
 KPP FESOM3_MIX_KPP=1
 TKE FESOM3_MIX_TKE=1
 GM+Redi+TKE FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1
 GM+KPP FESOM3_FER_GM=1 FESOM3_MIX_KPP=1
+splines FESOM3_SHEAR_SPLINES=1
+splines+KPP FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_KPP=1
+splines+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_TKE=1
+N2splines FESOM3_N2_SPLINES=1
+bothsplines+GM+Redi+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_N2_SPLINES=1 FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1
 CFG
 
 echo "=== linfs, np=1, $NSTEPS steps (invariants only; drift reported, not gated) ==="

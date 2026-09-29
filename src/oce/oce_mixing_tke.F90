@@ -406,14 +406,13 @@ subroutine calc_cvmix_tke(dynamics, stress_node_surf, dt, mesh, partit)
     integer :: node, nz, nln, nun, nlev, elem, elnodes(3)
     integer :: nNodO, nNodL, nEdgeO, nElemO
     real(kind=WP) :: forc_surf
-    real(kind=WP), dimension(:,:,:), pointer :: UVnode
-    real(kind=WP), dimension(:,:),   pointer :: bvfreq, tke, tke_Av, tke_Kv, Kv, Av
+    real(kind=WP), dimension(:,:),   pointer :: bvfreq, tke, tke_Av, tke_Kv, Kv, Av, shear2
     real(kind=WP), dimension(mesh%nl) :: vshear2, bvfreq2, dz_trr, tke_old_col, dzw_col, zero_col
     ! discarded diagnostic scratch (integrate_tke requires them; not load-bearing here)
     real(kind=WP), dimension(mesh%nl) :: dg_tbpr, dg_tspr, dg_tdif, dg_tdis, dg_twin, &
                                          dg_tiwf, dg_tbck, dg_ttot, dg_lmix, dg_pr
 
-    UVnode => dynamics%uvnode
+    shear2 => dynamics%work%shear2
     bvfreq => dynamics%work%bvfreq
     tke    => dynamics%work%tke
     tke_Av => dynamics%work%tke_Av
@@ -433,12 +432,12 @@ subroutine calc_cvmix_tke(dynamics, stress_node_surf, dt, mesh, partit)
         forc_surf = sqrt( stress_node_surf(1,node)**2 + stress_node_surf(2,node)**2)/density_0
 
         ! 3D vertical velocity shear (zero the full nl column, then fill nun+1..nln)
+        ! shared shear (oce_vert_spline::compute_shear2). NOTE this differs from the
+        ! previous TKE-local form in the LAST BITS even at shear_splines=.false.: TKE
+        ! divided by (Z(nz-1)-Z(nz))**2 once, the shared producer multiplies by dz_inv
+        ! twice (the PP / ri_iwmix operand order). Same value, different rounding.
         vshear2=0.0_WP
-        do nz=nun+1,nln
-            vshear2(nz)=(( UVnode(1, nz-1, node) - UVnode(1, nz, node))**2 + &
-                         ( UVnode(2, nz-1, node) - UVnode(2, nz, node))**2)/ &
-                         ((mesh%Z_3d_n(nz-1,node)-mesh%Z_3d_n(nz,node))**2)
-        end do
+        vshear2(nun+1:nln) = shear2(nun+1:nln, node)
 
         ! square of Brunt-Vaisala frequency (bvfreq already holds N^2)
         bvfreq2        = 0.0_WP

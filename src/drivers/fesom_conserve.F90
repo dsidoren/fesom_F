@@ -47,7 +47,7 @@ program fesom_conserve
     use, intrinsic :: iso_fortran_env, only: int32
     use mod_precision,      only: WP, MP
     use mod_constants,      only: density_0
-    use mod_param_phys,     only: N2smth_h, alpha, theta
+    use mod_param_phys,     only: N2smth_h, alpha, theta, shear_splines, N2_splines
     use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const, mix_scheme_nmb
     use mod_param_phys,     only: use_instabmix, instabmix_kv, use_momix, use_windmix
     use mod_param_phys,     only: Fer_GM, Redi, K_GM_max, K_GM_min, K_GM_bvref, &
@@ -129,6 +129,13 @@ program fesom_conserve
     use_kpp = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_MIX_TKE', env, length=env_len, status=ios)
     use_tke = (ios == 0 .and. env_len > 0)
+    ! Spline shear reconstruction (oce_vert_spline, FESOM's RI_SPLINES analogue). Off by
+    ! default the shared producer reproduces the historical two-point form bit for bit,
+    ! so gating BOTH settings is what proves the spline path is conservative too.
+    call get_environment_variable('FESOM3_SHEAR_SPLINES', env, length=env_len, status=ios)
+    shear_splines = (ios == 0 .and. env_len > 0)
+    call get_environment_variable('FESOM3_N2_SPLINES', env, length=env_len, status=ios)
+    N2_splines = (ios == 0 .and. env_len > 0)
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
@@ -202,7 +209,7 @@ program fesom_conserve
     allocate(dyn%w(nl, nNodL), dyn%w_e(nl, nNodL), dyn%w_i(nl, nNodL))
     allocate(dyn%cfl_z(nl, nNodL))
     allocate(dyn%work%density_ref(nl-1, nNodL), dyn%work%density_m_rho0(nl-1, nNodL))
-    allocate(dyn%work%hpressure(nl, nNodL), dyn%work%bvfreq(nl, nNodL))
+    allocate(dyn%work%hpressure(nl, nNodL), dyn%work%bvfreq(nl, nNodL), dyn%work%bvfreq_raw(nl, nNodL), dyn%work%shear2(nl, nNodL))
     allocate(dyn%work%pgf_x(nl-1, nElemF), dyn%work%pgf_y(nl-1, nElemF))
     allocate(dyn%work%u_c(nl-1, nElemF), dyn%work%v_c(nl-1, nElemF))
     allocate(dyn%work%uvnode_rhs(2, nl-1, nNodL))
@@ -210,7 +217,7 @@ program fesom_conserve
     dyn%uv = 0.0_WP; dyn%uv_rhs = 0.0_WP; dyn%uv_rhsAB = 0.0_WP; dyn%uvnode = 0.0_WP
     dyn%eta_n = 0.0_WP; dyn%d_eta = 0.0_WP; dyn%ssh_rhs = 0.0_WP; dyn%ssh_rhs_old = 0.0_WP
     dyn%w = 0.0_WP; dyn%w_e = 0.0_WP; dyn%w_i = 0.0_WP; dyn%cfl_z = 0.0_WP
-    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP
+    dyn%work%density_m_rho0 = 0.0_WP; dyn%work%hpressure = 0.0_WP; dyn%work%bvfreq = 0.0_WP; dyn%work%bvfreq_raw = 0.0_WP; dyn%work%shear2 = 0.0_WP
     dyn%work%pgf_x = 0.0_WP; dyn%work%pgf_y = 0.0_WP
     dyn%work%u_c = 0.0_WP; dyn%work%v_c = 0.0_WP; dyn%work%uvnode_rhs = 0.0_WP
     dyn%work%Kv = 0.0_WP; dyn%work%Av = 0.0_WP
