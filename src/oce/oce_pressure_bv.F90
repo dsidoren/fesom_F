@@ -41,7 +41,7 @@ module oce_pressure_bv
     use mod_constants,   only: density_0, g, pi
     use mod_config,      only: which_ALE
     use oce_vert_spline, only: spline_eval
-    use mod_param_phys,  only: state_equation, N2smth_h, N2smth_v, N2smth_hidx, N2_splines, &
+    use mod_param_phys,  only: state_equation, N2smth_h, N2smth_hidx, N2_splines, &
                                scaling_ODM95, ODM95_Scr, ODM95_Sd, scaling_LDD97, &
                                LDD97_c, LDD97_rmin, LDD97_rmax, Fer_GM, Redi, Redi_Ktaper
     use mod_partit,      only: t_partit
@@ -85,7 +85,7 @@ contains
         real(kind=WP) :: zmean, dz_inv, a, rho_up, rho_dn, t, s, smin
         real(kind=WP) :: bulk_up, bulk_dn, rho_surf
         real(kind=WP) :: rhopot(mesh%nl), bulk_0(mesh%nl), bulk_pz(mesh%nl)
-        real(kind=WP) :: bulk_pz2(mesh%nl), rho(mesh%nl), bv1(mesh%nl), dbsfc1(mesh%nl)
+        real(kind=WP) :: bulk_pz2(mesh%nl), rho(mesh%nl), dbsfc1(mesh%nl)
         ! N2_splines scratch (one column)
         integer       :: n_sp, k_sp
         real(kind=WP) :: alpha_sp, beta_sp
@@ -232,19 +232,6 @@ contains
 
             bvfreq(nzmin,node)=bvfreq(nzmin+1,node)
             bvfreq(nzmax,node)=bvfreq(nzmax-1,node)
-
-            !___________________________________________________________________
-            ! optional vertical N^2 smoothing (pinned .false. on the gate)
-            if (N2smth_v) then
-                do nz=nzmin+1,nzmax-1
-                    bv1(nz)=        (mesh%zbar_3d_n(nz-1,node)-mesh%zbar_3d_n(nz,  node))*(bvfreq(nz-1,node)+bvfreq(nz,  node))
-                    bv1(nz)=bv1(nz)+(mesh%zbar_3d_n(nz,  node)-mesh%zbar_3d_n(nz+1,node))*(bvfreq(nz,  node)+bvfreq(nz+1,node))
-                    bv1(nz)=0.5_WP*bv1(nz)/(mesh%zbar_3d_n(nz-1,node)-mesh%zbar_3d_n(nz+1,  node))
-                end do
-                do nz=nzmin+1,nzmax-1
-                    bvfreq(nz,node)=bv1(nz)
-                end do
-            end if
         end do
 
         !_______________________________________________________________________

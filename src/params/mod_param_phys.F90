@@ -92,7 +92,10 @@ module mod_param_phys
     real(kind=WP) :: epsilon = 0.1_WP              ! oce_modules.F90:92 AB2 offset (shadows intrinsic, faithful)
 
     ! --- N2 smoothing (oce_modules.F90:104-106) ---
-    logical       :: N2smth_v    = .false.
+    ! FESOM2's N2smth_v (a thickness-weighted 1-2-1 vertical filter on N^2) is NOT ported:
+    ! it defaulted .false., was never switched on by any driver, and N2_splines supersedes
+    ! it -- a spline RECONSTRUCTS the derivative at the interface where the schemes need it,
+    ! where the filter only smeared the two-point estimate over neighbouring levels.
     logical       :: N2smth_h    = .true.
     integer       :: N2smth_hidx = 1
 
