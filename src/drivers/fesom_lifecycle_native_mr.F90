@@ -960,8 +960,13 @@ program fesom_lifecycle_native_mr
         end if
         ! perf monitoring: periodic (cumulative) per-component timing report every mon_every steps.
         ! Collective (all ranks call it — placed before the step_diag cycle); 0 => only the final report.
-        if (mon_every > 0 .and. mod(n, mon_every) == 0) &
-            call timer_report(partit%MPI_COMM_FESOM, partit%mype, partit%npes, n, 'monitor')
+        ! NOT a single `.and.`: Fortran does not guarantee short-circuit evaluation, and
+        ! mon_every defaults to 0, so `mod(n, mon_every)` would be an integer divide by zero
+        ! on every step of a default run. Same hazard class as the leap-year forcing bug.
+        if (mon_every > 0) then
+            if (mod(n, mon_every) == 0) &
+                call timer_report(partit%MPI_COMM_FESOM, partit%mype, partit%npes, n, 'monitor')
+        end if
         ! M8c Step 3: GLOBAL per-step diagnostics. ALL ranks compute local extrema and reduce with ONE
         ! MPI_MAX; only rank 0 prints. Stability (max|eta|,max|uv|), cryosphere (max a_ice in [0,1], max
         ! m_ice), and warm/salty drift ceilings (global Tmax, Smax). Diagnostic-only: reads the prognostic

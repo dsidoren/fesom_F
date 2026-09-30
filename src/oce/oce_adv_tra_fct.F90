@@ -25,9 +25,10 @@ module oce_adv_tra_fct
     !    a3 only reads AUX(:,nz,elem) for nz in [ulevels_nod2D(n), nlevels_nod2D(n)-1];
     !    with ulevels==1 everywhere (no cavity) every read entry is written first, so
     !    the (uninitialised) initial AUX values never reach a result. On a CAVITY mesh
-    !    a node can read AUX(:,nz,elem) at nz < ulevels(elem) (unwritten) -> FESOM2
-    !    reads stale edge_up_dn_grad there; reproducing that bit-for-bit is impossible
-    !    with a fresh array, so this path must be re-gated on a cavity mesh (M2+).
+    !    a node could read AUX(:,nz,elem) at nz < ulevels(elem) (unwritten) -> FESOM2
+    !    read stale edge_up_dn_grad there. FIXED (FESOM2 d8dcdfb): the a2 loop now pads
+    !    ABOVE the cavity too, so every entry a3 can reach is written. Bit-unchanged
+    !    without a cavity; the cavity path still wants a gate on a cavity mesh (M2+).
     !  - exchange_nod(fct_plus,fct_minus) (FESOM2 b2->b3) is a no-op at 1 rank, dropped.
     !  - dmax1/dmin1 -> generic max/min: identical IEEE result on real(WP=8) at the
     !    anchor, and portable to a single-precision build.
@@ -95,6 +96,17 @@ contains
             enodes = mesh%elem2D_nodes(1:3, elem)
             nu1 = mesh%ulevels(elem)
             nl1 = mesh%nlevels(elem)
+            ! FESOM2 d8dcdfb: pad ABOVE a cavity element as well as below it. a3 reads
+            ! AUX at nz in [ulevels_nod2D(n), nlevels_nod2D(n)-1], which on a cavity mesh
+            ! reaches nz < ulevels(elem) -- never written, so an UNINITIALISED value used
+            ! to enter the max/min reduction (first-timestep NaNs upstream; AUX is a fresh
+            ! local allocatable here, so it is uninitialised rather than stale). Neutral
+            ! fill, same convention as the below-bottom pad. Zero iterations without a
+            ! cavity, so core2/pi are bit-unchanged.
+            do nz=1, nu1-1
+                AUX(1,nz,elem)=-bignumber
+                AUX(2,nz,elem)= bignumber
+            end do
             do nz=nu1, nl1-1
                 AUX(1,nz,elem)=max(fct_ttf_max(nz,enodes(1)), fct_ttf_max(nz,enodes(2)), fct_ttf_max(nz,enodes(3)))
                 AUX(2,nz,elem)=min(fct_ttf_min(nz,enodes(1)), fct_ttf_min(nz,enodes(2)), fct_ttf_min(nz,enodes(3)))

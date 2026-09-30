@@ -231,6 +231,17 @@ contains
             nzmax = mesh%nlevels_nod2D_min(n)
             nzmin = mesh%ulevels_nod2D_max(n)
 
+            ! FESOM2 58ccb44: a node touching BOTH deep and shallow cavity elements can
+            ! invert this range (nzmin >= nzmax). The sweeps below would then run zero
+            ! times and the back substitution would publish an UNASSIGNED tp element into
+            ! fer_gamma. Zero the column and skip. Inert without a cavity (ulevels_nod2D_max
+            ! == 1 everywhere, so nzmin < nzmax), but bottom-at-vertices lowers
+            ! nlevels_nod2D_min relative to nlevels_nod2D, which moves TOWARDS this case.
+            if (nzmin >= nzmax) then
+                tr(:,:) = 0.0_WP
+                cycle
+            end if
+
             ! tridiagonal coefficients
             c(nzmin) = 0.0_WP
             a(nzmin) = 0.0_WP
