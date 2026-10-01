@@ -51,6 +51,7 @@ module oce_dyn_velrhs
     use mod_partit,    only: t_partit
     use mod_part_bounds, only: owned_bounds, is_multirank
     use mod_halo,      only: exchange_nod
+    use oce_dyn_vinv,  only: momentum_adv_vinv
     implicit none
     private
     public :: compute_vel_rhs
@@ -124,9 +125,13 @@ contains
         ! Momentum advection -> ADD into this-step UV_rhsAB(1,1:2,:) (FESOM2 :271-273),
         ! AFTER the Coriolis/PGF elem loop and BEFORE the AB blend. v1 has no
         ! split-explicit subcycling (use_ssh_se_subcycl=.false.), so momadv_opt==2
-        ! routes to momentum_adv_scalar (the _transpv variant is M2.x). momadv_opt==1
-        ! is an unsupported FESOM2 scheme (error there); v1 simply skips when /=2.
-        if (dynamics%momadv_opt == 2) then
+        ! routes to momentum_adv_scalar (the _transpv variant is M2.x). momadv_opt==1 is
+        ! the VECTOR-INVARIANT form (oce_dyn_vinv): FESOM2 aborts on it (never adapted to
+        ! ALE, oce_ale_vel_rhs.F90:268), so ours has no oracle -- see that module's header.
+        ! Both branches only ADD into UV_rhsAB, so (4) below is common to them.
+        if (dynamics%momadv_opt == 1) then
+            call momentum_adv_vinv(dynamics, mesh, partit)
+        else if (dynamics%momadv_opt == 2) then
             call momentum_adv_scalar(dynamics, mesh, partit)
         end if
 

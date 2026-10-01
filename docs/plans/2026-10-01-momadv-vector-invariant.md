@@ -65,11 +65,18 @@ rather than from a reference dump.
 - **unit tests**: `test/test_vinv.F90`, registered via `add_fesom_test(test_vinv <np>)` in
   `test/CMakeLists.txt`, run at np 1 and 2. Analytic velocity fields on the real pi mesh
   with known vorticity.
-- **invariant test**: `u . [(f+zeta) x u] == 0` pointwise, added to
-  `src/drivers/fesom_conserve.F90` beside the existing heat/salt/volume invariants. This
-  is the test that validates the two deviations below (`area(nz,n)->area(n)`,
-  `w_cv->1/3`), because it holds only if the area normalisation and the `(f+zeta)`
-  element averaging are mutually consistent.
+- **invariant test**: ⚠️ **CORRECTED during Task 2.** The design originally proposed
+  `u . [(f+zeta) x u] == 0` pointwise. That is **identically zero for any value of zeta**,
+  because `(f+zeta)*zhat x u` is perpendicular to `u` by construction:
+  `U*(V*zeta) + V*(-U*zeta) = 0`. It therefore tests only that the two signs are opposite
+  and the same `zeta` is reused — it is insensitive to the vorticity VALUES and so does
+  **not** validate `area(nz,n)->area(n)` or `w_cv->1/3` as claimed.
+  Replaced by **global kinetic-energy conservation**, the property the vector-invariant
+  form is actually chosen for:
+  `sum_elem u . (advective tendency) * volume  ~  0`
+  which does depend on `zeta`, on `grad(KE)` and on the vertical flux being mutually
+  consistent. Added to `src/drivers/fesom_conserve.F90` beside heat/salt/volume. The cheap
+  sign check is kept as a separate assertion since it costs nothing.
 - **gate**: a `FESOM3_MOMADV_OPT=1` configuration added to `tools/run_conserve_pi.sh`.
 - **no e2e tests** in this project (Fortran model; the conservation gate is the
   integration-level net).
@@ -169,9 +176,18 @@ per element:  Fx = sum(gradient_sca(1:3)*(-KE_node(elnodes))) ; Fy from (4:6) ; 
 
 ### Block C — vertical flux
 
+⚠️ **Bottom-face fix (found by plan review), a deviation FROM `qq` rather than a forced
+one.** `qq` sets `uvert(:,nl1+1) = 0`, but `da` at `nz = nl1` reads `w_e(nlevels(e))`,
+which is **not** zero under bottom-at-vertices: `vert_vel_ale` zeroes `Wvel` only at
+`nlevels_nod2D(n)` (`src/oce/oce_ale.F90:373-392`) while `nlevels(e) = minval` over the
+element's nodes. So on every element beside a deeper vertex column the telescoping breaks
+and the bottom layer picks up a spurious `-w_bot*U/helem` — order 1e-8 m/s^2 on pi, ~0.2%
+of `f*U`, concentrated along sloping topography where it would read as physics. Treat the
+bottom face symmetrically with the surface:
+
 ```
 uvert(:,ul)    = -w_top * UV(:,ul,elem)
-uvert(:,nl1+1) = 0
+uvert(:,nl1+1) = -w_bot * UV(:,nl1,elem)      ! NOT 0 -- see above
 nz = ul+1 .. nl1:
    w     = (1/3) * sum(w_e(nz,elnodes))
    umean = (U(nz-1)*helem(nz) + U(nz)*helem(nz-1)) / (helem(nz-1) + helem(nz))
@@ -204,11 +220,14 @@ comment refers to.
 - Modify: `src/oce/oce_dyn_velrhs.F90`
 - Modify: `src/drivers/fesom_conserve.F90`, `fesom_lifecycle.F90`, `fesom_lifecycle_mr.F90`, `fesom_lifecycle_native.F90`, `fesom_lifecycle_native_mr.F90`, `fesom_pressuredump.F90`, `fesom_stepdump.F90`, `fesom_stepdump_mr.F90`, `fesom_stepfull_mr.F90`
 
-- [ ] add `vorticity` `(nl-1, nod2D)` to `t_dyn_work` in `mod_dyn.F90`, documented as the vector-invariant relative vorticity
-- [ ] allocate + zero-init it beside `uvnode_rhs` in all nine drivers (`nNodL` or `mesh%nod2D` matching each driver's existing convention)
-- [ ] add the `momadv_opt == 1` branch at `oce_dyn_velrhs.F90:129` calling a stub `momentum_adv_vinv` that does nothing yet
-- [ ] write a test asserting `momadv_opt==2` output is unchanged (run `ctest`; the existing suite IS this test)
-- [ ] run tests — `ctest` 30/30 and `bash tools/run_conserve_pi.sh` must stay green before task 2
+- [x] add `vorticity` `(nl-1, nod2D)` to `t_dyn_work` in `mod_dyn.F90`, documented as the vector-invariant relative vorticity
+- [x] allocate + zero-init it beside `uvnode_rhs` in all nine drivers (`nNodL` or `mesh%nod2D` matching each driver's existing convention)
+- [x] add the `momadv_opt == 1` branch at `oce_dyn_velrhs.F90:129` calling a stub `momentum_adv_vinv` that does nothing yet
+- [x] write a test asserting `momadv_opt==2` output is unchanged (run `ctest`; the existing suite IS this test)
+- [x] run tests — `ctest` 30/30 and `bash tools/run_conserve_pi.sh` 13/13 GATE OK
+
+➕ `vorticity` deliberately NOT added to `write/read_t_dyn_work`: unlike `uvnode_rhs`/`u_c`/`v_c`
+   it is recomputed from `UV` every step, and adding it would change the restart layout.
 
 ### Task 2: Write `test/test_vinv.F90` with the analytic expectations (TDD — fails until Task 3)
 
@@ -228,13 +247,55 @@ comment refers to.
 **Files:**
 - Create: `src/oce/oce_dyn_vinv.F90`
 
-- [ ] create the module with the header documenting the `qq` provenance, the stub-oracle situation, and the forced-deviation table
-- [ ] implement the edge-loop circulation integral with `edge_cross_dxdy(1:2)`/`(3:4)`, keeping `qq`'s three level ranges verbatim
-- [ ] normalise by `mesh%area(n)` (deviation from `area(nz,n)`, documented inline) and `exchange_nod` under `is_multirank`
-- [ ] verify the solid-body, uniform-flow and linear-shear assertions in `test_vinv` now PASS at np 1 and 2
-- [ ] run tests — `ctest` must be fully green before task 4
+- [x] create the module with the header documenting the `qq` provenance, the stub-oracle situation, and the forced-deviation table
+- [x] implement the edge-loop circulation integral with `edge_cross_dxdy(1:2)`/`(3:4)`, keeping `qq`'s three level ranges verbatim
+- [x] normalise by `mesh%area(n)` (deviation from `area(nz,n)`, documented inline) and `exchange_nod` under `is_multirank`
+- [x] verify the assertions in `test_vinv` PASS at np 1 and 2
+- [x] run tests
 
-### Task 4: Implement Block B — kinetic energy and its gradient
+➕ Zeroed `vorticity` over the FULL local range (owned+halo, all levels), not just wet
+   owned rows: the edge scatter writes halo rows and `-init=zero` does not cover
+   allocatables, so accumulating onto fresh heap could trap under `-fpe0`.
+
+➕ **V2 validated the `area(nz,n)` -> `area(n)` deviation.** `zeta == -alpha` to relative
+   5e-13 over 81729 node-levels holds only if `area(n) == sum of elem_area/3` over the
+   node's wet adjacent elements. This is the review's T-c composition identity, obtained
+   for free from the linear-shear case.
+
+➕ **`qq`'s circulation sign is correct for our `edge_tri`** -- no flip needed. I briefly
+   flipped it on a wrong diagnosis and reverted.
+
+⚠️ Two test-design errors found and fixed while getting V2 to pass, both mine:
+   (a) the analytic field must be linear in `coord_nod2D` (the ROTATED computational frame
+       the geometry lives in), not `geo_coord_nod2D`. With the geographic field the test
+       failed worst at the rotated pole (mean `zeta/(-alpha)` = 0.836).
+   (b) the interior mask must loop `1..nEdgeO` (local owned edges), not `1..mesh%edge2D`
+       (the GLOBAL count) -- the latter read past the local arrays and produced an
+       all-false mask, so at np=2 the test silently asserted nothing.
+
+### Task 4: Implement Block B — the `zeta x u` term AND the kinetic-energy gradient
+
+⚠️ **The `zeta x u` term was MISSING from the original plan** (found by plan review). Blocks
+A/B/C as first written computed the vorticity, the KE gradient and the vertical flux but
+never multiplied `zeta x u` — i.e. they implemented `f x u - grad(KE) - w du/dz`, not the
+operator in the Overview. In `qq` the `zeta` term and `grad(KE)` share one elemental loop
+(`oce_vinv_mom_adv.F90:174-177`), so they belong in one task, but the `zeta` half must be
+explicit:
+
+```
+zbar_e = (1/3) * sum( vorticity(nz, elnodes) )          ! element average of zeta
+UV_rhsAB(1,1,nz,elem) += ( UV(2,nz,elem)*zbar_e + Fx ) * elem_area(elem)
+UV_rhsAB(1,2,nz,elem) += (-UV(1,nz,elem)*zbar_e + Fy ) * elem_area(elem)
+```
+
+➕ **Missing deviation row:** `qq` averages `coriolis_node(elnodes)` and `vorticity` together
+with the same `w_cv` weights, so `f` and `zeta` get identical treatment. FESOM3 step (2)
+supplies the element-centre `mesh%coriolis(elem)` instead, so `f` and `zeta` are weighted
+differently: `coriolis(elem) + sum(zeta)/3` rather than `sum(coriolis_node + zeta)/3`.
+`mesh%coriolis_node` does exist, so this is a choice, not an absence — it keeps
+`momadv_opt==2` bit-identical and uses FESOM2's standard Coriolis.
+
+### Task 4b: Implement the kinetic-energy gradient
 
 **Files:**
 - Modify: `src/oce/oce_dyn_vinv.F90`
@@ -254,7 +315,7 @@ comment refers to.
 - [ ] add the `uvert` build with `dz -> helem` in the interpolation weight, surface value `-w_top*UV`, and `uvert(:,nl1+1) = 0`
 - [ ] document inline that the `Av` term is deliberately absent (Decision 2) with the reason
 - [ ] add the flux divergence including the `+ da*UV` energy-conserving term, `* elem_area / helem(nz)`
-- [ ] write a test that `w == 0` everywhere gives zero vertical contribution
+- [ ] write the Block C net: **uniform `u` with NONZERO `w` => vertical contribution is zero to round-off, including at `nz = nlevels(e)-1` on sloping elements**. (The originally planned `w == 0` test is blind to the bottom-face bug, since every term is proportional to `w`; keep it only as a cheap smoke check.)
 - [ ] write a test for the T10 property: `UV_rhsAB == 0` for `nz >= nlevels(elem)` (no momentum leaking into dry cells)
 - [ ] run tests — must pass before task 6
 
@@ -265,9 +326,10 @@ comment refers to.
 - Modify: `tools/run_conserve_pi.sh`
 
 - [ ] add a `FESOM3_MOMADV_OPT` env switch to `fesom_conserve.F90` following the existing `FESOM3_REDI` / `FESOM3_MIX_TKE` pattern
-- [ ] add the per-step invariant `max |u . [(f+zeta) x u]|` beside the existing heat/salt/volume checks, gated by a tolerance
+- [ ] add the per-step **global KE budget** invariant `sum_elem u.(adv tendency)*volume`, relative to total KE, beside the existing heat/salt/volume checks
+- [ ] add the cheap `max |u . [(f+zeta) x u]|` sign assertion too (trivially zero, but free and catches a transposed sign)
 - [ ] add `momadv1 FESOM3_MOMADV_OPT=1` and `momadv1+TKE FESOM3_MOMADV_OPT=1 FESOM3_MIX_TKE=1` to the gate's config heredoc
-- [ ] write the invariant check so it reports max|.| even when it passes, so the magnitude is visible
+- [ ] write both checks so they report their magnitude even when passing
 - [ ] run `bash tools/run_conserve_pi.sh` — all configurations including the two new ones must pass
 
 ### Task 7: Verify acceptance criteria

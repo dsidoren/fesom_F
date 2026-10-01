@@ -304,6 +304,8 @@ program fesom_pressuredump
     allocate(dyn%w_e(nl, mesh%nod2D))                   ! explicit vertical velocity (nodes)
     allocate(dyn%w_i(nl, mesh%nod2D))                   ! M2.5 implicit vertical velocity (nodes)
     allocate(dyn%work%uvnode_rhs(2, nl-1, mesh%nod2D))  ! momadv nodal scratch
+    allocate(dyn%work%vorticity(nl-1, mesh%nod2D))   ! momadv_opt==1 (vector-invariant) scratch
+    dyn%work%vorticity = 0.0_WP
     allocate(dyn%work%pgf_x(nl-1, mesh%elem2D), dyn%work%pgf_y(nl-1, mesh%elem2D))
     allocate(dyn%work%u_c(nl-1, mesh%elem2D), dyn%work%v_c(nl-1, mesh%elem2D))  ! visc scratch
     allocate(Av(nl, mesh%elem2D), stress_surf(2, mesh%elem2D))  ! M2.5 prescribed inputs

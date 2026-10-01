@@ -46,6 +46,11 @@ module mod_dyn
         ! step by oce_vert_spline::compute_shear2 and shared by PP, KPP's ri_iwmix and
         ! TKE (which each formed it separately before, with slightly different rounding).
         real(kind=WP), allocatable, dimension(:,:)   :: shear2          ! (nl,  nod2D) |du/dz|^2
+        ! Relative vorticity curl(u) at nodes, for the vector-invariant momentum
+        ! advection (momadv_opt==1, oce_dyn_vinv). Recomputed from UV at the start of
+        ! every momentum_adv_vinv call, so it is NOT serialized -- adding it to
+        ! write/read_t_dyn_work would change the restart layout for no benefit.
+        real(kind=WP), allocatable, dimension(:,:)   :: vorticity       ! (nl-1,nod2D) curl(u)
         real(kind=WP), allocatable, dimension(:,:)   :: pgf_x, pgf_y    ! (nl-1,elem2D) PGF (M2.2 oce_pgf), from hpressure
         ! M2.8 PP vertical mixing coefficients (oce_ale_mixing_pp). FESOM2 o_ARRAYS
         ! names Kv/Av; recomputed each step from N^2 + uvnode shear, NOT serialized.
