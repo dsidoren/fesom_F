@@ -347,6 +347,8 @@ program fesom_lifecycle_native_mr
     dyn%work%density_ref = density_0
     dyn%AB_order      = 2
     dyn%momadv_opt    = momadv_env
+    if (partit%mype == 0 .and. dyn%momadv_opt == 1) write(*,'(a)') &
+        'fesom_lifecycle_native_mr: momentum advection = VECTOR INVARIANT (momadv_opt=1)'
     dyn%opt_visc      = 7
     dyn%visc_gamma0   = 0.003_WP
     dyn%visc_gamma1   = 0.1_WP
@@ -466,8 +468,6 @@ program fesom_lifecycle_native_mr
             tracers%work%tr_z = 0.0_WP
             if (partit%mype == 0) write(*,'(a)') &
                 'fesom_lifecycle_native_mr: Fer_GM + Redi ENABLED (work_core GM+Redi config)'
-    if (partit%mype == 0 .and. dyn%momadv_opt == 1) write(*,'(a)') &
-        'fesom_lifecycle_native_mr: momentum advection = VECTOR INVARIANT (momadv_opt=1)'
         else
             Redi = .false.
             if (partit%mype == 0) write(*,'(a)') &
