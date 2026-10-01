@@ -154,6 +154,7 @@ program fesom_lifecycle_native_mr
     logical :: use_fer_gm, use_redi   ! M4f: GM bolus / Redi isopycnal diffusion toggles
     logical :: use_kpp, do_swpene, do_nonlcl   ! M5d: KPP / shortwave pene / ghats nonlocal flux
     logical :: use_tke      ! M7d: FESOM3_MIX_TKE -> cvmix_TKE producer at multi-rank (LOCAL nNodL)
+    integer :: momadv_env   ! FESOM3_MOMADV_OPT: 1 = vector invariant, 2 = scalar (default)
     real(kind=WP), allocatable :: chl(:)       ! M5d const 0.1 / M8c Sweeney monthly climatology
     logical :: use_chl_sweeney                 ! M8c: FESOM3_CHL_SWEENEY -> read Sweeney chl monthly
     ! native atmospheric forcing read (the whole atmosphere, over owned+halo).
@@ -201,6 +202,14 @@ program fesom_lifecycle_native_mr
     shear_splines = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_N2_SPLINES', env, length=env_len, status=ios)
     N2_splines = (ios == 0 .and. env_len > 0)
+    ! Momentum advection operator. VALUE-based, NOT presence-based like the switches
+    ! above: momadv_opt is 1 (vector invariant, oce_dyn_vinv) or 2 (scalar/flux form),
+    ! so a bare presence test could not distinguish them. Unset => 2, the default.
+    call get_environment_variable('FESOM3_MOMADV_OPT', env, length=env_len, status=ios)
+    momadv_env = 2
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) momadv_env
+    if (momadv_env /= 1 .and. momadv_env /= 2) &
+        error stop 'FESOM3_MOMADV_OPT must be 1 or 2'
     if (partit%mype == 0 .and. (shear_splines .or. N2_splines)) write(*,'(a,l1,a,l1,a)') &
         'fesom_lifecycle_native_mr: vertical splines ENABLED (shear=', shear_splines, &
         ', N2=', N2_splines, ')'
@@ -337,7 +346,7 @@ program fesom_lifecycle_native_mr
     dyn%work%Kv = 0.0_WP; dyn%work%Av = 0.0_WP
     dyn%work%density_ref = density_0
     dyn%AB_order      = 2
-    dyn%momadv_opt    = 2
+    dyn%momadv_opt    = momadv_env
     dyn%opt_visc      = 7
     dyn%visc_gamma0   = 0.003_WP
     dyn%visc_gamma1   = 0.1_WP
@@ -457,6 +466,8 @@ program fesom_lifecycle_native_mr
             tracers%work%tr_z = 0.0_WP
             if (partit%mype == 0) write(*,'(a)') &
                 'fesom_lifecycle_native_mr: Fer_GM + Redi ENABLED (work_core GM+Redi config)'
+    if (partit%mype == 0 .and. dyn%momadv_opt == 1) write(*,'(a)') &
+        'fesom_lifecycle_native_mr: momentum advection = VECTOR INVARIANT (momadv_opt=1)'
         else
             Redi = .false.
             if (partit%mype == 0) write(*,'(a)') &
