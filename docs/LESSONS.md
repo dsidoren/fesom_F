@@ -2351,3 +2351,27 @@ What worked, and what did not:
   every vertical term is proportional to `w`. The test that sees it is **uniform `u` with
   NONZERO `w`**: 5.4e-2 relative with `qq`'s bottom face, 2.6e-16 with the fix.
 
+## L55 — Element-local geometry beats per-edge arrays at MR; per-rank invariants beat global tallies
+
+Three lessons from the rvo_upwind face-vorticity blend (`oce_dyn_vinv`):
+
+- **Per-edge geometry is owned-edges-only** (`edge_dxdy`/`edge_cross_dxdy`/`edge_len` over
+  `nEdgeO`), and an owned element can carry ONE halo edge — so an element-wise consumer of
+  per-edge geometry breaks at MR. The safe pattern: rebuild edge vectors from the element's
+  OWN vertices (`coord_nod2D` + `trim_cyclic` + its `elem_cos`), and take neighbour VALUES
+  through `exchange_elem`-filled element fields rather than neighbour vertex lists
+  (`elem2D_nodes` is owned-only). Bonus: the inward normal oriented "toward the third
+  vertex" needs no edge_tri left/right convention at all, and `test_vinv` V10 PROVES it
+  geometrically (neighbour centroid on the outward side, same metre metric — a positive
+  diagonal rescaling does not preserve dot-product signs, so never mix metrics in such a
+  test).
+- **FESOM element ownership OVERLAPS at partition seams** (`myDim` elements = elements
+  touching an owned node), so summing per-owned-element counts across ranks double-counts
+  boundary-strip items (pi dist_2: 6 boundary edges counted twice). Write per-rank
+  invariants; a cross-rank tally mismatch there is NOT a bug. A ground-truth probe against
+  the global mesh files settles such alarms in minutes — run it before redesigning.
+- **A stencil-widening feature moves "interior" one ring inward in constant-field tests.**
+  The blend reads the NEIGHBOURS' vertex vorticity, so constant-zeta inertness holds only
+  where the element AND its neighbours avoid boundary nodes (`elem_int2`). The V9 failures
+  at 0.89 relative were the mask, not the physics.
+

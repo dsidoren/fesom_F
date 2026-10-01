@@ -1414,6 +1414,15 @@ it in `fesom_conserve`; `tools/run_conserve_pi.sh` gates it at np=1 and np=8. No
 driver sets `momadv_opt = 1` — exposing it in `fesom_lifecycle_native_mr` is a separate,
 deliberate step.
 
+`rvo_upwind` (`FESOM3_RVO_UPWIND`, value in [0,1], default 0) blends the face
+relative-vorticity reconstruction toward the 1-2 upwind edge-neighbours, weighted by the
+inflow `d+|d|` through each face (inward normals rebuilt from the element's OWN vertices --
+per-edge geometry is owned-edges-only). 0 = plain vertex average, structurally bit-identical;
+1 = fully upwind. Convex (max principle), energy-neutral (`u.[(f+zeta) x u] == 0` for any
+zeta), linear in the coefficient. Net: `test_vinv` V8-V12 + the `momadv-vinv-upw` gate
+configs at np=1/8. `mesh%elem_neighbors` is built once in `build_elem_adjacency`
+(`compute_geometry`); `elem_edges` remains unbuilt.
+
 **There is no FESOM2 oracle for `momadv_opt==1`** (the v2.7.3 branch aborts: "not adapted
 mom_adv advection typ for ALE"). Its net is `test/test_vinv.F90` — analytic cases that are
 exact to round-off — plus the conservation gate. See L54 and

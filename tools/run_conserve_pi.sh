@@ -85,6 +85,7 @@ splines+KPP FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_KPP=1
 splines+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_TKE=1
 N2splines FESOM3_N2_SPLINES=1
 momadv-vinv FESOM3_MOMADV_OPT=1
+momadv-vinv-upw FESOM3_MOMADV_OPT=1 FESOM3_RVO_UPWIND=0.7
 bothsplines+GM+Redi+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_N2_SPLINES=1 FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1
 CFG
 
@@ -97,6 +98,15 @@ if FESOM3_MOMADV_OPT=1 FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
     :
 else
     echo "run_conserve_pi: FAILED (zstar+momadv-vinv np=8)"; fail=1
+fi
+
+# upwind blend at np=8: its exchange_elem of omega_e is the one new MR communication.
+echo "=== zstar + momadv-vinv-upw, np=8, $NSTEPS steps (conservation gate, tol=$TOL) ==="
+if FESOM3_MOMADV_OPT=1 FESOM3_RVO_UPWIND=0.7 FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
+     mpirun $MPIFLAGS -n 8 "$BIN" < /dev/null 2>&1 | tail -6; then
+    :
+else
+    echo "run_conserve_pi: FAILED (zstar+momadv-vinv-upw np=8)"; fail=1
 fi
 
 echo "=== linfs, np=1, $NSTEPS steps (invariants only; drift reported, not gated) ==="

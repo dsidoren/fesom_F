@@ -91,6 +91,7 @@ contains
             call exchange_elem_cos(mesh, partit, nElemF)
         end if
         call compute_node_areas(mesh, nNodO, nNodL, partit)             ! accumulate area, then scale
+        call build_elem_adjacency(mesh, nElemO, nEdgeL)                 ! elem_neighbors (rvo_upwind)
         if (partit%npes > 1) then
             ! M2.12b: halo elem_area (FULL halo) for MUSCL fill_up_dn_grad's area
             ! weighting at the halo elements reached through a halo node's element list,
@@ -295,6 +296,54 @@ contains
             mesh%gradient_sca(6, e) = dX21 * dfac
         end do
     end subroutine compute_gradient_sca
+
+    subroutine build_elem_adjacency(mesh, nElemO, nEdgeL)
+        ! mesh%elem_neighbors(k, e): the element across edge k of OWNED element e, where
+        ! edge k connects vertices elnodes(k) and elnodes(k+1) (cyclic). 0 = domain
+        ! boundary. Built ONCE from edges/edge_tri -- the neighbour across an edge is just
+        ! "the other edge_tri entry"; only the INVERSE map (element -> its edges) needs a
+        ! cache, and that cache is these 3 ints per element. elem_edges stays unbuilt.
+        ! Neighbour ids may be HALO element ids: valid as indices into any element field
+        ! that has been exchange_elem-filled (the rvo_upwind omega_e consumer does that).
+        !
+        ! The sweep covers ALL local edges (owned + halo): an owned element can have ONE
+        ! halo edge (both endpoints halo nodes), carried only by the eDim part of the edge
+        ! list. NOTE this is also why no per-edge GEOMETRY can be used for owned elements:
+        ! edge_dxdy/edge_cross_dxdy exist for OWNED edges only (see their allocation), so
+        ! consumers rebuild edge vectors from the element's own vertices instead.
+        ! The -1 init + post-sweep check turns the partition assumption "an owned element
+        ! sees all three of its edges locally" into a hard invariant (same style as
+        ! assert_bottom_invariant).
+        type(t_mesh), intent(inout) :: mesh
+        integer,      intent(in)    :: nElemO, nEdgeL
+        integer :: ed, s, e, k, a, b, v1, v2, other
+
+        allocate(mesh%elem_neighbors(3, nElemO))
+        mesh%elem_neighbors = -1
+        do ed = 1, nEdgeL
+            a = mesh%edges(1, ed)
+            b = mesh%edges(2, ed)
+            do s = 1, 2
+                e = mesh%edge_tri(s, ed)
+                if (e < 1 .or. e > nElemO) cycle          ! boundary side or halo element
+                other = mesh%edge_tri(3-s, ed)            ! halo id ok; <=0 on a boundary
+                do k = 1, 3
+                    v1 = mesh%elem2D_nodes(k, e)
+                    v2 = mesh%elem2D_nodes(mod(k,3)+1, e)
+                    if ((v1 == a .and. v2 == b) .or. (v1 == b .and. v2 == a)) then
+                        mesh%elem_neighbors(k, e) = max(other, 0)
+                        exit
+                    end if
+                end do
+            end do
+        end do
+        do e = 1, nElemO
+            if (any(mesh%elem_neighbors(:, e) < 0)) then
+                write(*,'(a,i0)') 'build_elem_adjacency: unresolved edge slot at owned element ', e
+                error stop 'build_elem_adjacency: local edge list does not cover an owned element'
+            end if
+        end do
+    end subroutine build_elem_adjacency
 
     subroutine compute_edge_geometry(mesh, nEdgeO, center_x, center_y)
         ! edge_dxdy (along-edge) + edge_len + edge_cross_dxdy (edge-center to elem

@@ -113,6 +113,14 @@ module mod_param_phys
     !          at fixed p; the two-point difference is the approximation to it. Pair with
     !          shear_splines so Ri and the neutral slope divide like by like.
     logical       :: N2_splines    = .false.
+    ! Upwind blending of the face relative-vorticity reconstruction in the vector-
+    ! invariant momentum advection (momadv_opt==1, oce_dyn_vinv). Range [0,1]:
+    !   0 = the plain 3-vertex average (bit-identical default; no upwind code executes)
+    !   1 = fully upwind: the face value comes from the 1-2 inflow neighbours, weighted
+    !       by inflow strength (d+|d| normalised).
+    ! Energy-neutral for ANY value (u.[(f+zeta) x u] == 0 identically); acts on the
+    ! vorticity/enstrophy dynamics only. VALUE-based env FESOM3_RVO_UPWIND.
+    real(kind=WP) :: rvo_upwind    = 0.0_WP
 
     ! --- &tracer_phys: PP background diffusivity + mo_convect enhancements ---
     ! Members of the FESOM2 &tracer_phys namelist group (oce_modules.F90 cites below)

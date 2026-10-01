@@ -106,7 +106,8 @@ contains
             'Maps every triangular face to its three corner nodes.', '', cf='face_node_connectivity', sidx=.true.)
         call def3(store, a_edge_nodes, 'edge_nodes', 2, Dg, '<i4', 'n2', 'edg_n', &
             'Maps every edge to the two nodes that it connects', '', cf='edge_node_connectivity', sidx=.true.)
-        ! face_edges (elem_edges) and face_links (elem_neighbors) are DEFERRED: FESOM3's kernels never
+        ! face_edges (elem_edges) stays DEFERRED (never built). elem_neighbors IS now built
+        ! (build_elem_adjacency, for rvo_upwind) but face_links output remains deferred; FESOM3's kernels never
         ! build elem_edges/elem_neighbors (only edges/edge_tri), exactly as gradient_vec is deferred.
         call def3(store, a_edge_face_links, 'edge_face_links', 2, Dg, '<i4', 'n2', 'edg_n', &
             'neighbor faces for edges', '', cf='edge_face_connectivity')

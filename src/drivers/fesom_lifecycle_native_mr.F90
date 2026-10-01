@@ -43,7 +43,7 @@ program fesom_lifecycle_native_mr
     use, intrinsic :: iso_fortran_env, only: int32, real64
     use mod_precision,      only: WP, MP, MPI_WP
     use mod_constants,      only: density_0
-    use mod_param_phys,     only: N2smth_h, alpha, theta, scale_area, shear_splines, N2_splines
+    use mod_param_phys,     only: N2smth_h, alpha, theta, scale_area, shear_splines, N2_splines, rvo_upwind
     use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const, mix_scheme_nmb
     use mod_param_phys,     only: use_instabmix, instabmix_kv, use_momix, use_windmix
     ! M4f: GM bolus (FESOM3_FER_GM) + Redi isopycnal diffusion (FESOM3_REDI) at MULTI-RANK —
@@ -210,6 +210,12 @@ program fesom_lifecycle_native_mr
     if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) momadv_env
     if (momadv_env /= 1 .and. momadv_env /= 2) &
         error stop 'FESOM3_MOMADV_OPT must be 1 or 2'
+    ! Upwind blending of the face relative vorticity (oce_dyn_vinv; only active with
+    ! momadv_opt==1). VALUE-based: a fraction in [0,1], not a presence switch.
+    call get_environment_variable('FESOM3_RVO_UPWIND', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) rvo_upwind
+    if (rvo_upwind < 0.0_WP .or. rvo_upwind > 1.0_WP) &
+        error stop 'FESOM3_RVO_UPWIND must be in [0,1]'
     if (partit%mype == 0 .and. (shear_splines .or. N2_splines)) write(*,'(a,l1,a,l1,a)') &
         'fesom_lifecycle_native_mr: vertical splines ENABLED (shear=', shear_splines, &
         ', N2=', N2_splines, ')'
@@ -349,6 +355,8 @@ program fesom_lifecycle_native_mr
     dyn%momadv_opt    = momadv_env
     if (partit%mype == 0 .and. dyn%momadv_opt == 1) write(*,'(a)') &
         'fesom_lifecycle_native_mr: momentum advection = VECTOR INVARIANT (momadv_opt=1)'
+    if (partit%mype == 0 .and. rvo_upwind > 0.0_WP) write(*,'(a,f6.3)') &
+        'fesom_lifecycle_native_mr: face-vorticity upwind blend rvo_upwind = ', rvo_upwind
     dyn%opt_visc      = 7
     dyn%visc_gamma0   = 0.003_WP
     dyn%visc_gamma1   = 0.1_WP

@@ -49,6 +49,8 @@ program test_vinv
     use mod_dyn,           only: t_dyn
     use mod_partit,        only: t_partit
     use mod_partitioning,  only: par_init, par_ex, set_partition
+    use mod_param_phys,    only: rvo_upwind
+    use mod_mesh_rotate,   only: trim_cyclic
     use mod_mesh_read,     only: read_mesh
     use mod_mesh_areas,    only: compute_geometry
     use mod_part_bounds,   only: owned_bounds
@@ -63,9 +65,10 @@ program test_vinv
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF, nl, n, nz
     real(kind=WP) :: zmax
     real(kind=WP), allocatable :: zsave(:,:)
-    logical,       allocatable :: interior(:), elem_int(:)
+    logical,       allocatable :: interior(:), elem_int(:), elem_int2(:)
     real(kind=WP) :: scal
     integer       :: nzall
+    real(kind=WP), allocatable :: rhsA(:,:,:,:)
     real(kind=WP), parameter   :: ALPHA = 1.0e-5_WP   ! du/dy [1/s]
 
     nfail = 0
@@ -103,6 +106,53 @@ program test_vinv
         end if
     end do
     write(*,'(a,i7,a,i7)') '  interior nodes: ', count(interior(1:nNodO)), ' of ', nNodO
+
+    !=========================================================================
+    ! A - elem_neighbors adjacency (build_elem_adjacency, Task 1 of rvo_upwind)
+    !=========================================================================
+    call check_true('A1 elem_neighbors allocated+resolved', &
+                    allocated(mesh%elem_neighbors) .and. all(mesh%elem_neighbors(:,1:nElemO) >= 0))
+    block
+        integer :: e, k, nb, nshared, i, j, nbnd_slots, nbnd_edges
+        logical :: mutual
+        nbnd_slots = 0
+        do e = 1, nElemO
+            do k = 1, 3
+                nb = mesh%elem_neighbors(k, e)
+                if (nb == 0) then
+                    nbnd_slots = nbnd_slots + 1
+                    cycle
+                end if
+                if (nb > nElemO) cycle                     ! halo neighbour: no local data
+                ! A2 mutuality
+                mutual = any(mesh%elem_neighbors(:, nb) == e)
+                if (.not. mutual) call check_true('A2 neighbour relation mutual', .false.)
+                ! A4 slot alignment: e and nb share EXACTLY the slot-k vertex pair
+                nshared = 0
+                do i = 1, 3
+                    do j = 1, 3
+                        if (mesh%elem2D_nodes(i, e) == mesh%elem2D_nodes(j, nb)) nshared = nshared + 1
+                    end do
+                end do
+                if (nshared /= 2) call check_true('A4 neighbours share exactly 2 vertices', .false.)
+                if (.not. (any(mesh%elem2D_nodes(:, nb) == mesh%elem2D_nodes(k, e)) .and. &
+                           any(mesh%elem2D_nodes(:, nb) == mesh%elem2D_nodes(mod(k,3)+1, e)))) &
+                    call check_true('A4 slot k matches the shared vertex pair', .false.)
+            end do
+        end do
+        ! A3 boundary accounting, PER RANK: zero-slots of owned elements == boundary edges
+        ! whose el1 is owned. Do NOT expect the cross-rank sum to equal the global boundary
+        ! count: FESOM2 element ownership OVERLAPS at partition seams (myDim elements =
+        ! elements touching an owned node), so a boundary-strip element -- and hence its
+        ! boundary edge -- is legitimately counted by several ranks (pi dist_2: 6 such).
+        nbnd_edges = 0
+        do i = 1, size(mesh%edge_tri, 2)
+            if (mesh%edge_tri(2, i) <= 0 .and. mesh%edge_tri(1, i) >= 1 .and. &
+                mesh%edge_tri(1, i) <= nElemO) nbnd_edges = nbnd_edges + 1
+        end do
+        write(*,'(a,i6,a,i6)') '  A3 boundary slots = ', nbnd_slots, '  boundary edges = ', nbnd_edges
+        call check_true('A3 boundary slots == owned boundary edges', nbnd_slots == nbnd_edges)
+    end block
 
     !=========================================================================
     ! V1 - uniform flow must give zeta == 0 EXACTLY
@@ -191,6 +241,7 @@ program test_vinv
     allocate(dyn%uv_rhsAB(1, 2, nl-1, nElemF))
     allocate(dyn%w_e(nl, nNodL))
     allocate(elem_int(nElemO))
+    allocate(rhsA(1, 2, nl-1, nElemF))
     do nz = 1, nl-1
         mesh%helem(nz,:) = 10.0_MP + 2.0_MP*real(nz, MP)   ! any positive ALE thickness
     end do
@@ -201,6 +252,25 @@ program test_vinv
     end do
     do n = 1, nElemO
         elem_int(n) = all(interior(mesh%elem2D_nodes(1:3,n)))
+    end do
+    ! one ring deeper: the upwind blend reads the NEIGHBOURS' vertex vorticity, so a
+    ! constant-field inertness assertion must exclude elements whose neighbours touch the
+    ! boundary too (and, at np>1, elements with a halo neighbour whose vertices cannot be
+    ! inspected locally -- elem2D_nodes is owned-only).
+    allocate(elem_int2(nElemO))
+    do n = 1, nElemO
+        elem_int2(n) = elem_int(n)
+        do nz = 1, 3
+            block
+                integer :: nbb
+                nbb = mesh%elem_neighbors(nz, n)
+                if (nbb <= 0 .or. nbb > nElemO) then
+                    elem_int2(n) = .false.
+                else if (.not. elem_int(nbb)) then
+                    elem_int2(n) = .false.
+                end if
+            end block
+        end do
     end do
 
     dyn%uv(1,:,:) =  0.17_WP
@@ -245,6 +315,72 @@ program test_vinv
     write(*,'(a,es12.4)') '  V7 full operator  : max|UV_rhsAB| = ', zmax
     call check_true('V7 full operator is not a no-op', zmax > 0.0_WP)
 
+    !=========================================================================
+    ! V8-V11 - upwind-blended face vorticity (rvo_upwind), written BEFORE the blend
+    ! exists (TDD): V11's single-neighbour equality is the failing specification.
+    !=========================================================================
+    ! V8: rvo_upwind = 0 must be exactly the reference behaviour
+    rvo_upwind = 0.0_WP
+    call set_shear(1.0_WP)
+    dyn%uv_rhsAB = 0.0_WP
+    call momentum_adv_vinv(dyn, mesh, partit)
+    rhsA = dyn%uv_rhsAB
+    dyn%uv_rhsAB = 0.0_WP
+    call momentum_adv_vinv(dyn, mesh, partit)
+    call check_true('V8 rvo_upwind=0 bit-identical', all(dyn%uv_rhsAB == rhsA))
+
+    ! V9a: constant zeta (linear shear) -> blend inert at rvo_upwind=1 (weighted average
+    ! of equal values re-forms the same value up to round-off)
+    rvo_upwind = 1.0_WP
+    dyn%uv_rhsAB = 0.0_WP
+    call momentum_adv_vinv(dyn, mesh, partit)
+    zmax = 0.0_WP; scal = 0.0_WP
+    do n = 1, nElemO
+        if (.not. elem_int2(n)) cycle
+        nzall = minval(mesh%nlevels_nod2D_min(mesh%elem2D_nodes(1:3,n))) - 1
+        do nz = 1, 3
+            nzall = min(nzall, minval(mesh%nlevels_nod2D_min( &
+                        mesh%elem2D_nodes(1:3, mesh%elem_neighbors(nz,n)))) - 1)
+        end do
+        do nz = mesh%ulevels(n), min(mesh%nlevels(n)-1, nzall)
+            zmax = max(zmax, abs(dyn%uv_rhsAB(1,1,nz,n)-rhsA(1,1,nz,n)), &
+                             abs(dyn%uv_rhsAB(1,2,nz,n)-rhsA(1,2,nz,n)))
+            scal = max(scal, abs(rhsA(1,1,nz,n)), abs(rhsA(1,2,nz,n)))
+        end do
+    end do
+    call max_all(zmax); call max_all(scal)
+    write(*,'(a,es12.4)') '  V9a const-zeta blend inertness: rel = ', zmax/max(scal,tiny(1.0_WP))
+    call check_true('V9a constant zeta -> blend inert at rvo_upwind=1', &
+                    zmax/max(scal,tiny(1.0_WP)) < 1.0e-12_WP)
+
+    ! V9b: uniform u + nonzero w, rvo_upwind=1 -> the V6 zero-tendency bound must hold
+    dyn%uv(1,:,:) =  0.17_WP
+    dyn%uv(2,:,:) = -0.43_WP
+    dyn%uv_rhsAB  = 0.0_WP
+    call momentum_adv_vinv(dyn, mesh, partit)
+    zmax = 0.0_WP; scal = 0.0_WP
+    do n = 1, nElemO
+        if (.not. elem_int2(n)) cycle
+        nzall = minval(mesh%nlevels_nod2D_min(mesh%elem2D_nodes(1:3,n))) - 1
+        do nz = 1, 3
+            nzall = min(nzall, minval(mesh%nlevels_nod2D_min( &
+                        mesh%elem2D_nodes(1:3, mesh%elem_neighbors(nz,n)))) - 1)
+        end do
+        do nz = mesh%ulevels(n), min(mesh%nlevels(n)-1, nzall)
+            zmax = max(zmax, abs(dyn%uv_rhsAB(1,1,nz,n)), abs(dyn%uv_rhsAB(1,2,nz,n)))
+            scal = max(scal, abs(dyn%w_e(nz,mesh%elem2D_nodes(1,n))*0.43_WP) &
+                             *real(mesh%elem_area(n),WP)/real(mesh%helem(nz,n),WP))
+        end do
+    end do
+    call max_all(zmax); call max_all(scal)
+    write(*,'(a,es12.4)') '  V9b uniform-u zero tendency at rvo=1: rel = ', zmax/max(scal,tiny(1.0_WP))
+    call check_true('V9b uniform u + w/=0 -> zero tendency at rvo_upwind=1', &
+                    zmax/max(scal,tiny(1.0_WP)) < 1.0e-12_WP)
+
+    ! V10 + V11 share the test-side reconstruction of normals/weights
+    call upwind_checks()
+    rvo_upwind = 0.0_WP
+
     if (nfail == 0) then
         write(*,'(a)') 'test_vinv: OK'
     else
@@ -254,6 +390,177 @@ program test_vinv
     if (nfail /= 0) error stop 1
 
 contains
+
+    subroutine upwind_checks()
+        ! V10: the inward-normal/weight convention, proven against geometry: every edge
+        ! the TEST's reconstruction marks as inflow (w>0) must have its neighbour's
+        ! centroid UPSTREAM of the element's: (c_nb - c_e).u < 0. Pure geometry; the
+        ! model couples to it through V11, which uses the SAME convention.
+        ! V11: end-to-end weighting through the public output. u = C*lat^2 (zeta ~ lat,
+        ! VARYING -- a constant-zeta field is blend-inert and cannot test selection).
+        ! delta_zb is recovered from UV_rhsAB(rvo=1)-UV_rhsAB(rvo=0):
+        !   drhs_x = dzb*V*area, drhs_y = -dzb*U*area  =>  dzb = (dx*V-dy*U)/((U2+V2)*area)
+        ! and compared with the test-side blend of omega_e over the wet owned inflow
+        ! neighbours: exactly one -> equality to round-off; several -> max principle.
+        real(kind=WP), parameter :: CU = 0.3_WP, U0x = 0.31_WP, U0y = 0.17_WP
+        ! (rhsB allocated on first assignment via sourced allocation below)
+        real(kind=WP) :: nxk(3), nyk(3), dk(3), wk(3), cex, cey, cnx, cny
+        real(kind=WP) :: latm, u_e, v_e, zb0, dzb, ea, sumw, zup, zlo, zhi, err, errmax
+        real(kind=WP), allocatable :: rhsB(:,:,:,:)
+        integer :: e, k, nb, nwet, nupw(1), nz1b, n1, n2, n3, nbad10, none_cnt
+        ! --- fields: u = CU*lat^2, v = 0 (rotated frame) ---
+        do e = 1, nElemO
+            latm = (real(mesh%coord_nod2D(2,mesh%elem2D_nodes(1,e)),WP) + &
+                    real(mesh%coord_nod2D(2,mesh%elem2D_nodes(2,e)),WP) + &
+                    real(mesh%coord_nod2D(2,mesh%elem2D_nodes(3,e)),WP))/3.0_WP
+            dyn%uv(1,:,e) = CU*latm*latm
+            dyn%uv(2,:,e) = 0.0_WP
+        end do
+        rvo_upwind = 0.0_WP
+        dyn%uv_rhsAB = 0.0_WP
+        call momentum_adv_vinv(dyn, mesh, partit)
+        rhsA = dyn%uv_rhsAB
+        rvo_upwind = 1.0_WP
+        dyn%uv_rhsAB = 0.0_WP
+        call momentum_adv_vinv(dyn, mesh, partit)
+        rhsB = dyn%uv_rhsAB
+
+        nbad10 = 0; errmax = 0.0_WP; none_cnt = 0
+        do e = 1, nElemO
+            n1 = mesh%elem2D_nodes(1,e); n2 = mesh%elem2D_nodes(2,e); n3 = mesh%elem2D_nodes(3,e)
+            call elem_normals(e, nxk, nyk, cex, cey)
+            u_e = dyn%uv(1,1,e); v_e = dyn%uv(2,1,e)
+            ! ---- V10, velocity-free: the slot-k neighbour must lie on the OUTWARD side
+            ! of the slot-k inward normal, (c_nb - c_e).n_in < 0, in the SAME metre
+            ! metric as the normals. (The first draft asserted (c_nb-c_e).u < 0 for
+            ! inflow edges -- too strong: u.n_in > 0 does not bound the TANGENTIAL part
+            ! of the centroid offset, so ~20% of irregular-triangle edges legitimately
+            ! violated it. The velocity-free form is the actual orientation property;
+            ! d = u.n_in is then correct by construction.) ----
+            do k = 1, 3
+                nb = mesh%elem_neighbors(k, e)
+                if (nb <= 0 .or. nb > nElemO) cycle
+                call elem_centroid(nb, cex, cey, cnx, cny)
+                if ( ((cnx-cex)*real(mesh%elem_cos(e),WP)*r_earth)*nxk(k) &
+                   + ((cny-cey)*r_earth)*nyk(k) >= 0.0_WP ) nbad10 = nbad10 + 1
+            end do
+            ! ---- V11 at the surface level of all-wet elements ----
+            nz1b = mesh%ulevels(e)
+            if (nz1b > minval(mesh%nlevels_nod2D_min(mesh%elem2D_nodes(1:3,e))) - 1) cycle
+            if (u_e*u_e + v_e*v_e < 1.0e-12_WP) cycle
+            zb0 = (dyn%work%vorticity(nz1b,n1)+dyn%work%vorticity(nz1b,n2) &
+                  +dyn%work%vorticity(nz1b,n3))/3.0_WP
+            sumw = 0.0_WP; zup = 0.0_WP; nwet = 0
+            zlo = zb0; zhi = zb0
+            do k = 1, 3
+                nb = mesh%elem_neighbors(k, e)
+                if (nb <= 0 .or. nb > nElemO) then
+                    if (nb > 0) nwet = -999        ! halo neighbour: skip this element
+                    cycle
+                end if
+                if (nz1b < mesh%ulevels(nb) .or. nz1b > mesh%nlevels(nb)-1) cycle
+                dk(k) = u_e*nxk(k) + v_e*nyk(k)
+                wk(k) = dk(k) + abs(dk(k))
+                if (wk(k) > 0.0_WP) then
+                    nwet = nwet + 1; nupw(1) = nb
+                    sumw = sumw + wk(k)
+                    zup  = zup + wk(k)*omega_of(nb, nz1b)
+                    zlo  = min(zlo, omega_of(nb, nz1b)); zhi = max(zhi, omega_of(nb, nz1b))
+                end if
+            end do
+            if (nwet <= 0) then
+                none_cnt = none_cnt + 1; cycle
+            end if
+            ea  = real(mesh%elem_area(e), WP)
+            dzb = ((dyn%uv_rhsAB(1,1,nz1b,e)-rhsA(1,1,nz1b,e))*v_e  &
+                 - (dyn%uv_rhsAB(1,2,nz1b,e)-rhsA(1,2,nz1b,e))*u_e) &
+                 /((u_e*u_e+v_e*v_e)*ea)
+            if (nwet == 1) then
+                err = abs(dzb - (omega_of(nupw(1),nz1b) - zb0)) &
+                      /max(abs(omega_of(nupw(1),nz1b))+abs(zb0), 1.0e-12_WP)
+                errmax = max(errmax, err)
+            else
+                if (zb0+dzb < zlo-1.0e-10_WP*abs(zlo) .or. zb0+dzb > zhi+1.0e-10_WP*abs(zhi)) &
+                    call check_true('V11 max principle (2-neighbour blend in range)', .false.)
+            end if
+        end do
+        ! V12: the blend is LINEAR in rvo_upwind pointwise:
+        !   rhs(rvo) - rhs(0) = rvo * [ rhs(1) - rhs(0) ]   (exactly, up to one multiply)
+        rvo_upwind = 0.5_WP
+        dyn%uv_rhsAB = 0.0_WP
+        call momentum_adv_vinv(dyn, mesh, partit)
+        err = 0.0_WP; zhi = 0.0_WP
+        do e = 1, nElemO
+            do k = mesh%ulevels(e), mesh%nlevels(e)-1
+                err = max(err, &
+                    abs((dyn%uv_rhsAB(1,1,k,e)-rhsA(1,1,k,e)) - 0.5_WP*(rhsB(1,1,k,e)-rhsA(1,1,k,e))), &
+                    abs((dyn%uv_rhsAB(1,2,k,e)-rhsA(1,2,k,e)) - 0.5_WP*(rhsB(1,2,k,e)-rhsA(1,2,k,e))))
+                zhi = max(zhi, abs(rhsB(1,1,k,e)-rhsA(1,1,k,e)), abs(rhsB(1,2,k,e)-rhsA(1,2,k,e)))
+            end do
+        end do
+        call max_all(err); call max_all(zhi)
+        write(*,'(a,es12.4)') '  V12 linear-in-coefficient: rel = ', err/max(zhi,tiny(1.0_WP))
+        call check_true('V12 blend linear in rvo_upwind', err/max(zhi,tiny(1.0_WP)) < 1.0e-12_WP)
+        write(*,'(a,i6,a,es12.4,a,i6)') '  V10 bad orientations = ', nbad10, &
+            '   V11 1-neighbour errmax = ', errmax, '   no-inflow elems = ', none_cnt
+        call check_true('V10 inflow neighbours are upstream', nbad10 == 0)
+        call check_true('V11 single-neighbour blend equals upwind omega', errmax < 1.0e-9_WP)
+    end subroutine upwind_checks
+
+    real(kind=WP) function omega_of(e, nz)
+        integer, intent(in) :: e, nz
+        omega_of = (dyn%work%vorticity(nz, mesh%elem2D_nodes(1,e)) &
+                  + dyn%work%vorticity(nz, mesh%elem2D_nodes(2,e)) &
+                  + dyn%work%vorticity(nz, mesh%elem2D_nodes(3,e)))/3.0_WP
+    end function omega_of
+
+    subroutine elem_centroid(e, refx, refy, cx, cy)
+        ! centroid in the metre-scaled plane about (refx,refy) to stay cyclic-safe
+        integer,       intent(in)  :: e
+        real(kind=WP), intent(in)  :: refx, refy
+        real(kind=WP), intent(out) :: cx, cy
+        real(kind=WP) :: dxs, dys
+        integer :: k
+        cx = 0.0_WP; cy = 0.0_WP
+        do k = 1, 3
+            dxs = real(mesh%coord_nod2D(1,mesh%elem2D_nodes(k,e)),WP) - refx
+            call trim_cyclic(dxs)
+            dys = real(mesh%coord_nod2D(2,mesh%elem2D_nodes(k,e)),WP) - refy
+            cx = cx + dxs; cy = cy + dys
+        end do
+        cx = refx + cx/3.0_WP; cy = refy + cy/3.0_WP
+    end subroutine elem_centroid
+
+    subroutine elem_normals(e, nxk, nyk, cex, cey)
+        ! the three INWARD edge normals of element e, metre-scaled with elem_cos(e);
+        ! edge k connects elnodes(k), elnodes(k+1); inward = toward elnodes(k+2).
+        ! Mirrors the model's convention; V10 then checks the convention against
+        ! geometry, so it is proven rather than shared-by-copy.
+        integer,       intent(in)  :: e
+        real(kind=WP), intent(out) :: nxk(3), nyk(3), cex, cey
+        real(kind=WP) :: x(3), y(3), tx, ty, px, py, dref
+        integer :: k, k2, k3
+        do k = 1, 3
+            x(k) = real(mesh%coord_nod2D(1, mesh%elem2D_nodes(k,e)), WP)
+            y(k) = real(mesh%coord_nod2D(2, mesh%elem2D_nodes(k,e)), WP)
+        end do
+        ! cyclic-safe local frame about vertex 1
+        do k = 2, 3
+            tx = x(k) - x(1); call trim_cyclic(tx); x(k) = x(1) + tx
+        end do
+        cex = sum(x)/3.0_WP; cey = sum(y)/3.0_WP
+        do k = 1, 3
+            k2 = mod(k,3)+1; k3 = mod(k+1,3)+1
+            tx = (x(k2)-x(k))*real(mesh%elem_cos(e),WP)*r_earth
+            ty = (y(k2)-y(k))*r_earth
+            px =  ty; py = -tx
+            dref = px*(x(k3)-x(k))*real(mesh%elem_cos(e),WP)*r_earth + py*(y(k3)-y(k))*r_earth
+            if (dref < 0.0_WP) then
+                px = -px; py = -py
+            end if
+            nxk(k) = px; nyk(k) = py
+        end do
+    end subroutine elem_normals
 
     subroutine set_shear(sgn)
         ! u = sgn*ALPHA*y, v = 0 with y = r_earth*lat : LINEAR in the cartesian metric, so

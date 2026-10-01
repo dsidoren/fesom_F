@@ -35,8 +35,11 @@ module oce_dyn_vinv
     use mod_mesh,        only: t_mesh
     use mod_dyn,         only: t_dyn
     use mod_partit,      only: t_partit
+    use mod_param_phys,  only: rvo_upwind
+    use mod_constants,   only: r_earth
+    use mod_mesh_rotate, only: trim_cyclic
     use mod_part_bounds, only: owned_bounds, is_multirank
-    use mod_halo,        only: exchange_nod
+    use mod_halo,        only: exchange_nod, exchange_elem
     implicit none
     private
     public :: relative_vorticity, momentum_adv_vinv
@@ -150,11 +153,13 @@ contains
         type(t_mesh),   intent(in)              :: mesh
         type(t_dyn),    intent(inout), target   :: dynamics
         type(t_partit), intent(in),    optional :: partit
-        integer       :: n, nz, elem, ed, elnodes(3), ul, nl1
+        integer       :: n, nz, elem, ed, elnodes(3), ul, nl1, k, k2, k3, nb, nElemF
         integer       :: nNodO, nNodL, nEdgeO, nElemO
         real(kind=WP) :: ea, pre(3), Fx, Fy, zb, w, umean, vmean, h1, h2, da, hinv
+        real(kind=WP) :: xv(3), yv(3), tx, ty, px, py, dref, nxk(3), nyk(3)
+        real(kind=WP) :: d, wk, sumw, zup
         real(kind=WP) :: uvert(2, mesh%nl)
-        real(kind=WP), allocatable :: KE(:,:)
+        real(kind=WP), allocatable :: KE(:,:), omega_e(:,:)
         real(kind=WP), dimension(:,:),     pointer :: vort, Wv
         real(kind=WP), dimension(:,:,:),   pointer :: UV
         real(kind=WP), dimension(:,:,:,:), pointer :: UV_rhsAB
@@ -167,6 +172,28 @@ contains
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
         call relative_vorticity(dynamics, mesh, partit)
+
+        !___________________________________________________________________
+        ! rvo_upwind: element-centre vorticity for the upwind face reconstruction.
+        ! omega_e(nz,e) = the SAME 3-vertex average Block B2 uses as its face value; one
+        ! exchange_elem makes halo neighbour ids readable, so a neighbour's VALUE is
+        ! available without ever needing its vertex list (elem2D_nodes is owned-only).
+        ! Local allocatable: nothing persists, nothing reaches the restart, and at
+        ! rvo_upwind = 0 none of this executes -- the default path is bit-identical by
+        ! construction, not by tolerance.
+        if (rvo_upwind > 0.0_WP) then
+            nElemF = size(UV, 3)
+            allocate(omega_e(mesh%nl-1, nElemF))
+            omega_e = 0.0_WP
+            do elem = 1, nElemO
+                elnodes = mesh%elem2D_nodes(1:3, elem)
+                do nz = mesh%ulevels(elem), mesh%nlevels(elem)-1
+                    omega_e(nz, elem) = onethird*(vort(nz,elnodes(1)) &
+                                      + vort(nz,elnodes(2)) + vort(nz,elnodes(3)))
+                end do
+            end do
+            if (is_multirank(partit)) call exchange_elem(omega_e, partit)
+        end if
 
         !___________________________________________________________________
         ! Block B1: kinetic energy at nodes (qq :78-115)
@@ -207,16 +234,75 @@ contains
         do elem = 1, nElemO
             elnodes = mesh%elem2D_nodes(1:3, elem)
             ea      = real(mesh%elem_area(elem), WP)
+
+            if (rvo_upwind > 0.0_WP) then
+                ! The three INWARD edge normals, rebuilt from the element's OWN vertices:
+                ! per-edge geometry (edge_dxdy) exists for OWNED edges only and an owned
+                ! element can carry one HALO edge, so edge arrays are unusable here. Edge k
+                ! connects elnodes(k) and elnodes(k+1); of the two perpendiculars of
+                ! t = (dlon*elem_cos*r_earth, dlat*r_earth), the INWARD one points toward
+                ! the third vertex -- a local, convention-free orientation (no edge_tri
+                ! left/right branch; proven geometrically by test_vinv V10: the slot-k
+                ! neighbour always lies on the outward side).
+                do k = 1, 3
+                    xv(k) = real(mesh%coord_nod2D(1, elnodes(k)), WP)
+                    yv(k) = real(mesh%coord_nod2D(2, elnodes(k)), WP)
+                end do
+                do k = 2, 3
+                    tx = xv(k) - xv(1); call trim_cyclic(tx); xv(k) = xv(1) + tx
+                end do
+                do k = 1, 3
+                    k2 = mod(k,3)+1; k3 = mod(k+1,3)+1
+                    tx = (xv(k2)-xv(k))*real(mesh%elem_cos(elem),WP)*r_earth
+                    ty = (yv(k2)-yv(k))*r_earth
+                    px =  ty; py = -tx
+                    dref = px*(xv(k3)-xv(k))*real(mesh%elem_cos(elem),WP)*r_earth &
+                         + py*(yv(k3)-yv(k))*r_earth
+                    if (dref < 0.0_WP) then
+                        px = -px; py = -py
+                    end if
+                    nxk(k) = px; nyk(k) = py
+                end do
+            end if
+
             do nz = mesh%ulevels(elem), mesh%nlevels(elem)-1
                 pre = -KE(nz, elnodes)
                 Fx  = sum(real(mesh%gradient_sca(1:3, elem), WP)*pre)
                 Fy  = sum(real(mesh%gradient_sca(4:6, elem), WP)*pre)
                 zb  = onethird*(vort(nz,elnodes(1)) + vort(nz,elnodes(2)) + vort(nz,elnodes(3)))
+
+                ! rvo_upwind face blend:  zb += rvo*(zb_upwind - zb).
+                !  - d = u . n_in  (own-element velocity): d > 0 means flow ENTERS through
+                !    edge k, so that neighbour is upwind; w = d+|d| zeroes outflow edges
+                !    and the normalisation weights a stronger inflow neighbour more.
+                !  - dry or boundary neighbours are EXCLUDED, not zero-valued: zb_upwind
+                !    is a pointwise VALUE estimate, not a flux (estimator rule, in
+                !    contrast to the zero-with-full-weight rule for flux-forming sums).
+                !    Everything excluded, or no inflow (u=0): sumw = 0 -> blend inert.
+                !  - convex combination -> max principle: no new vorticity extrema.
+                !  - energy-neutral for ANY zb: u.[(f+zeta) x u] == 0 identically, so the
+                !    blend acts on the vorticity/enstrophy dynamics only.
+                if (rvo_upwind > 0.0_WP) then
+                    sumw = 0.0_WP
+                    zup  = 0.0_WP
+                    do k = 1, 3
+                        nb = mesh%elem_neighbors(k, elem)
+                        if (nb <= 0) cycle
+                        if (nz < mesh%ulevels(nb) .or. nz > mesh%nlevels(nb)-1) cycle
+                        d  = UV(1,nz,elem)*nxk(k) + UV(2,nz,elem)*nyk(k)
+                        wk = d + abs(d)
+                        sumw = sumw + wk
+                        zup  = zup  + wk*omega_e(nz, nb)
+                    end do
+                    if (sumw > 0.0_WP) zb = zb + rvo_upwind*(zup/sumw - zb)
+                end if
+
                 UV_rhsAB(1,1,nz,elem) = UV_rhsAB(1,1,nz,elem) + ( UV(2,nz,elem)*zb + Fx)*ea
                 UV_rhsAB(1,2,nz,elem) = UV_rhsAB(1,2,nz,elem) + (-UV(1,nz,elem)*zb + Fy)*ea
             end do
         end do
         deallocate(KE)
+        if (allocated(omega_e)) deallocate(omega_e)
 
         !___________________________________________________________________
         ! Block C: -w du/dz, as d(wu)/dz - u dw/dz  (qq :180-246, i_vert_visc branch)

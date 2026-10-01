@@ -47,7 +47,7 @@ program fesom_conserve
     use, intrinsic :: iso_fortran_env, only: int32
     use mod_precision,      only: WP, MP
     use mod_constants,      only: density_0
-    use mod_param_phys,     only: N2smth_h, alpha, theta, shear_splines, N2_splines
+    use mod_param_phys,     only: N2smth_h, alpha, theta, shear_splines, N2_splines, rvo_upwind
     use mod_param_phys,     only: mix_coeff_PP, A_ver, K_ver, Kv0_const, mix_scheme_nmb
     use mod_param_phys,     only: use_instabmix, instabmix_kv, use_momix, use_windmix
     use mod_param_phys,     only: Fer_GM, Redi, K_GM_max, K_GM_min, K_GM_bvref, &
@@ -142,6 +142,11 @@ program fesom_conserve
     call get_environment_variable('FESOM3_MOMADV_OPT', env, length=env_len, status=ios)
     momadv_env = 2
     if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) momadv_env
+    ! Upwind face-vorticity blend (oce_dyn_vinv). VALUE-based like FESOM3_MOMADV_OPT.
+    call get_environment_variable('FESOM3_RVO_UPWIND', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) rvo_upwind
+    if (rvo_upwind < 0.0_WP .or. rvo_upwind > 1.0_WP) &
+        error stop 'FESOM3_RVO_UPWIND must be in [0,1]'
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to

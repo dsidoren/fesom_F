@@ -1,5 +1,21 @@
 # rvo_upwind: upwind-blended relative-vorticity reconstruction
 
+**STATUS: COMPLETE.** 32/32 ctest (test_vinv V1-V12 at np 1+2); conservation gate green on
+17 configurations including `momadv-vinv-upw` at np=1 and np=8.
+
+➕ V12 added during implementation: the blend is linear in `rvo_upwind` pointwise
+   (rel 2.2e-16), asserted globally — the 0.5 spot-check of Task 5, strengthened.
+➕ `rvo_upwind` parameter added in Task 2 (not 3) so the TDD tests compile.
+⚠️ Two spec corrections during TDD, both to MY tests, found by their own failures:
+   (a) V10 reformulated velocity-free — `(c_nb-c_e)·u < 0` for inflow edges is TOO STRONG
+       (the centroid offset has a tangential part; ~20% of irregular edges legitimately
+       violate it). The actual orientation property is `(c_nb-c_e)·n_in < 0`, same metre
+       metric as the normals; 0 violations on all owned-element edges at np 1+2.
+   (b) V9a/V9b masks deepened one neighbour ring (`elem_int2`): the blend widens the
+       stencil, so constant-field inertness holds one ring further from boundaries than
+       V6's mask. Failures at 0.89/2.8e-3 relative were the mask, not the model; with the
+       correct mask: 4.9e-13 / 2.6e-16.
+
 ## Overview
 
 The vector-invariant momentum advection (`momadv_opt==1`, `src/oce/oce_dyn_vinv.F90`)
@@ -178,39 +194,45 @@ presence-based switches); out-of-range → `error stop`, never a silent fallback
 - Modify: `src/mesh/mod_mesh_areas.F90`
 - Modify: `test/test_vinv.F90`
 
-- [ ] add `build_elem_adjacency` (sweep over `1..nEdgeL` local edges; slot `k` matched by
+- [x] add `build_elem_adjacency` (sweep over `1..nEdgeL` local edges; slot `k` matched by
       vertex pair; neighbour = other `edge_tri` entry, halo ids kept, boundary → 0)
-- [ ] call it from `compute_geometry`; `-1`-init + post-sweep verification with
+- [x] call it from `compute_geometry`; `-1`-init + post-sweep verification with
       `error stop` naming the first unresolved element
-- [ ] check `mod_io_meshdiag`'s `elem_neighbors` references behave now the array is
-      genuinely allocated
-- [ ] write tests: every owned pi element has 3 resolved slots; each neighbour pair is
-      mutual where both are owned (`elem ∈ neighbors(neighbors(elem))`); boundary count
-      equals the count of `edge_tri(2,·) <= 0` edges
-- [ ] run tests — 32/32 + new assertions green at np 1 and 2 before task 2
+- [x] check `mod_io_meshdiag`'s `elem_neighbors` references behave (deferral comments
+      refreshed; no live reads)
+- [x] write tests: A1 resolved slots, A2 mutuality, A4 slot-pair alignment, A3 per-rank
+      boundary accounting
+- [x] run tests — green at np 1 and 2
+
+⚠️ RESOLVED false alarm: at np=2 the cross-rank boundary-slot sum (461) exceeds the global
+   boundary count (455). A probe against edge_tri.out ground truth showed ZERO fake
+   boundaries -- all claims are real; 6 edges are counted by BOTH ranks because FESOM2
+   element ownership OVERLAPS at seams (myDim = elements touching an owned node, so
+   boundary-strip elements are multiply owned). Per-rank A3 balance is the correct
+   invariant and holds exactly. No code change needed; nuance documented in the test.
 
 ### Task 2: Write the upwind assertions V8–V11 (TDD — fail until Task 3)
 
 **Files:**
 - Modify: `test/test_vinv.F90`
 
-- [ ] V8 bit-identity: `rvo_upwind=0` call of `momentum_adv_vinv` gives `UV_rhsAB`
+- [x] V8 bit-identity: `rvo_upwind=0` call of `momentum_adv_vinv` gives `UV_rhsAB`
       exactly `==` a reference call
-- [ ] V9 constant-ζ inertness: rerun the V2 linear-shear exactness and the V6
+- [x] V9 constant-ζ inertness: rerun the V2 linear-shear exactness and the V6
       uniform-`u`/nonzero-`w` zero-tendency **with `rvo_upwind = 1.0`** — identical
       bounds (constant ζ ⟹ `zb_upwind == zb` ⟹ blend exactly inert)
-- [ ] V10 orientation proof: uniform flow, `rvo_upwind=1`; the test recomputes normals +
+- [x] V10 orientation proof: uniform flow, `rvo_upwind=1`; the test recomputes normals +
       weights from public mesh data and asserts, for every owned element and edge with
       `w > 0`, that the neighbour centroid is upstream:
       `(centroid(nb) − centroid(elem))·u < 0` (owned neighbours only — halo centroids
       would need the owned-only `elem2D_nodes`)
-- [ ] V11 end-to-end weighting: `u ∝ y²` (ζ ∝ y, **`y` from `coord_nod2D` in the rotated
+- [x] V11 end-to-end weighting: `u ∝ y²` (ζ ∝ y, **`y` from `coord_nod2D` in the rotated
       frame** — the V2 lesson); recover
       `δzb = (Δrhs_x·V − Δrhs_y·U)/((U²+V²)·elem_area)` between `rvo=1` and `rvo=0`
       calls (guard `U²+V² > tiny`); exactly one wet owned inflow neighbour ⟹
       `δzb == omega_e(nb) − zb₀` to round-off; two ⟹ max principle (blend within
       `[min,max]` of candidates)
-- [ ] run tests — V8/V9 pass trivially against the stub-free current code only where
+- [x] run tests — V8/V9 pass trivially against the stub-free current code only where
       inert; V10/V11 are EXPECTED TO FAIL (no blend exists). Record the failures as the
       specification; mark `[x] (fails until Task 3)`
 
@@ -220,15 +242,15 @@ presence-based switches); out-of-range → `error stop`, never a silent fallback
 - Modify: `src/oce/oce_dyn_vinv.F90`
 - Modify: `src/params/mod_param_phys.F90`
 
-- [ ] add `rvo_upwind = 0.0_WP` to `mod_param_phys` with the range/meaning comment
-- [ ] `momentum_adv_vinv`: when `rvo_upwind > 0`, allocate local `omega_e(nl-1, nElemF)`,
+- [x] add `rvo_upwind = 0.0_WP` to `mod_param_phys` with the range/meaning comment
+- [x] `momentum_adv_vinv`: when `rvo_upwind > 0`, allocate local `omega_e(nl-1, nElemF)`,
       fill owned elements with the vertex average, `exchange_elem` under `is_multirank`
-- [ ] per-element inward normals from own vertices (`coord_nod2D`, `trim_cyclic`,
+- [x] per-element inward normals from own vertices (`coord_nod2D`, `trim_cyclic`,
       `elem_cos(elem)`, orientation toward `elnodes(k+2)`), outside the `nz` loop
-- [ ] the blend exactly as in Technical Details, with the exclusion fallbacks and the
+- [x] the blend exactly as in Technical Details, with the exclusion fallbacks and the
       max-principle / energy-neutrality comments
-- [ ] verify V8–V11 now PASS at np 1 and 2; V1–V7 untouched and green
-- [ ] run tests — full `ctest` green before task 4
+- [x] verify V8–V11 now PASS at np 1 and 2; V1–V7 untouched and green
+- [x] run tests — full `ctest` green before task 4
 
 ### Task 4: Plumbing and the gate
 
@@ -238,32 +260,32 @@ presence-based switches); out-of-range → `error stop`, never a silent fallback
 - Modify: `tools/run_conserve_pi.sh`
 - Modify: `work/job_levante` (commented-out example only; default OFF)
 
-- [ ] `FESOM3_RVO_UPWIND` value-based read in `fesom_conserve` (beside
+- [x] `FESOM3_RVO_UPWIND` value-based read in `fesom_conserve` (beside
       `FESOM3_MOMADV_OPT`), validated to [0,1] with `error stop`
-- [ ] same read in `fesom_lifecycle_native_mr`, rank-0 banner when `> 0` placed **at the
+- [x] same read in `fesom_lifecycle_native_mr`, rank-0 banner when `> 0` placed **at the
       assignment** (the momadv-banner lesson: never inside another option's branch)
-- [ ] gate: `momadv-vinv-upw FESOM3_MOMADV_OPT=1 FESOM3_RVO_UPWIND=0.7` in the heredoc
+- [x] gate: `momadv-vinv-upw FESOM3_MOMADV_OPT=1 FESOM3_RVO_UPWIND=0.7` in the heredoc
       (np=1) and an explicit np=8 run of the same config
-- [ ] `job_levante`: commented-out `# export FESOM3_RVO_UPWIND=...` with a one-line note
-- [ ] write tests: the gate run IS the test — all previous configs plus the two new ones
+- [x] `job_levante`: commented-out `# export FESOM3_RVO_UPWIND=...` with a one-line note
+- [x] write tests: the gate run IS the test — all previous configs plus the two new ones
       green
-- [ ] run `bash tools/run_conserve_pi.sh` — fully green before task 5
+- [x] run `bash tools/run_conserve_pi.sh` — fully green before task 5
 
 ### Task 5: Verify acceptance criteria
-- [ ] `rvo_upwind=0` structurally inert (no allocation, no exchange, zb path identical)
-- [ ] `rvo_upwind=1` fully upwind; intermediate values blend linearly (spot-check 0.5 in
+- [x] `rvo_upwind=0` structurally inert (no allocation, no exchange, zb path identical)
+- [x] `rvo_upwind=1` fully upwind; intermediate values blend linearly (spot-check 0.5 in
       V11's recovered `δzb`)
-- [ ] dry-neighbour, boundary and `u=0` fallbacks covered (V11 mesh has all three)
-- [ ] run full test suite `ctest` and the full gate
-- [ ] `momadv_opt==2` path untouched (unreachable) — suite green is the proof
+- [x] dry-neighbour, boundary and `u=0` fallbacks covered (V11 mesh has all three)
+- [x] run full test suite `ctest` and the full gate
+- [x] `momadv_opt==2` path untouched (unreachable) — suite green is the proof
 
 ### Task 6: [Final] Update documentation
-- [ ] `docs/HANDOFF.md`: `rvo_upwind` / `FESOM3_RVO_UPWIND` under the momadv section
-- [ ] `docs/LESSONS.md`: one entry — per-edge geometry is owned-edges-only, so
+- [x] `docs/HANDOFF.md`: `rvo_upwind` / `FESOM3_RVO_UPWIND` under the momadv section
+- [x] `docs/LESSONS.md`: one entry — per-edge geometry is owned-edges-only, so
       element-local reconstruction (normals from own vertices, neighbour values by
       `exchange_elem`) is the MR-safe pattern; orientation chosen toward the third vertex
       needs no convention
-- [ ] move this plan to `docs/plans/completed/`
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 
