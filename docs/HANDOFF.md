@@ -1423,6 +1423,13 @@ zeta), linear in the coefficient. Net: `test_vinv` V8-V12 + the `momadv-vinv-upw
 configs at np=1/8. `mesh%elem_neighbors` is built once in `build_elem_adjacency`
 (`compute_geometry`); `elem_edges` remains unbuilt.
 
+Revalidated after the fact (critical re-review of `6e38cf6`): the one open question was
+the halo ring — `exchange_elem` fills only eDim while `elem_neighbors` may hold halo ids.
+Settled, not patched: edge-neighbours of an owned element are in eDim by construction
+(FESOM2 `gen_comm.F90`: `com_elem2D` = edge-sharing, `com_elem2D_full` = node-sharing),
+verified at np=2/8 and guarded by `test_vinv` A5 (production fill/exchange/read pattern
+with a sentinel). `exchange_elem_full` is NOT needed here. See L56.
+
 **There is no FESOM2 oracle for `momadv_opt==1`** (the v2.7.3 branch aborts: "not adapted
 mom_adv advection typ for ALE"). Its net is `test/test_vinv.F90` — analytic cases that are
 exact to round-off — plus the conservation gate. See L54 and

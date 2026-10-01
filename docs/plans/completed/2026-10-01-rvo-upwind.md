@@ -298,3 +298,19 @@ presence-based switches); out-of-range → `error stop`, never a silent fallback
 - Possible later refinement (explicitly out of scope now): edge-mean velocity in `d`
   (symmetric upwind criterion), and applying the same blend to the `(f+ζ)` average used
   in the Coriolis completion if PV-consistent upwinding is ever wanted.
+
+## Revalidation (2026-10-01, independent re-review of `6e38cf6`)
+
+- ⚠️ Raised: `exchange_elem` fills only the eDim ring; `elem_neighbors` can hold halo ids;
+  V11 skips halo neighbours → suspected eXDim neighbours reading the initialised 0 in
+  `omega_e` (silent, partition-dependent blend at seams).
+- Settled by the partitioner's definition (FESOM2 `gen_comm.F90`: `com_elem2D` = elements
+  sharing an EDGE with an owned one, `com_elem2D_full` = sharing a node) and a probe at
+  np=2/8: every edge-neighbour of an owned element is in eDim, every one readable with its
+  owner's value after one standard `exchange_elem`. **No production change.**
+- ➕ `test_vinv` A5: owned entries ← global id, halo ← sentinel, one `exchange_elem`, every
+  `elem_neighbors` slot must hold its neighbour's global id; also asserts all ids ≤
+  `myDim+eDim` and that the rank has halo slots at npes>1 (teeth). Registered np=1/2, run
+  at np=8 by hand (19–35 halo slots per rank, 0 mismatches).
+- Comments in `build_elem_adjacency` and the `omega_e` block now state the ring argument.
+- Lesson recorded as L56.

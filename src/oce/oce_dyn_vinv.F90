@@ -176,8 +176,12 @@ contains
         !___________________________________________________________________
         ! rvo_upwind: element-centre vorticity for the upwind face reconstruction.
         ! omega_e(nz,e) = the SAME 3-vertex average Block B2 uses as its face value; one
-        ! exchange_elem makes halo neighbour ids readable, so a neighbour's VALUE is
-        ! available without ever needing its vertex list (elem2D_nodes is owned-only).
+        ! STANDARD exchange_elem (eDim ring) makes every halo neighbour id readable, so a
+        ! neighbour's VALUE is available without ever needing its vertex list
+        ! (elem2D_nodes is owned-only). The eDim ring suffices because an edge neighbour
+        ! of an owned element is by construction in com_elem2D, never in eXDim (see
+        ! build_elem_adjacency; test_vinv A5 guards it). A neighbour that is absent or
+        ! DRY at the level is skipped in the blend, so the 0 initial value is never read.
         ! Local allocatable: nothing persists, nothing reaches the restart, and at
         ! rvo_upwind = 0 none of this executes -- the default path is bit-identical by
         ! construction, not by tolerance.

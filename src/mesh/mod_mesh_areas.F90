@@ -303,8 +303,13 @@ contains
         ! boundary. Built ONCE from edges/edge_tri -- the neighbour across an edge is just
         ! "the other edge_tri entry"; only the INVERSE map (element -> its edges) needs a
         ! cache, and that cache is these 3 ints per element. elem_edges stays unbuilt.
-        ! Neighbour ids may be HALO element ids: valid as indices into any element field
-        ! that has been exchange_elem-filled (the rvo_upwind omega_e consumer does that).
+        ! Neighbour ids may be HALO element ids, and then ALWAYS from the eDim ring: by
+        ! construction (FESOM2 gen_comm.F90) com_elem2D holds exactly the non-owned elements
+        ! sharing an EDGE with an owned one, while eXDim (com_elem2D_full minus com_elem2D)
+        ! holds node-only neighbours, which are never across an edge. So a neighbour's value
+        ! is readable from any element field after the STANDARD exchange_elem (the
+        ! rvo_upwind omega_e consumer does that); exchange_elem_full is NOT needed.
+        ! test_vinv A5 asserts this with the production fill/exchange/read pattern.
         !
         ! The sweep covers ALL local edges (owned + halo): an owned element can have ONE
         ! halo edge (both endpoints halo nodes), carried only by the eDim part of the edge

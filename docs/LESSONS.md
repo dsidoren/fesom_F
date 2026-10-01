@@ -2375,3 +2375,41 @@ Three lessons from the rvo_upwind face-vorticity blend (`oce_dyn_vinv`):
   where the element AND its neighbours avoid boundary nodes (`elem_int2`). The V9 failures
   at 0.89 relative were the mask, not the physics.
 
+## L56 — The two element halo rings: eDim is the EDGE-sharing ring, eXDim the node-only ring; a receiver-side reading of the halo code raised a false seam alarm that the sender-side definition plus a 2/8-rank probe settled
+
+**Context.** Revalidating `6e38cf6` (rvo_upwind), reading only our side of the halo
+machinery: `exchange_elem` fills `com_elem2D` (the eDim block) and never the eXDim block;
+`build_elem_adjacency` stores whatever `edge_tri` holds, which can be a halo id; the one
+test that walks neighbours (V11) skips every halo neighbour as "no local data". From that
+alone the inference was: an owned element's far neighbour across its halo edge may be
+eXDim, `omega_e(nz,nb)` stays at its initialised 0 there, the blend silently treats that
+neighbour as zero vorticity, and results depend on the partition at seams. No bounds error
+would ever fire (the array spans `nElemF`), so nothing in the suite could see it.
+
+**What settled it.** The DEFINITION of the rings lives in the partitioner, not in the
+receiver: FESOM2 `gen_comm.F90` builds `com_elem2D` as the non-owned elements "only those
+sharing an edge" with an owned element, and `com_elem2D_full` as "all neighbors" (sharing
+a node). So an edge-neighbour of an owned element is in eDim *by construction*; an eXDim
+element is never across an edge. A probe at np=2 and np=8 (now permanent as `test_vinv`
+A5): 17–35 halo-neighbour slots per rank, every one inside the eDim ring, every one
+holding its owner's value after one standard `exchange_elem`. No defect. Switching to
+`exchange_elem_full` "to be safe" would have bought nothing except larger receive lists
+on every momentum step.
+
+**Lessons.**
+- **Choose the exchange by the stencil, not by fear.** Element across an EDGE
+  (`elem_neighbors`, `edge_tri`) → `exchange_elem`. All elements around a NODE
+  (`nod_in_elem2D` patches, MUSCL's `tmp` field) → `exchange_elem_full`. The ring names
+  are not "near/far"; they are "edge/node".
+- **A halo alarm from the receiver's code alone is a hypothesis, not a finding.** The
+  sender-side definition (partitioner) is the ground truth; read it before changing the
+  exchange. Same move as L55's global-mesh probe, and again it took minutes.
+- **A blind test does not justify changing production — it justifies a test.** V11 was
+  blind by design; A5 reuses the exact production pattern (owned fill → one
+  `exchange_elem` → read at every `elem_neighbors` id) with a sentinel, and PRINTS the
+  number of slots that pass only because the exchange filled them. That printed count is
+  the test's teeth; at npes>1 it must be >0 on every rank, which A5 asserts.
+- **A guard built on partition metadata must handle the serial identity partition
+  explicitly.** In a test that never calls `set_partition`, `partit%myDim_elem2D` is 0 and
+  `myList_elem2D` is unallocated at npes==1; the first A5 draft crashed serially for
+  exactly that reason while passing at np=2/8.

@@ -55,6 +55,7 @@ program test_vinv
     use mod_mesh_areas,    only: compute_geometry
     use mod_part_bounds,   only: owned_bounds
     use oce_dyn_vinv,      only: relative_vorticity, momentum_adv_vinv
+    use mod_halo,          only: exchange_elem
     implicit none
 
     character(len=512) :: mesh_dir
@@ -152,6 +153,66 @@ program test_vinv
         end do
         write(*,'(a,i6,a,i6)') '  A3 boundary slots = ', nbnd_slots, '  boundary edges = ', nbnd_edges
         call check_true('A3 boundary slots == owned boundary edges', nbnd_slots == nbnd_edges)
+    end block
+
+    !-------------------------------------------------------------------------
+    ! A5 - the halo assumption rvo_upwind stands on (revalidation of 6e38cf6).
+    ! momentum_adv_vinv fills omega_e over OWNED elements, calls the STANDARD
+    ! exchange_elem (com_elem2D = the eDim ring) and then reads omega_e at every
+    ! elem_neighbors id. That is right only if every edge-neighbour of an owned element
+    ! lies in the ring exchange_elem fills -- never in eXDim, which only
+    ! exchange_elem_full touches and which would otherwise be read as the INITIAL value
+    ! (silently, no bounds error: the array spans nElemF). By construction it holds
+    ! (FESOM2 gen_comm.F90: com_elem2D = "only those sharing an edge", com_elem2D_full =
+    ! "all neighbors"); A5 makes it a tested invariant using the production pattern
+    ! itself: owned entries <- own global id, halo entries <- a sentinel, ONE
+    ! exchange_elem, and every neighbour slot must then hold that neighbour's global id.
+    ! A surviving sentinel = an unfilled ring or a receive list pointing elsewhere; a
+    ! wrong id = a sender/receiver mismatch. The halo-slot count printed is the number
+    ! of slots that pass ONLY because the exchange filled them (they start as the
+    ! sentinel), i.e. the test's teeth; at npes > 1 it must be > 0 on every rank.
+    block
+        real(kind=WP), allocatable :: f(:,:)
+        real(kind=WP), parameter   :: SENTINEL = -1.0_WP
+        integer, allocatable :: gid(:)
+        integer :: e, k, nb, nhalo, nbad, nring
+        ! global element id of each LOCAL id; the identity at npes == 1, where this test
+        ! never calls set_partition and partit%myList_elem2D stays unallocated
+        allocate(gid(nElemF))
+        if (partit%npes > 1) then
+            gid = partit%myList_elem2D(1:nElemF)
+        else
+            gid = [(e, e = 1, nElemF)]
+        end if
+        allocate(f(nl-1, nElemF))
+        f = SENTINEL
+        do e = 1, nElemO
+            f(:, e) = real(gid(e), WP)
+        end do
+        if (partit%npes > 1) call exchange_elem(f, partit)
+        nhalo = 0; nbad = 0
+        do e = 1, nElemO
+            do k = 1, 3
+                nb = mesh%elem_neighbors(k, e)
+                if (nb <= 0) cycle
+                if (nb > nElemO) nhalo = nhalo + 1
+                if (f(1, nb)    /= real(gid(nb), WP) .or. &
+                    f(nl-1, nb) /= real(gid(nb), WP)) nbad = nbad + 1
+            end do
+        end do
+        if (partit%npes > 1) then
+            nring = partit%myDim_elem2D + partit%eDim_elem2D
+        else
+            nring = nElemF                 ! identity partition: no halo at all
+        end if
+        write(*,'(a,i6,a,i6,a,i7)') '  A5 halo neighbour slots = ', nhalo, &
+            '  unreadable/mismatched = ', nbad, '  eDim ring end = ', nring
+        call check_true('A5 every neighbour readable after the STANDARD exchange_elem', nbad == 0)
+        call check_true('A5 every neighbour id inside the eDim ring (never eXDim)', &
+                        all(mesh%elem_neighbors(:, 1:nElemO) <= nring))
+        if (partit%npes > 1) &
+            call check_true('A5 not vacuous: this rank has halo neighbour slots', nhalo > 0)
+        deallocate(f, gid)
     end block
 
     !=========================================================================
