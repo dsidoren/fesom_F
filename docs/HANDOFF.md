@@ -1398,3 +1398,24 @@ ice step + `oce_fluxes` into a forced lifecycle, drop the prescribed fluxes, the
   fesom.x`, then re-run `cmake .` first if a NEW shim file was added so the GLOB picks it up) after editing a
   shim. The `next_io_rank` np=1 fix is behavior-preserving (sequential I/O, value-identical) and arguably a real
   bug fix (the code's own TODO admits the recursion never ends at 1 rank).
+
+## Momentum advection options (`momadv_opt`)
+
+| value | scheme | where |
+|---|---|---|
+| 1 | vector invariant, `(curl u + f) x u + grad(u^2/2) + w du/dz` | `src/oce/oce_dyn_vinv.F90` |
+| 2 | flux/scalar form (default, all drivers pin it) | `momentum_adv_scalar`, `src/oce/oce_dyn_velrhs.F90` |
+
+Both only ADD into `UV_rhsAB`, dispatched as siblings in `compute_vel_rhs`; `momadv_opt==2`
+is unreachable from the `==1` branch, so enabling the new scheme cannot perturb the old one.
+
+`FESOM3_MOMADV_OPT` (**value**-based, not presence-based — `momadv_opt` is 1 or 2) selects
+it in `fesom_conserve`; `tools/run_conserve_pi.sh` gates it at np=1 and np=8. No production
+driver sets `momadv_opt = 1` — exposing it in `fesom_lifecycle_native_mr` is a separate,
+deliberate step.
+
+**There is no FESOM2 oracle for `momadv_opt==1`** (the v2.7.3 branch aborts: "not adapted
+mom_adv advection typ for ALE"). Its net is `test/test_vinv.F90` — analytic cases that are
+exact to round-off — plus the conservation gate. See L54 and
+`docs/plans/completed/2026-10-01-momadv-vector-invariant.md`.
+

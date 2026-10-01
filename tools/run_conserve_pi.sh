@@ -84,8 +84,20 @@ splines FESOM3_SHEAR_SPLINES=1
 splines+KPP FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_KPP=1
 splines+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_TKE=1
 N2splines FESOM3_N2_SPLINES=1
+momadv-vinv FESOM3_MOMADV_OPT=1
 bothsplines+GM+Redi+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_N2_SPLINES=1 FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1
 CFG
+
+# Vector-invariant momentum advection at HIGH rank. The new code adds two nodal scatters
+# and two halo exchanges, so np=8 (where nNodL << nod2D) is the configuration that matters
+# most -- the same reason the zstar loop above runs it.
+echo "=== zstar + momadv-vinv, np=8, $NSTEPS steps (conservation gate, tol=$TOL) ==="
+if FESOM3_MOMADV_OPT=1 FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
+     mpirun $MPIFLAGS -n 8 "$BIN" < /dev/null 2>&1 | tail -6; then
+    :
+else
+    echo "run_conserve_pi: FAILED (zstar+momadv-vinv np=8)"; fail=1
+fi
 
 echo "=== linfs, np=1, $NSTEPS steps (invariants only; drift reported, not gated) ==="
 if FESOM3_WHICH_ALE=linfs mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -5; then

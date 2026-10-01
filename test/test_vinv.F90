@@ -52,7 +52,7 @@ program test_vinv
     use mod_mesh_read,     only: read_mesh
     use mod_mesh_areas,    only: compute_geometry
     use mod_part_bounds,   only: owned_bounds
-    use oce_dyn_vinv,      only: relative_vorticity
+    use oce_dyn_vinv,      only: relative_vorticity, momentum_adv_vinv
     implicit none
 
     character(len=512) :: mesh_dir
@@ -63,7 +63,9 @@ program test_vinv
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF, nl, n, nz
     real(kind=WP) :: zmax
     real(kind=WP), allocatable :: zsave(:,:)
-    logical,       allocatable :: interior(:)
+    logical,       allocatable :: interior(:), elem_int(:)
+    real(kind=WP) :: scal
+    integer       :: nzall
     real(kind=WP), parameter   :: ALPHA = 1.0e-5_WP   ! du/dy [1/s]
 
     nfail = 0
@@ -177,6 +179,71 @@ program test_vinv
     zmax = owned_absmax(dyn%work%vorticity + zsave)
     write(*,'(a,es12.4)') '  V3 linearity      : max|zeta(-u)+zeta(u)| = ', zmax
     call check_true('V3 zeta(-u) == -zeta(u)', zmax < 1.0e-16_WP)
+
+    !=========================================================================
+    ! V6 - full operator: uniform u with NONZERO w must give ZERO tendency.
+    ! This is the Block C net. For a uniform u: zeta == 0 (V1), grad(KE) == 0 at interior
+    ! elements, and the vertical flux must telescope EXACTLY -- including across the bottom
+    ! face, which is where qq's uvert(nl1+1)=0 breaks under bottom-at-vertices. A `w == 0`
+    ! test cannot see that, since every vertical term is proportional to w.
+    !=========================================================================
+    allocate(mesh%helem(nl-1, nElemF))
+    allocate(dyn%uv_rhsAB(1, 2, nl-1, nElemF))
+    allocate(dyn%w_e(nl, nNodL))
+    allocate(elem_int(nElemO))
+    do nz = 1, nl-1
+        mesh%helem(nz,:) = 10.0_MP + 2.0_MP*real(nz, MP)   ! any positive ALE thickness
+    end do
+    do n = 1, nNodL
+        do nz = 1, nl
+            dyn%w_e(nz,n) = 1.0e-5_WP*real(nl-nz, WP)      ! nonzero AND depth-varying
+        end do
+    end do
+    do n = 1, nElemO
+        elem_int(n) = all(interior(mesh%elem2D_nodes(1:3,n)))
+    end do
+
+    dyn%uv(1,:,:) =  0.17_WP
+    dyn%uv(2,:,:) = -0.43_WP
+    dyn%uv_rhsAB  = 0.0_WP
+    call momentum_adv_vinv(dyn, mesh, partit)
+
+    ! Restricted to levels where ALL elements adjacent to ALL THREE nodes are wet. Below
+    ! that, KE(nz,n) sums only over the elements wet at nz while dividing by the FULL
+    ! area(n) -- the zero-with-full-weight rule -- so KE is deliberately not uniform there
+    ! and grad(KE) /= 0 even for a uniform u. That is intended, not an error.
+    zmax = 0.0_WP; scal = 0.0_WP
+    do n = 1, nElemO
+        if (.not. elem_int(n)) cycle
+        nzall = minval(mesh%nlevels_nod2D_min(mesh%elem2D_nodes(1:3,n))) - 1
+        do nz = mesh%ulevels(n), min(mesh%nlevels(n)-1, nzall)
+            zmax = max(zmax, abs(dyn%uv_rhsAB(1,1,nz,n)), abs(dyn%uv_rhsAB(1,2,nz,n)))
+            ! scale of the individual vertical terms, so the tolerance is relative
+            scal = max(scal, abs(dyn%w_e(nz,mesh%elem2D_nodes(1,n))*0.43_WP) &
+                             *real(mesh%elem_area(n),WP)/real(mesh%helem(nz,n),WP))
+        end do
+    end do
+    call max_all(zmax); call max_all(scal)
+    write(*,'(a,es12.4,a,es12.4)') '  V6 uniform u, w/=0: max|UV_rhsAB| = ', zmax, &
+                                   '   relative = ', zmax/max(scal, tiny(1.0_WP))
+    call check_true('V6 uniform u + nonzero w -> zero tendency (interior elems, incl bottom face)', &
+                    zmax/max(scal, tiny(1.0_WP)) < 1.0e-12_WP)
+
+    !=========================================================================
+    ! V7 - the full operator is not a no-op
+    !=========================================================================
+    call set_shear(1.0_WP)
+    dyn%uv_rhsAB = 0.0_WP
+    call momentum_adv_vinv(dyn, mesh, partit)
+    zmax = 0.0_WP
+    do n = 1, nElemO
+        do nz = mesh%ulevels(n), mesh%nlevels(n)-1
+            zmax = max(zmax, abs(dyn%uv_rhsAB(1,1,nz,n)), abs(dyn%uv_rhsAB(1,2,nz,n)))
+        end do
+    end do
+    call max_all(zmax)
+    write(*,'(a,es12.4)') '  V7 full operator  : max|UV_rhsAB| = ', zmax
+    call check_true('V7 full operator is not a no-op', zmax > 0.0_WP)
 
     if (nfail == 0) then
         write(*,'(a)') 'test_vinv: OK'

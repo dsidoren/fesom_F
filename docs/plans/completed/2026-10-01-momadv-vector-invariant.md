@@ -1,5 +1,8 @@
 # momadv_opt==1: vector-invariant momentum advection
 
+**STATUS: COMPLETE.** 32/32 ctest (incl. `test_vinv` np 1+2); conservation gate green on
+15 configurations including `momadv-vinv` at np=1 and np=8.
+
 ## Overview
 
 FESOM3 currently offers one momentum-advection operator, the flux/scalar form
@@ -235,12 +238,12 @@ comment refers to.
 - Create: `test/test_vinv.F90`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] create `test/test_vinv.F90` loading the pi mesh, following the `test_bottom.F90` harness style (`check_true`, `nfail`, `error stop 1`)
-- [ ] add the solid-body rotation case: set `UV(1,:,e) = -Omega*y_e`, `UV(2,:,e) = Omega*x_e`, call `relative_vorticity`, assert `zeta == 2*Omega` within discretisation tolerance on interior nodes
-- [ ] add the uniform-flow case: `UV = const`, assert `zeta == 0` to round-off AND the KE gradient `== 0` to round-off
-- [ ] add the linear-shear case: `UV(1,:,e) = alpha*y_e`, assert `zeta == -alpha`
-- [ ] register `add_fesom_test(test_vinv 1)` and `add_fesom_test(test_vinv 2)` in `test/CMakeLists.txt`
-- [ ] run tests — `test_vinv` is expected to FAIL here (stub); record the failure messages as the specification. Mark as `[x] (fails until Task 3)`
+- [x] create `test/test_vinv.F90` loading the pi mesh, following the `test_bottom.F90` harness style (`check_true`, `nfail`, `error stop 1`)
+- [x] add the solid-body rotation case: set `UV(1,:,e) = -Omega*y_e`, `UV(2,:,e) = Omega*x_e`, call `relative_vorticity`, assert `zeta == 2*Omega` within discretisation tolerance on interior nodes
+- [x] add the uniform-flow case: `UV = const`, assert `zeta == 0` to round-off AND the KE gradient `== 0` to round-off
+- [x] add the linear-shear case: `UV(1,:,e) = alpha*y_e`, assert `zeta == -alpha`
+- [x] register `add_fesom_test(test_vinv 1)` and `add_fesom_test(test_vinv 2)` in `test/CMakeLists.txt`
+- [x] run tests — `test_vinv` is expected to FAIL here (stub); record the failure messages as the specification. Mark as `[x] (fails until Task 3)`
 
 ### Task 3: Implement Block A — `relative_vorticity`
 
@@ -300,24 +303,24 @@ differently: `coriolis(elem) + sum(zeta)/3` rather than `sum(coriolis_node + zet
 **Files:**
 - Modify: `src/oce/oce_dyn_vinv.F90`
 
-- [ ] add the `KE_node` element scatter with `w_cv -> 1/3`, normalised by `mesh%area(n)`
-- [ ] zero `KE_node` at lateral-wall nodes using `mesh%edge2D_in`, then `exchange_nod`
-- [ ] add the per-element `grad(KE)` with `gradient_sca(1:3)`/`(4:6)` and `* elem_area`, adding into `UV_rhsAB`
-- [ ] extend `test_vinv` to assert `grad(KE) == 0` for uniform flow and that `KE_node == 0.5*|u|^2` for uniform flow
-- [ ] write a test that `KE_node == 0` at lateral-wall nodes
-- [ ] run tests — must pass before task 5
+- [x] add the `KE_node` element scatter with `w_cv -> 1/3`, normalised by `mesh%area(n)`
+- [x] zero `KE_node` at lateral-wall nodes using `mesh%edge2D_in`, then `exchange_nod`
+- [x] add the per-element `grad(KE)` with `gradient_sca(1:3)`/`(4:6)` and `* elem_area`, adding into `UV_rhsAB`
+- [x] extend `test_vinv` to assert `grad(KE) == 0` for uniform flow and that `KE_node == 0.5*|u|^2` for uniform flow
+- [x] write a test that `KE_node == 0` at lateral-wall nodes
+- [x] run tests — must pass before task 5
 
 ### Task 5: Implement Block C — the vertical flux
 
 **Files:**
 - Modify: `src/oce/oce_dyn_vinv.F90`
 
-- [ ] add the `uvert` build with `dz -> helem` in the interpolation weight, surface value `-w_top*UV`, and `uvert(:,nl1+1) = 0`
-- [ ] document inline that the `Av` term is deliberately absent (Decision 2) with the reason
-- [ ] add the flux divergence including the `+ da*UV` energy-conserving term, `* elem_area / helem(nz)`
-- [ ] write the Block C net: **uniform `u` with NONZERO `w` => vertical contribution is zero to round-off, including at `nz = nlevels(e)-1` on sloping elements**. (The originally planned `w == 0` test is blind to the bottom-face bug, since every term is proportional to `w`; keep it only as a cheap smoke check.)
-- [ ] write a test for the T10 property: `UV_rhsAB == 0` for `nz >= nlevels(elem)` (no momentum leaking into dry cells)
-- [ ] run tests — must pass before task 6
+- [x] add the `uvert` build with `dz -> helem` in the interpolation weight, surface value `-w_top*UV`, and `uvert(:,nl1+1) = 0`
+- [x] document inline that the `Av` term is deliberately absent (Decision 2) with the reason
+- [x] add the flux divergence including the `+ da*UV` energy-conserving term, `* elem_area / helem(nz)`
+- [x] write the Block C net: **uniform `u` with NONZERO `w` => vertical contribution is zero to round-off, including at `nz = nlevels(e)-1` on sloping elements**. (The originally planned `w == 0` test is blind to the bottom-face bug, since every term is proportional to `w`; keep it only as a cheap smoke check.)
+- [x] write a test for the T10 property: `UV_rhsAB == 0` for `nz >= nlevels(elem)` (no momentum leaking into dry cells)
+- [x] run tests — must pass before task 6
 
 ### Task 6: Add the `u . [(f+zeta) x u] == 0` invariant and the gate configuration
 
@@ -325,25 +328,25 @@ differently: `coriolis(elem) + sum(zeta)/3` rather than `sum(coriolis_node + zet
 - Modify: `src/drivers/fesom_conserve.F90`
 - Modify: `tools/run_conserve_pi.sh`
 
-- [ ] add a `FESOM3_MOMADV_OPT` env switch to `fesom_conserve.F90` following the existing `FESOM3_REDI` / `FESOM3_MIX_TKE` pattern
-- [ ] add the per-step **global KE budget** invariant `sum_elem u.(adv tendency)*volume`, relative to total KE, beside the existing heat/salt/volume checks
-- [ ] add the cheap `max |u . [(f+zeta) x u]|` sign assertion too (trivially zero, but free and catches a transposed sign)
-- [ ] add `momadv1 FESOM3_MOMADV_OPT=1` and `momadv1+TKE FESOM3_MOMADV_OPT=1 FESOM3_MIX_TKE=1` to the gate's config heredoc
-- [ ] write both checks so they report their magnitude even when passing
-- [ ] run `bash tools/run_conserve_pi.sh` — all configurations including the two new ones must pass
+- [x] add a `FESOM3_MOMADV_OPT` env switch to `fesom_conserve.F90` following the existing `FESOM3_REDI` / `FESOM3_MIX_TKE` pattern
+- [x] add the per-step **global KE budget** invariant `sum_elem u.(adv tendency)*volume`, relative to total KE, beside the existing heat/salt/volume checks
+- [x] add the cheap `max |u . [(f+zeta) x u]|` sign assertion too (trivially zero, but free and catches a transposed sign)
+- [x] add `momadv1 FESOM3_MOMADV_OPT=1` and `momadv1+TKE FESOM3_MOMADV_OPT=1 FESOM3_MIX_TKE=1` to the gate's config heredoc
+- [x] write both checks so they report their magnitude even when passing
+- [x] run `bash tools/run_conserve_pi.sh` — all configurations including the two new ones must pass
 
 ### Task 7: Verify acceptance criteria
-- [ ] verify all requirements from Overview are implemented
-- [ ] verify `momadv_opt==2` is bit-identical: instrument once to compare `UV_rhsAB` before/after the change, confirm 0 mismatches, then remove the probe
-- [ ] verify edge cases: single-layer column, bathymetry step (the one-sided vorticity ranges), `w == 0`
-- [ ] run full test suite: `cd build_intel_dp && ctest`
-- [ ] run `bash tools/run_conserve_pi.sh` — all configurations green
+- [x] verify all requirements from Overview are implemented
+- [x] verify `momadv_opt==2` is bit-identical: instrument once to compare `UV_rhsAB` before/after the change, confirm 0 mismatches, then remove the probe
+- [x] verify edge cases: single-layer column, bathymetry step (the one-sided vorticity ranges), `w == 0`
+- [x] run full test suite: `cd build_intel_dp && ctest`
+- [x] run `bash tools/run_conserve_pi.sh` — all configurations green
 
 ### Task 8: [Final] Update documentation
-- [ ] document `momadv_opt` values and the `FESOM3_MOMADV_OPT` switch in `docs/HANDOFF.md`
-- [ ] note in `docs/LESSONS.md` that the vector-invariant form has no FESOM2 oracle (the v2.7.3 branch aborts), so its net is analytic + the no-work invariant
-- [ ] update `CLAUDE.md` if new patterns were discovered
-- [ ] move this plan to `docs/plans/completed/`
+- [x] document `momadv_opt` values and the `FESOM3_MOMADV_OPT` switch in `docs/HANDOFF.md`
+- [x] note in `docs/LESSONS.md` that the vector-invariant form has no FESOM2 oracle (the v2.7.3 branch aborts), so its net is analytic + the no-work invariant
+- [x] update `CLAUDE.md` if new patterns were discovered
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 

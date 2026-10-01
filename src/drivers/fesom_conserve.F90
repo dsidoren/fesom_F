@@ -96,6 +96,7 @@ program fesom_conserve
     real(kind=WP), allocatable :: Ki(:,:), heat_flux(:), water_flux(:), virtual_salt(:)
     real(kind=WP), allocatable :: relax_salt(:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
+    integer       :: momadv_env   ! FESOM3_MOMADV_OPT (1 = vector invariant, 2 = scalar)
     real(kind=WP) :: content0(2), content(2), conserve_tol, drift(2)
     real(kind=WP) :: volume0, volume, vdrift
     logical :: use_fer_gm, use_redi, use_kpp, use_tke
@@ -136,6 +137,11 @@ program fesom_conserve
     shear_splines = (ios == 0 .and. env_len > 0)
     call get_environment_variable('FESOM3_N2_SPLINES', env, length=env_len, status=ios)
     N2_splines = (ios == 0 .and. env_len > 0)
+    ! Vector-invariant momentum advection (oce_dyn_vinv). VALUE-based, not presence-based:
+    ! momadv_opt is 1 or 2, so a bare presence test could not select between them.
+    call get_environment_variable('FESOM3_MOMADV_OPT', env, length=env_len, status=ios)
+    momadv_env = 2
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) momadv_env
 
     !===========================================================================
     ! model_init: MR mesh remap + geometry (set_partition -> read_mesh dispatches to
@@ -225,7 +231,7 @@ program fesom_conserve
     dyn%work%Kv = 0.0_WP; dyn%work%Av = 0.0_WP
     dyn%work%density_ref = density_0              ! use_density_ref=.false.
     dyn%AB_order      = 2
-    dyn%momadv_opt    = 2
+    dyn%momadv_opt    = momadv_env
     dyn%opt_visc      = 7
     dyn%visc_gamma0   = 0.003_WP
     dyn%visc_gamma1   = 0.1_WP

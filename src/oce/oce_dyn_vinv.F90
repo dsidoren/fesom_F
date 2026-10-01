@@ -145,12 +145,125 @@ contains
     end subroutine relative_vorticity
 
     subroutine momentum_adv_vinv(dynamics, mesh, partit)
-        ! STUB (Tasks 3-5). Adds zeta x u - grad(KE) + w du/dz into UV_rhsAB(1,1:2,:).
-        ! Deliberately a no-op until the blocks land, so Task 1 can prove that adding the
-        ! momadv_opt==1 dispatch leaves momadv_opt==2 bit-identical.
+        ! Blocks B and C. ADDS  zeta x u - grad(KE) - w du/dz  into UV_rhsAB(1,1:2,:).
+        ! compute_vel_rhs step (3) already put f x u there, so the sum is (f+zeta) x u.
         type(t_mesh),   intent(in)              :: mesh
         type(t_dyn),    intent(inout), target   :: dynamics
         type(t_partit), intent(in),    optional :: partit
+        integer       :: n, nz, elem, ed, elnodes(3), ul, nl1
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
+        real(kind=WP) :: ea, pre(3), Fx, Fy, zb, w, umean, vmean, h1, h2, da, hinv
+        real(kind=WP) :: uvert(2, mesh%nl)
+        real(kind=WP), allocatable :: KE(:,:)
+        real(kind=WP), dimension(:,:),     pointer :: vort, Wv
+        real(kind=WP), dimension(:,:,:),   pointer :: UV
+        real(kind=WP), dimension(:,:,:,:), pointer :: UV_rhsAB
+        real(kind=WP), parameter :: onethird = 1.0_WP/3.0_WP   ! = qq's w_cv for triangles
+
+        vort     => dynamics%work%vorticity
+        UV       => dynamics%uv
+        UV_rhsAB => dynamics%uv_rhsAB
+        Wv       => dynamics%w_e
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+
+        call relative_vorticity(dynamics, mesh, partit)
+
+        !___________________________________________________________________
+        ! Block B1: kinetic energy at nodes (qq :78-115)
+        allocate(KE(mesh%nl-1, nNodL))
+        KE = 0.0_WP                       ! full local range: the scatter writes halo rows
+        do elem = 1, nElemO
+            elnodes = mesh%elem2D_nodes(1:3, elem)
+            ea      = real(mesh%elem_area(elem), WP)
+            do nz = mesh%ulevels(elem), mesh%nlevels(elem)-1
+                KE(nz, elnodes) = KE(nz, elnodes) &
+                    + 0.5_WP*(UV(1,nz,elem)**2 + UV(2,nz,elem)**2)*onethird*ea
+            end do
+        end do
+        do n = 1, nNodO
+            do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)-1
+                KE(nz,n) = KE(nz,n)/real(mesh%area(n), WP)
+            end do
+        end do
+        ! Lateral-wall BC (qq :106-112): KE = 0 at boundary nodes. edge_tri(2,ed) <= 0 is
+        ! the partition-robust boundary test; qq's `myList_edge2D(n) <= edge2D_in` form
+        ! needs the GLOBAL edge id and is silently wrong on local indices at npes>1.
+        ! NOTE this makes grad(KE) nonzero along every coastline even for a uniform flow --
+        ! it is qq's idealised-channel choice, transcribed as-is.
+        do ed = 1, nEdgeO
+            if (mesh%edge_tri(2, ed) > 0) cycle
+            KE(:, mesh%edges(1, ed)) = 0.0_WP
+            KE(:, mesh%edges(2, ed)) = 0.0_WP
+        end do
+        if (is_multirank(partit)) call exchange_nod(KE, partit)
+
+        !___________________________________________________________________
+        ! Block B2: zeta x u  and  -grad(KE)   (qq :157-179)
+        ! DEVIATION: qq averages coriolis_node(elnodes) TOGETHER with vorticity using the
+        ! same w_cv weights. Here f comes from compute_vel_rhs step (3) as the element-
+        ! centre mesh%coriolis(elem), so f and zeta are weighted differently:
+        ! coriolis(elem) + sum(zeta)/3 rather than sum(coriolis_node + zeta)/3. Deliberate:
+        ! it keeps momadv_opt==2 bit-identical and uses FESOM2's standard Coriolis.
+        do elem = 1, nElemO
+            elnodes = mesh%elem2D_nodes(1:3, elem)
+            ea      = real(mesh%elem_area(elem), WP)
+            do nz = mesh%ulevels(elem), mesh%nlevels(elem)-1
+                pre = -KE(nz, elnodes)
+                Fx  = sum(real(mesh%gradient_sca(1:3, elem), WP)*pre)
+                Fy  = sum(real(mesh%gradient_sca(4:6, elem), WP)*pre)
+                zb  = onethird*(vort(nz,elnodes(1)) + vort(nz,elnodes(2)) + vort(nz,elnodes(3)))
+                UV_rhsAB(1,1,nz,elem) = UV_rhsAB(1,1,nz,elem) + ( UV(2,nz,elem)*zb + Fx)*ea
+                UV_rhsAB(1,2,nz,elem) = UV_rhsAB(1,2,nz,elem) + (-UV(1,nz,elem)*zb + Fy)*ea
+            end do
+        end do
+        deallocate(KE)
+
+        !___________________________________________________________________
+        ! Block C: -w du/dz, as d(wu)/dz - u dw/dz  (qq :180-246, i_vert_visc branch)
+        ! NO Av term: FESOM3 solves vertical viscosity implicitly in impl_vert_visc_ale,
+        ! so transcribing qq's Av*(du/dz) here would apply it twice.
+        do elem = 1, nElemO
+            elnodes = mesh%elem2D_nodes(1:3, elem)
+            ul      = mesh%ulevels(elem)
+            nl1     = mesh%nlevels(elem)-1
+            ea      = real(mesh%elem_area(elem), WP)
+            if (nl1 < ul) cycle
+
+            w = onethird*sum(Wv(ul, elnodes))
+            uvert(1,ul) = -w*UV(1,ul,elem)
+            uvert(2,ul) = -w*UV(2,ul,elem)
+
+            do nz = ul+1, nl1
+                w  = onethird*sum(Wv(nz, elnodes))
+                h1 = real(mesh%helem(nz-1,elem), WP)      ! qq's dz(nz-1), now ALE
+                h2 = real(mesh%helem(nz,  elem), WP)      ! qq's dz(nz)
+                umean = (UV(1,nz-1,elem)*h2 + UV(1,nz,elem)*h1)/(h1+h2)
+                vmean = (UV(2,nz-1,elem)*h2 + UV(2,nz,elem)*h1)/(h1+h2)
+                uvert(1,nz) = -umean*w
+                uvert(2,nz) = -vmean*w
+            end do
+
+            ! DEVIATION FROM qq (a FIX, not a forced change): qq sets uvert(nl1+1) = 0.
+            ! Under bottom-at-vertices that breaks the telescoping, because da below reads
+            ! w_e(nlevels(e)) which is NOT zero: vert_vel_ale zeroes Wvel only at
+            ! nlevels_nod2D(n) (oce_ale.F90:373-392) while nlevels(e) = minval over the
+            ! element's nodes. Every element beside a deeper vertex column would then gain
+            ! a spurious -w_bot*U/helem in its bottom layer. Treating the bottom face like
+            ! the surface restores exact cancellation for a uniform u and keeps the real
+            ! bottom flux. test_vinv V6 is the net for this.
+            w = onethird*sum(Wv(nl1+1, elnodes))
+            uvert(1,nl1+1) = -w*UV(1,nl1,elem)
+            uvert(2,nl1+1) = -w*UV(2,nl1,elem)
+
+            do nz = ul, nl1
+                da   = onethird*(sum(Wv(nz,elnodes)) - sum(Wv(nz+1,elnodes)))
+                hinv = 1.0_WP/real(mesh%helem(nz,elem), WP)
+                UV_rhsAB(1,1,nz,elem) = UV_rhsAB(1,1,nz,elem) &
+                    + (uvert(1,nz) - uvert(1,nz+1) + da*UV(1,nz,elem))*ea*hinv
+                UV_rhsAB(1,2,nz,elem) = UV_rhsAB(1,2,nz,elem) &
+                    + (uvert(2,nz) - uvert(2,nz+1) + da*UV(2,nz,elem))*ea*hinv
+            end do
+        end do
     end subroutine momentum_adv_vinv
 
 end module oce_dyn_vinv

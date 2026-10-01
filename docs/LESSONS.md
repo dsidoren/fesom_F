@@ -2313,3 +2313,41 @@ and that is correct behaviour, not a leak: the linear free surface freezes `hnod
 vertical advective flux `-w*T*area` at `nzmin` (`oce_adv_tra_ver.F90:66`) is a real source/sink with
 no thickness change to balance it. The drift is non-monotone — a free-surface adjustment transient.
 Gate conservation on **zstar** (round-off, `~1e-15`) and run `linfs` for the invariants only.
+
+## L54 — A ported scheme with no oracle needs an EXACT analytic test, not a plausible one
+
+`momadv_opt==1` (vector-invariant momentum advection, `oce_dyn_vinv`) has **no FESOM2
+oracle**: the v2.7.3 branch exists but aborts with *"not adapted mom_adv advection typ for
+ALE"*, and the only implementation (`/home/a/a270029/qq/oce_vinv_mom_adv.F90`) is pre-ALE
+research code that was never tested upstream. So the usual byte-gate is unavailable and
+correctness has to be designed in.
+
+What worked, and what did not:
+
+- **A tautology is worse than no test.** The first design gated on
+  `u . [(f+zeta) x u] == 0`. That is identically — in fact *bitwise* — zero for ANY value
+  of `zeta`, because `(f+zeta)*zhat x u` is perpendicular to `u` by construction. It would
+  have reported `0.0` forever and manufactured confidence. Before trusting an invariant,
+  check it can actually FAIL.
+- **An exact analytic case is worth more than a global budget.** `u = alpha*y` on a
+  `cartesian=.true.` mesh gives `zeta == -alpha` to relative 5e-13 over 81729 node-levels.
+  That one case pins the magnitude, the sign, AND the `area(nz,n) -> area(n)` deviation,
+  because `zeta = circulation/area` only reproduces `-alpha` if `area(n)` equals the sum of
+  `elem_area/3` over the node's WET adjacent elements.
+- **Build analytic fields in `coord_nod2D`, not `geo_coord_nod2D`.** Meshes are read with
+  `force_rotation=.true.`, so the geometry (`elem_area`, `edge_cross_dxdy`, element
+  centres) lives in the ROTATED frame. A field linear in geographic latitude is not linear
+  there; the test failed worst at the rotated pole (mean `zeta/(-alpha)` = 0.836) and the
+  cause looked like a metric bug in the operator for some time.
+- **`cartesian=.true.` is a legitimate unit-test device.** It sets `elem_cos = 1` AND
+  `ay = 1` in `compute_elem_area`, so the metric stays self-consistent and the median-dual
+  contour closes; the discrete curl then becomes exact for a linear field. On the spherical
+  metric `edge_cross_dxdy(1:2)` carries `elem_cos(el1)` and `(3:4)` carries
+  `elem_cos(el2)` at the same edge midpoint, so no exactness assertion is possible.
+- **Design the test so the known bug fails it.** `qq` sets `uvert(nl1+1) = 0`, which under
+  bottom-at-vertices leaves a spurious bottom tendency (`nlevels(e)` is the `min` over the
+  element's nodes, while `vert_vel_ale` zeroes `Wvel` only at `nlevels_nod2D(n)`). The
+  originally planned test — "`w == 0` gives zero contribution" — is blind to it, since
+  every vertical term is proportional to `w`. The test that sees it is **uniform `u` with
+  NONZERO `w`**: 5.4e-2 relative with `qq`'s bottom face, 2.6e-16 with the fix.
+
