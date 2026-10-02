@@ -299,23 +299,36 @@ is retired; the hard split no longer exists to compare against).
 - Create: `test/test_wimpl_tra.F90`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] write `test_wimpl_tra` (pi mesh, np 1/2; `hnode` prescribed, `area/areasvol` from
+- [x] write `test_wimpl_tra` (pi mesh, np 1/2; `hnode` prescribed, `area/areasvol` from
   `compute_geometry`; `hnode_new = hnode − dt·(w(nz)−w(nz+1))·area/areasvol` for a pure
-  column; the LO update formula of the driver is replicated and documented as such):
-  - C1 identity: `w_i == 0` → `ttf` unchanged bitwise
+  column; the LO update formula of the driver is replicated and documented as such; TDD:
+  the test was written and registered first and failed to compile on the missing kernel;
+  identical numbers at np 1 and 2):
+  - C1 identity: `w_i == 0` → `ttf` unchanged bitwise (with `hnode_new ≠ hnode`)
   - C2 constancy: uniform `T`, divergent `w` with `w = 0` at surface and bottom,
     splits `(0.5,1.0)`, `(0.0,1.0)`, `(0.9,1.0)`: explicit LO (`adv_tra_ver_upw1(w_e)`) +
-    implicit (`w_i`) → `max|T^{n+1} − T| < 1e-13·|T|`
+    implicit (`w_i`) → `max|T^{n+1} − T| < 1e-13·|T|` (measured ≤ 5.3e-16, both signs
+    of `w`, non-uniform layers `[0.75,1.25]·h0`, max `CFL_z` 4.3/5.2; every class
+    populated, e.g. 12726/25027/67136 faces below/bend/capped for `(0.5,1)`)
   - C2b constancy with `w(surface) ≠ 0` of both signs (`hnode_new` consistent): same bound
-    (the only unsigned row)
+    (the only unsigned row) (measured ≤ 5.3e-16; the uniform-`T` surface budget
+    `−dt·w(1)·T·area` closes to ≤ 7.2e-16)
   - C3 conservation: non-uniform `T`, `w = 0` at surface/bottom:
-    `Σ hnode_new·T^{n+1}·areasvol == Σ hnode·T·areasvol` to 1e-13 relative
+    `Σ hnode_new·T^{n+1}·areasvol == Σ hnode·T·areasvol` to 1e-13 relative (measured
+    ≤ 1.0e-15 per column, owned total ≤ 2.8e-16)
   - C3b with `w(surface) ≠ 0`: content changes by exactly `−dt·w(1)·T_top·area` (1e-13)
+    (⚠️ the exact form is `−dt·area·(w_e(1)·T_old(1) + w_i(1)·T_new(1))` — the explicit
+    part carries the old, the implicit part the new surface value; the plan's form is its
+    uniform-`T` case, asserted in C2b; measured ≤ 9.5e-16)
   - C4 large Courant, uniform-`w` column (one inflow + one outflow face per cell),
     `CFL_z ≈ 10`: `T^{n+1}` within `[min T, max T]`, finite (precondition asserted:
-    per-cell explicit outflow `≤ hnode`)
+    per-cell explicit outflow `≤ hnode`) (one thin cell `0.08·h0`, `|w|dt = 0.8·h0`:
+    `CFL_z` 10.8 at its faces, 14.0 for `w > 0` where the drained bottom cell thins to
+    `0.2·h0`; explicit outflow/hnode ≤ 0.957; overshoot 1.3e-15 of the range; positive
+    control: the uncapped explicit step overshoots by 0.95 / 5.6 of the range)
   - C5 fully implicit limit: `w_e = 0, w_i = w`, two-cell closed form in flux form with the
-    `hnode_new` mass: error < 1e-12
+    `hnode_new` mass: error < 1e-12 (kernel alone vs its two-row form 1.4e-16; the
+    sequence vs the flux form 2.8e-16; two-cell mass 3.7e-16; both signs)
   - C6 driver-level assembly: call `do_oce_adv_tra` (FCT, QR4C vertical) with
     `use_wsplit` on, a linear `T(z)` in a column with uniform interior `w` so the limiter is
     inactive (assert `fct_plus/minus` leave the antidiffusive flux unlimited), and compare
@@ -325,11 +338,29 @@ is retired; the hard split no longer exists to compare against).
     `HO(w) − LO(w_e)` must differ from the driver's result by more than the tolerance
     (that is the wiring bug a conservation gate cannot see: it double-counts the `w_i`
     transport yet still telescopes)
-- [ ] port `adv_tra_vert_impl` (f3 area rule, owned loop, no `zbar_n`, 2-layer guard)
-- [ ] replace the driver error stop with the FESOM2 sequence; update the module header
-- [ ] confirm `tools/run_pressuredump_pi.sh` still runs (it forces `use_wsplit=.true.`
-  through this path)
-- [ ] run `test_wimpl_tra` np 1/2 + full `ctest` — must pass before Task 4
+    (⚠️ "uniform interior `w`" with `w = 0` at the bottom face is clipped by the limiter
+    at its last cell — the drained end cell keeps `lo = T` and is the cluster extremum;
+    the configuration where the limiter is provably inactive is upward `w0` through the
+    open surface down to the second-last cell with the LAST cell inert, `Cu = 1.2`;
+    derivation in the test header. Measured: every factor b3 applies to a nonzero face
+    == 1 and the clipped flux == the unclipped one; driver `fct_LO` and `del_ttf_advvert`
+    == the test assembly BITWISE (0.0) at np 1/2; the wrong assembly differs by
+    29.9 / 58.8 K·m (slope ±0.02 K/m) == the predicted double-counted `w_i` transport
+    `(−w_i(nz)·T(nz) + w_i(nz+1)·T(nz+1))·area·dt/areasvol` to 5e-14; plus the closed
+    form of the whole step (LO recursion `d_n = ((Cu/2)·s + r_i(n+1)·d_{n+1})/(1 + r_i(n))`
+    + the HO increments `Cu·s/4` at the surface, `−(Cu/4)·s/(1 − Cu/2)` at the drained
+    cell) reproduced to 1.4e-14 K)
+- [x] port `adv_tra_vert_impl` (f3 area rule, owned loop, no `zbar_n`, 2-layer guard)
+- [x] replace the driver error stop with the FESOM2 sequence; update the module header
+- [x] confirm `tools/run_pressuredump_pi.sh` still runs (it forces `use_wsplit=.true.`
+  through this path) (FESOM2 side: exit 0, 130 MB dump into `/scratch/a/a270029/
+  pressuredump_pi`; FESOM3 `fesom_pressuredump` exit 0 with `ulimit -s unlimited` as the
+  script sets — without it the `wr_r3` stack temporary segfaults before any `w_split`
+  record, an environment matter; the retired byte-gate FAILs by design. ⚠️ that driver
+  calls `diff_tracers_ale` only, never `do_oce_adv_tra`, so it does not reach
+  `adv_tra_vert_impl`; the Task 4 `fesom_conserve` configs are the first end-to-end run)
+- [x] run `test_wimpl_tra` np 1/2 + full `ctest` — must pass before Task 4 (np 1 0.9 s,
+  np 2 0.7 s; full ctest 38/38 in 153 s)
 
 ### Task 4: Drivers, diagnostics, gate
 

@@ -23,9 +23,13 @@ module oce_adv_tra_driver
     !  * 1-rank only (myDim_* == global). The two FESOM2 halo exchanges
     !    (exchange_nod(fct_LO) after the LO build, the implicit ones in the kernels)
     !    are no-ops at 1 rank and are dropped here; multi-rank is M1.5.
-    !  * use_wsplit (split implicit/explicit vertical velocity) needs adv_tra_vert_impl
-    !    (not ported until M2); the branch is guarded with a clear error. pi runs
-    !    use_wsplit=.false., so w == w_e and the LO/HO vertical both use the same field.
+    !  * use_wsplit (w = w_e + w_i, oce_wsplit / compute_Wvel_split): the FCT low-order
+    !    solution is advanced explicitly with w_e, then implicitly with w_i
+    !    (adv_tra_vert_impl, upwind backward Euler on fct_LO), and the low-order upwind
+    !    flux is RECOMPUTED with the full w so that the antidiffusive flux is
+    !    HO(w) - LO(w) (FESOM2 :282-292; wiring pinned by test_wimpl_tra C6). With
+    !    use_wsplit=.false. w_e == w and w_i == 0 (compute_Wvel_split), the branch is
+    !    skipped and the LO/HO vertical fluxes use the same field, as in FESOM2.
     !  * the DVD (downgradient-variance-decomposition) diagnostic blocks are dropped (not v1).
     !  * work arrays live in tracers%work (MP); kernels take WP. At the DP/SP anchor
     !    MP==WP so the pointers/args bind by kind value; revisit for FP16 (D3).
@@ -37,7 +41,7 @@ module oce_adv_tra_driver
     use mod_part_bounds,  only: owned_bounds, is_multirank
     use mod_halo,         only: exchange_nod
     use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
-    use oce_adv_tra_ver,  only: adv_tra_ver_upw1, adv_tra_ver_qr4c
+    use oce_adv_tra_ver,  only: adv_tra_ver_upw1, adv_tra_ver_qr4c, adv_tra_vert_impl
     use oce_adv_tra_fct,  only: oce_tra_adv_fct
     use oce_adv_tra_flux, only: oce_tra_adv_flux2dtracer
     implicit none
@@ -137,8 +141,13 @@ contains
             end do
 
             if (dynamics%use_wsplit) then
-                ! implicit (w-split) vertical correction needs adv_tra_vert_impl — M2.
-                error stop 'do_oce_adv_tra: use_wsplit=.true. not yet supported (needs adv_tra_vert_impl, M2)'
+                ! w-split (FESOM2 :282-292): the implicit part w_i advects the low-order
+                ! solution implicitly (upwind backward Euler, in place), then the low-order
+                ! upwind vertical flux is recomputed with the FULL w, so that the HO call
+                ! below (o_init_zero=.false.) leaves HO(w) - LO(w) as the antidiffusive flux.
+                ! (LO(w_e) there would double-count the w_i transport; test_wimpl_tra C6.)
+                call adv_tra_vert_impl(dt, wi, fct_LO, mesh, partit)
+                call adv_tra_ver_upw1(w, ttf, mesh, adv_flux_ver, o_init_zero=.true., partit=partit)
             end if
             ! M2.12b: share the low-order solution to the halo (FESOM2 :294) — the FCT
             ! limiter's a1 reads fct_LO at owned+halo nodes.
