@@ -222,7 +222,7 @@ is retired; the hard split no longer exists to compare against).
 - Create: `test/test_wsplit.F90` (part W, no mesh)
 - Modify: `test/CMakeLists.txt` (`add_fesom_test(test_wsplit 1)`, `... 2`)
 
-- [ ] write part W (parameters `(0.5,1.0)`, `(0.9,1.0)`, `(0.0,1.0)`, `(0.25,0.5)`):
+- [x] write part W (parameters `(0.5,1.0)`, `(0.9,1.0)`, `(0.0,1.0)`, `(0.25,0.5)`):
   - W1 `f == 0` exactly for `Cu ∈ {0, Cu_min/2, Cu_min}`
   - W2 cap: `|Cu·(1−f) − Cu_max| ≤ 1e-14·Cu` for `Cu ∈ {Cu_cut, 2, 5, 50, 1e4}`
   - W3 limits/range: `f(1e6·Cu_max) > 1 − 2e-6`; `0 ≤ f ≤ 1` on a 10⁴-point grid in `[0, 20]`
@@ -231,13 +231,15 @@ is retired; the hard split no longer exists to compare against).
   - W5 C¹ joints, `h = 1e-6`: at `Cu_min` both one-sided difference quotients have
     `|q| ≤ 2h/F` (closed-form slope 0); at `Cu_cut` both agree with `Cu_max/Cu_cut²` to
     1e-5 relative
-  - W6 monotone: `f` non-decreasing on the grid; `Cu_e` non-decreasing up to 4 ulp of
-    `Cu_max` (noise on the saturated branch)
+  - W6 monotone: `f` non-decreasing on the grid; `Cu_e` non-decreasing up to the
+    saturated-branch noise `4·eps·Cu` (⚠️ was "4 ulp of `Cu_max`", which drops the
+    `Cu/Cu_max` factor of the error estimate above: measured max decrease 3.9e-15 at
+    `Cu ≈ 17.5` for every parameter set = 17.5 ulp(1.0) / 35.5 ulp(0.5) = 1.23 eps·Cu)
   - W7 elemental: array call equals the element-wise loop bitwise
   - W8 `wsplit_check_params`: accepts `(0,1)`, `(0.5,1)`, `(1,1)`; rejects `(−0.1,1)`,
     `(1.1,1)`, `(0.5,0)`
-- [ ] implement the module (three branches; `wsplit_check_params`)
-- [ ] run `test_wsplit` — must pass before Task 2
+- [x] implement the module (three branches; `wsplit_check_params`)
+- [x] run `test_wsplit` — must pass before Task 2 (np 1/2 OK; full ctest 36/36)
 
 ### Task 2: `compute_Wvel_split`, `wsplit_mincfl`, pressuredump, and the smoothness scan
 
