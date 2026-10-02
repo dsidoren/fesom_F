@@ -406,10 +406,51 @@ is retired; the hard split no longer exists to compare against).
 
 ### Task 5: Verify acceptance criteria
 
-- [ ] every requirement in Overview implemented; `use_wsplit=.false.` path bit-identical
-  (suite + gate results unchanged)
-- [ ] full `ctest` and full gate green at np 1/2/8
-- [ ] split statistics of the `wsplit` gate config reported in the commit message
+- [x] every requirement in Overview implemented; `use_wsplit=.false.` path bit-identical
+  (suite + gate results unchanged) (Acceptance list below. Off path: a fresh gate run
+  has all 21 drift rows (heat/salt/vol) and both statistics lines of every config
+  identical to the Task 4 gate log, whose 18 pre-existing rows are in turn identical to
+  the pre-plan reference log (⚠️ the Task 4 entry's "22 configs / 19 pre-existing" is a
+  miscount; the logs hold 21 / 18). `git diff 66177c4..HEAD -- src/` touches the off path
+  only structurally: `compute_Wvel_split`'s `.not. use_wsplit` branch is the previous
+  loop body (`w_e = w`, `w_i = 0`, same node/level range) ahead of an early return; the
+  FCT driver change sits inside `if (dynamics%use_wsplit)`; `adv_tra_vert_impl` is a new
+  routine called only there; `t_dyn` gains `wsplit_mincfl` (read on the on path only,
+  serialized after `wsplit_maxcfl`, round-tripped only by `test_types`); with no
+  `FESOM3_WSPLIT*` set the drivers pin `use_wsplit=.false.`, `maxcfl=1.0` as before, and
+  `wsplit_statistics` is a read-only print after the step loop)
+- [x] full `ctest` and full gate green at np 1/2/8 (ctest 42/42 in 231 s incl. the np 1/2
+  wsplit / vinv-wsplit conserve tests; `run_conserve_pi.sh` GATE OK over 21 configs:
+  zstar np 1/2/8, wsplit np 1/8, momadv-vinv-wsplit np 1, every physics combination;
+  logs `gate_task5.log` / `ctest_task5.log` in the session scratchpad)
+- [x] split statistics of the `wsplit` gate config reported in the commit message (the
+  Task 4 commit 772456b carries a title only, so they go into the Task 5 commit: max
+  CFL_z 2.755e-2, cap 0.005 / onset 0.0025, faces with w_i≠0 8632, f≥0.5 500, max f
+  0.818, drift heat/salt/vol 1.7e-14 / -9.5e-15 / -2.6e-14 at np 1; np 8: 8628 / 496 /
+  0.818, drift -8.5e-16 / 3.5e-16 / 3.9e-15; momadv-vinv-wsplit np 1: 8647 / 497 /
+  0.819, drift -1.1e-14 / -4.1e-15 / 1.5e-14; identical to the Task 4 run)
+
+Acceptance (Overview requirements against the code, 2026-10-02):
+- ✓ the split lives where FESOM2 has it: `compute_Wvel_split` (`src/oce/oce_ale.F90:
+  490-558`) at the end of `vert_vel_ale` (:443), `w_i = f·w`, `w_e = w − w_i`, owned+halo
+- ✓ the Shchepetkin C¹ function is the ONLY split: `oce_wsplit::wsplit_implicit_fraction`
+  (`src/oce/oce_wsplit.F90:40-58`, three branches); the `dd` hard switch is gone and
+  `wsplit_maxcfl` is read nowhere else in `src/oce`; `mincfl = maxcfl` is a test control
+- ✓ parameters: `t_dyn%wsplit_mincfl` (`src/types/mod_dyn.F90:133`, serialized :207/:236,
+  `test_types` round trip); `wsplit_check_params` (:60-66) guards both env-hook drivers
+  (`fesom_conserve.F90:174`, `fesom_lifecycle_native_mr.F90:237`)
+- ✓ consumers: momentum TDMA `w_i` (`oce_dyn_ivertvisc.F90:124`), momentum advection
+  `w_e` (`oce_dyn_velrhs.F90:197`, `oce_dyn_vinv.F90:171`), tracer-diffusion TDMA `w_i`
+  (`oce_ale_tracer.F90:532`); the FCT path ported: `adv_tra_vert_impl`
+  (`oce_adv_tra_ver.F90:140-241`) + LO flux on the full `w` (`oce_adv_tra_driver.F90:
+  149-150`), no error stop left
+- ✓ nothing else in the discretization changed: `git diff 66177c4..HEAD -- src/` is 8
+  files (new module, the split, the FCT branch, the `t_dyn` field, three drivers)
+- ✓ diagnostics/hooks: `FESOM3_WSPLIT` / `_MINCFL` / `_MAXCFL` + banners in both drivers;
+  `fesom_conserve` `wsplit_statistics` (:510-561) + `FESOM3_WSPLIT_EXPECT_SPLIT`;
+  `fesom_pressuredump` counts `w_i ≠ 0`; `pressure_diff.py` skips `w_split_e/w_split_i`
+- ✓ tests: `test_wsplit` W/S/X, `test_wimpl_tra` C1-C6, `test_types`, ctest wsplit
+  configs np 1/2, gate wsplit np 1/8 + momadv-vinv-wsplit np 1 — all green above
 
 ### Task 6: [Final] Update documentation
 
