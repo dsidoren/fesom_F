@@ -1430,6 +1430,20 @@ Settled, not patched: edge-neighbours of an owned element are in eDim by constru
 verified at np=2/8 and guarded by `test_vinv` A5 (production fill/exchange/read pattern
 with a sentinel). `exchange_elem_full` is NOT needed here. See L56.
 
+**Implicit vertical advection (`use_wsplit`) and the advection form.** With the split
+`w = w_e + w_i`, `w_i` is advected inside `impl_vert_visc_ale` in upwind FLUX form
+(row sums `(wu-wd)*zinv`), which is right for the flux-form scalar scheme but leaves a
+spurious `u*dw_i/dz` under the advective-form vector-invariant scheme. For
+`momadv_opt==1` the solver subtracts `(wu-wd)*zinv` from the diagonal (bottom row:
+`wu*zinv`), i.e. upwind ADVECTIVE form with zero row sums; the `==2` path is untouched
+(structural gate). Net: `test/test_ivertvisc.F90` I1-I5 (closed forms for BOTH options,
+np=1/2). **No end-to-end gate is possible yet**: `use_wsplit=.true.` error-stops in
+`do_oce_adv_tra` (`oce_adv_tra_driver.F90:141`, the tracer implicit vertical advection
+`adv_tra_vert_impl` is unported), so a `FESOM3_WSPLIT` conserve config aborts before the
+first step -- tried and reverted. All production drivers pin `use_wsplit=.false.`, so
+`w_i==0` there and the correction is dormant until `adv_tra_vert_impl` lands; add the
+gate configs (`wsplit`, `momadv-vinv-wsplit`) with that port. See L57.
+
 **There is no FESOM2 oracle for `momadv_opt==1`** (the v2.7.3 branch aborts: "not adapted
 mom_adv advection typ for ALE"). Its net is `test/test_vinv.F90` — analytic cases that are
 exact to round-off — plus the conservation gate. See L54 and

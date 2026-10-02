@@ -22,6 +22,19 @@ module oce_dyn_ivertvisc
     ! plus the vertical-advection upwind update from the implicit vertical velocity
     ! w_i averaged to the prism faces (wu at top face nz, wd at bottom face nz+1):
     !   a += min(0,wu)*zinv ; b += max(0,wu)*zinv ; b -= min(0,wd)*zinv ; c -= max(0,wd)*zinv
+    ! That is the upwind FLUX form d(w_i u)/dz: its row sums are (wu-wd)*zinv, so a
+    ! uniform u gets the tendency -u*dw_i/dz. For the scalar scheme (momadv_opt==2) that
+    ! is consistent -- its explicit part is flux form too, and the u*dw/dz piece is
+    ! balanced by the horizontal u*div(u) through continuity. The vector-invariant
+    ! scheme (momadv_opt==1, oce_dyn_vinv) is ADVECTIVE form in both directions
+    ! (zeta x u + grad KE; Block C does w_e du/dz as d(w_e u)/dz - u dw_e/dz), so the
+    ! flux-form operator would leave a spurious u*dw_i/dz wherever the split is active
+    ! (CFL_z > wsplit_maxcfl). For momadv_opt==1 the diagonal is therefore corrected by
+    !   b -= (wu-wd)*zinv            (bottom row: b -= wu*zinv, its wd is dropped)
+    ! which turns the operator into the upwind ADVECTIVE form w_i du/dz (inflow-face
+    ! velocity), zero row sums, constants preserved implicitly, diagonal dominance kept.
+    ! Structurally gated: the ==2 path is untouched, and with use_wsplit=.false. w_i==0.
+    ! Net: test/test_ivertvisc.F90 (closed forms for both options).
     ! Boundary rows: the surface row carries the wind-stress flux
     !   ur(top) += zinv*stress_surf(1,elem)/density_0 ;  vr(top) += zinv*stress_surf(2,elem)/density_0
     ! and the bottom row the quadratic bottom drag
@@ -144,6 +157,8 @@ contains
                 b(nz) = b(nz)+max(0._WP, wu)*zinv
                 b(nz) = b(nz)-min(0._WP, wd)*zinv
                 c(nz) = c(nz)-max(0._WP, wd)*zinv
+                ! advective form for the vector-invariant scheme (see header)
+                if (dynamics%momadv_opt == 1) b(nz) = b(nz)-(wu-wd)*zinv
             end do
             ! The last row
             zinv       = 1.0_WP*dt/(zbar_n(nzmax-1)-zbar_n(nzmax))
@@ -153,6 +168,7 @@ contains
             wu         = sum(Wvel_i(nzmax-1, elnodes))/3._WP
             a(nzmax-1) = a(nzmax-1)+min(0._WP, wu)*zinv
             b(nzmax-1) = b(nzmax-1)+max(0._WP, wu)*zinv
+            if (dynamics%momadv_opt == 1) b(nzmax-1) = b(nzmax-1)-wu*zinv
             ! The first row
             zinv       = 1.0_WP*dt/(zbar_n(nzmin)-zbar_n(nzmin+1))
             c(nzmin)   = -Av(nzmin+1,elem)/(Z_n(nzmin)-Z_n(nzmin+1))*zinv
@@ -163,6 +179,7 @@ contains
             b(nzmin)   = b(nzmin)+wu*zinv
             b(nzmin)   = b(nzmin)-min(0._WP, wd)*zinv
             c(nzmin)   = c(nzmin)-max(0._WP, wd)*zinv
+            if (dynamics%momadv_opt == 1) b(nzmin)   = b(nzmin)-(wu-wd)*zinv
 
             !__________________________________________________________________
             ! The rhs

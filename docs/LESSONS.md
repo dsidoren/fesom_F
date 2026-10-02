@@ -2413,3 +2413,42 @@ on every momentum step.
   explicitly.** In a test that never calls `set_partition`, `partit%myDim_elem2D` is 0 and
   `myList_elem2D` is unallocated at npes==1; the first A5 draft crashed serially for
   exactly that reason while passing at np=2/8.
+
+## L57 — An implicit operator inherits the FORM of the explicit scheme it completes: flux form for a flux-form scheme, advective form for a vector-invariant one — the split `w_i` was silently the wrong one
+
+**Context.** `use_wsplit` moves the part of `w` above the vertical CFL limit into the
+momentum TDMA (`impl_vert_visc_ale`), transcribed from FESOM2 in upwind FLUX form:
+`a += min(0,wu)·zinv, b += max(0,wu)·zinv − min(0,wd)·zinv, c −= max(0,wd)·zinv`, row
+sums `(wu − wd)·zinv`. Applied to a uniform `u` that is `−u·∂w_i/∂z`. The scalar scheme
+is flux form everywhere, so the piece is balanced by the horizontal `u·∇·u` through
+continuity. The vector-invariant scheme is advective form everywhere (`ζ×u + ∇KE`;
+Block C builds `w_e ∂u/∂z` as `δ(w_e u) − u δw_e`), and nothing balances the implicit
+`u ∂w_i/∂z`: wherever the split is active, a uniform column with divergent `w_i` is
+accelerated — O(1) relative to the vertical advection there, invisible everywhere else,
+and invisible in every production driver because they all pin `use_wsplit=.false.`.
+
+**The fix is a row-sum correction, not a new operator.** Subtract `(wu − wd)·zinv` from
+the diagonal (the bottom row drops `wd`, so there `wu·zinv`): the operator becomes the
+upwind ADVECTIVE form with the inflow-face velocity, row sums vanish, constants are
+preserved implicitly, diagonal dominance is kept, and the Thomas sweep is unchanged.
+Gated on `momadv_opt == 1`, so the FESOM2-pinned path is structurally untouched.
+
+**Lessons.**
+- **Check the row sums.** Flux form ⇔ row sums `= δw·zinv`; advective form ⇔ row sums
+  `= 0`. That one line of algebra tells which form an implicit operator is, faster than
+  reading its stencil. A uniform-`u` test with divergent `w_i` is the executable version.
+- **Operator splitting must split one operator.** Explicit `w_e` part and implicit `w_i`
+  part only add up to the scheme if both have the same form. When a new explicit scheme
+  is dropped in (momadv_opt=1), every implicit completion it relies on (here the TDMA)
+  must be re-derived, not inherited.
+- **Pin both branches with closed forms.** A single-face `w_i` gives exact per-column
+  solutions for BOTH forms (I3/I4); the flux-form closed form is the regression pin that
+  the untouched path really is untouched, which the gate on `momadv_opt==2` alone
+  cannot say (it only sees conservation).
+- **Run the gate config before claiming the gate.** The planned `wsplit` conserve
+  configs (with a split-face count so they could not be vacuous) died before the first
+  step: `use_wsplit=.true.` error-stops in `do_oce_adv_tra` because the tracer-side
+  `adv_tra_vert_impl` is unported. The momentum fix is therefore pinned at unit level
+  only (I1-I4) and is dormant in every driver; the end-to-end gate belongs to the
+  `adv_tra_vert_impl` port, and the driver hook was reverted rather than left as a
+  knob that always aborts.
