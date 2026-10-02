@@ -74,3 +74,26 @@ foreach(_mix KPP TKE)
         ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_MIX_${_mix}=1;FESOM3_CONSERVE_TOL=1e-12"
         SKIP_REGULAR_EXPRESSION "cannot open;No such file")
 endforeach()
+
+# Smooth w = w_e + w_i split (use_wsplit, docs/plans/2026-10-02-wsplit-smooth.md) with all
+# its consumers live: momentum TDMA + advection, the tracer-diffusion TDMA and the FCT
+# adv_tra_vert_impl. The 20-step cold start never reaches CFL_z ~ 1 (measured max 2.76e-2),
+# so the cap is 0.005 (onset 0.0025 by the driver's 0.5*maxcfl default): 8632 owned faces
+# split, 500 with an implicit share >= 0.5. FESOM3_WSPLIT_EXPECT_SPLIT=1 error-stops on
+# zero split faces (no vacuous pass). np 2 is required: w_e/w_i are produced at owned+halo
+# with no trailing exchange and the next step's momentum advection reads them at the halo.
+# The vinv variant runs the advective-form implicit w_i correction of the momentum TDMA.
+foreach(_np 1 2)
+    add_test(NAME fesom_conserve_zstar_wsplit_np${_np}
+             COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np ${_np}
+                     $<TARGET_FILE:fesom_conserve>)
+    set_tests_properties(fesom_conserve_zstar_wsplit_np${_np} PROPERTIES
+        ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_WSPLIT=1;FESOM3_WSPLIT_MAXCFL=0.005;FESOM3_WSPLIT_EXPECT_SPLIT=1;FESOM3_CONSERVE_TOL=1e-12"
+        SKIP_REGULAR_EXPRESSION "cannot open;No such file")
+    add_test(NAME fesom_conserve_zstar_vinv_wsplit_np${_np}
+             COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np ${_np}
+                     $<TARGET_FILE:fesom_conserve>)
+    set_tests_properties(fesom_conserve_zstar_vinv_wsplit_np${_np} PROPERTIES
+        ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_MOMADV_OPT=1;FESOM3_WSPLIT=1;FESOM3_WSPLIT_MAXCFL=0.005;FESOM3_WSPLIT_EXPECT_SPLIT=1;FESOM3_CONSERVE_TOL=1e-12"
+        SKIP_REGULAR_EXPRESSION "cannot open;No such file")
+endforeach()

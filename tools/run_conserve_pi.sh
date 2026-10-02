@@ -23,6 +23,19 @@
 #       change to balance it. Measured baseline on pi over 20 steps: heat -2.2e-04,
 #       salt -1.2e-06, non-monotone (a free-surface adjustment transient).
 #
+#   zstar + wsplit, np 1 and 8 (+ momadv-vinv-wsplit, np 1) -> the smooth w = w_e + w_i
+#       split (use_wsplit, oce_wsplit) with ALL its consumers live: the momentum TDMA
+#       (w_i, flux form at momadv_opt=2 / advective form at 1), momentum advection
+#       (w_e), the tracer-diffusion TDMA (do_wimpl, w_i) and the FCT adv_tra_vert_impl
+#       (w_i, then the LO flux on the full w). The 20-step cold start never reaches
+#       CFL_z ~ 1 (measured last-step max 2.76e-2 on pi, split off), so the cap is set
+#       to FESOM3_WSPLIT_MAXCFL=0.005 (onset 0.0025 = the driver's 0.5*maxcfl default):
+#       measured 8632 owned faces with w_i /= 0, 500 with f = |w_i|/|w| >= 0.5, max f
+#       0.82 (np 1/2 identical to +-1 face). FESOM3_WSPLIT_EXPECT_SPLIT=1 makes the
+#       driver error-stop on zero split faces, so these configs cannot pass vacuously.
+#       The driver prints the CFL_z / split statistics for EVERY config (the last two
+#       lines before the drift), which is why the tails below are two lines longer.
+#
 # Measured zstar baseline on pi, 20 steps, before any bottom change:
 #   np=1  heat -4.87e-15  salt -1.66e-14
 #   np=2  heat  0.00e+00  salt -7.80e-15
@@ -69,7 +82,7 @@ while read -r -u 3 label vars; do
     [ -z "$label" ] && continue
     echo "=== zstar + $label, np=1, $NSTEPS steps (conservation gate, tol=$TOL) ==="
     if env $vars FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
-         mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -7; then
+         mpirun $MPIFLAGS -n 1 "$BIN" 2>&1 | tail -9; then
         :
     else
         echo "run_conserve_pi: FAILED (zstar+$label np=1)"; fail=1
@@ -86,6 +99,8 @@ splines+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_TKE=1
 N2splines FESOM3_N2_SPLINES=1
 momadv-vinv FESOM3_MOMADV_OPT=1
 momadv-vinv-upw FESOM3_MOMADV_OPT=1 FESOM3_RVO_UPWIND=0.7
+wsplit FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1
+momadv-vinv-wsplit FESOM3_MOMADV_OPT=1 FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1
 bothsplines+GM+Redi+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_N2_SPLINES=1 FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1
 CFG
 
@@ -107,6 +122,18 @@ if FESOM3_MOMADV_OPT=1 FESOM3_RVO_UPWIND=0.7 FESOM3_WHICH_ALE=zstar FESOM3_CONSE
     :
 else
     echo "run_conserve_pi: FAILED (zstar+momadv-vinv-upw np=8)"; fail=1
+fi
+
+# w split at np=8: compute_Wvel_split produces w_e/w_i at owned+HALO with no trailing
+# exchange (FESOM2's layout) and the NEXT step's momentum advection reads them at the
+# halo, so the rank count where nNodL << nod2D is the one that exercises that contract.
+echo "=== zstar + wsplit, np=8, $NSTEPS steps (conservation gate, tol=$TOL) ==="
+if FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1 \
+     FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
+     mpirun $MPIFLAGS -n 8 "$BIN" < /dev/null 2>&1 | tail -8; then
+    :
+else
+    echo "run_conserve_pi: FAILED (zstar+wsplit np=8)"; fail=1
 fi
 
 echo "=== linfs, np=1, $NSTEPS steps (invariants only; drift reported, not gated) ==="

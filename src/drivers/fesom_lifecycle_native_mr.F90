@@ -70,6 +70,7 @@ program fesom_lifecycle_native_mr
                                   yearstart, ndpyr, day_in_month, fleapyear, num_day_in_month
     use oce_mixing_kpp,     only: oce_mixing_kpp_init
     use oce_mixing_tke,     only: tke_init
+    use oce_wsplit,         only: wsplit_check_params
     use oce_shortwave_pene, only: cal_shortwave_rad
     use mod_mesh,           only: t_mesh
     use mod_partit,         only: t_partit
@@ -155,6 +156,8 @@ program fesom_lifecycle_native_mr
     logical :: use_kpp, do_swpene, do_nonlcl   ! M5d: KPP / shortwave pene / ghats nonlocal flux
     logical :: use_tke      ! M7d: FESOM3_MIX_TKE -> cvmix_TKE producer at multi-rank (LOCAL nNodL)
     integer :: momadv_env   ! FESOM3_MOMADV_OPT: 1 = vector invariant, 2 = scalar (default)
+    logical       :: use_wsplit_env                        ! FESOM3_WSPLIT (presence)
+    real(kind=WP) :: wsplit_mincfl_env, wsplit_maxcfl_env  ! FESOM3_WSPLIT_MINCFL/_MAXCFL (values)
     real(kind=WP), allocatable :: chl(:)       ! M5d const 0.1 / M8c Sweeney monthly climatology
     logical :: use_chl_sweeney                 ! M8c: FESOM3_CHL_SWEENEY -> read Sweeney chl monthly
     ! native atmospheric forcing read (the whole atmosphere, over owned+halo).
@@ -216,6 +219,23 @@ program fesom_lifecycle_native_mr
     if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) rvo_upwind
     if (rvo_upwind < 0.0_WP .or. rvo_upwind > 1.0_WP) &
         error stop 'FESOM3_RVO_UPWIND must be in [0,1]'
+    ! Smooth Courant-dependent w = w_e + w_i split (oce_wsplit, compute_Wvel_split): the
+    ! part of w above the explicit CFL_z cap is advected by the implicit upstream solves
+    ! (momentum TDMA, tracer vertical-diffusion TDMA, FCT adv_tra_vert_impl). Presence-
+    ! based switch like FESOM3_FER_GM; the two parameters are VALUE-based like
+    ! FESOM3_MOMADV_OPT. Defaults: the t_dyn cap 1.0 and an onset of 0.5*maxcfl, so setting
+    ! only FESOM3_WSPLIT_MAXCFL keeps the type's onset/cap ratio. Validated as t_dyn
+    ! documents: maxcfl > 0, 0 <= mincfl <= maxcfl. Off unless set (production precedent).
+    call get_environment_variable('FESOM3_WSPLIT', env, length=env_len, status=ios)
+    use_wsplit_env = (ios == 0 .and. env_len > 0)
+    wsplit_maxcfl_env = 1.0_WP
+    call get_environment_variable('FESOM3_WSPLIT_MAXCFL', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) wsplit_maxcfl_env
+    wsplit_mincfl_env = 0.5_WP*wsplit_maxcfl_env
+    call get_environment_variable('FESOM3_WSPLIT_MINCFL', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) wsplit_mincfl_env
+    if (.not. wsplit_check_params(wsplit_mincfl_env, wsplit_maxcfl_env)) &
+        error stop 'FESOM3_WSPLIT_MINCFL/MAXCFL: need maxcfl > 0 and 0 <= mincfl <= maxcfl'
     if (partit%mype == 0 .and. (shear_splines .or. N2_splines)) write(*,'(a,l1,a,l1,a)') &
         'fesom_lifecycle_native_mr: vertical splines ENABLED (shear=', shear_splines, &
         ', N2=', N2_splines, ')'
@@ -363,8 +383,12 @@ program fesom_lifecycle_native_mr
     dyn%visc_gamma2   = 0.285_WP
     dyn%visc_gamma0_h = 0.0_WP
     dyn%visc_gamma1_h = 0.0_WP
-    dyn%use_wsplit    = .false.
-    dyn%wsplit_maxcfl = 1.0_WP
+    dyn%use_wsplit    = use_wsplit_env        ! .false. unless FESOM3_WSPLIT (production precedent)
+    dyn%wsplit_mincfl = wsplit_mincfl_env
+    dyn%wsplit_maxcfl = wsplit_maxcfl_env
+    if (partit%mype == 0 .and. dyn%use_wsplit) write(*,'(a,f8.4,a,f8.4,a)') &
+        'fesom_lifecycle_native_mr: implicit vertical advection split w = w_e + w_i ENABLED ' // &
+        '(use_wsplit; wsplit_mincfl=', dyn%wsplit_mincfl, ', wsplit_maxcfl=', dyn%wsplit_maxcfl, ')'
 
     !===========================================================================
     ! 2-tracer ocean state (data(1)=T, data(2)=S; local sizes) + do_ic3d phc3.0 IC.

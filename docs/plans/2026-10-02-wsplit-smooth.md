@@ -368,21 +368,41 @@ is retired; the hard split no longer exists to compare against).
 - Modify: `src/drivers/fesom_conserve.F90`, `src/drivers/fesom_lifecycle_native_mr.F90`
 - Modify: `tools/run_conserve_pi.sh`, `test/CMakeLists.txt`
 
-- [ ] env hooks (both drivers): `FESOM3_WSPLIT` (presence → `use_wsplit`),
+- [x] env hooks (both drivers): `FESOM3_WSPLIT` (presence → `use_wsplit`),
   `FESOM3_WSPLIT_MINCFL`, `FESOM3_WSPLIT_MAXCFL` (values; defaults 0.5 / 1.0), validated
-  with `wsplit_check_params` (error stop); banner with both numbers
-- [ ] `fesom_conserve`: last-step split statistics + `FESOM3_WSPLIT_EXPECT_SPLIT=1` error
-  stop on zero split faces
-- [ ] measure `max CFL_z` of the 20-step pi conserve run (cold start from rest: expected
+  with `wsplit_check_params` (error stop); banner with both numbers (the `MINCFL` default
+  is `0.5·maxcfl` in the drivers, i.e. 0.5 at the default cap, so a config that sets only
+  `MAXCFL` keeps the type's onset/cap ratio; the inadmissible pair `(0.9, 0.5)` measured
+  to error-stop before init)
+- [x] `fesom_conserve`: last-step split statistics + `FESOM3_WSPLIT_EXPECT_SPLIT=1` error
+  stop on zero split faces (`wsplit_statistics`: owned faces, levels
+  `ulevels_nod2D..nlevels_nod2D`, `w_i ≠ 0`, `|w_i| ≥ 0.5|w|`, `max |w_i|/|w|` guarded at
+  `w = 0`, plus `max CFL_z` and the counts above `mincfl` / `maxcfl` / `2·maxcfl` — the
+  breakpoints at which `f > 0`, the cap starts and `f ≥ 0.5`; MPI-summed/maxed, rank 0;
+  printed for EVERY config; positive control: `EXPECT_SPLIT=1` with the cap 1.0 gives
+  0 split faces and exit 1)
+- [x] measure `max CFL_z` of the 20-step pi conserve run (cold start from rest: expected
   far below 0.5) and choose `FESOM3_WSPLIT_MAXCFL` for the gate config so that a
   substantial number of faces split, some with `f ≥ 0.5`; record the measured counts here
-  (➕ fill in: max CFL_z = …, chosen maxcfl = …, faces f>0 = …, f≥0.5 = …)
-- [ ] gate configs: `wsplit FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=<chosen>
+  (➕ measured, default zstar config, split off, last step, owned faces: max CFL_z =
+  2.757e-2; faces with CFL_z > 0.005 / 0.01 / 0.02 / 0.025 / 0.04 = 2568 / 499 / 26 / 5 / 0.
+  Chosen maxcfl = 0.005 (mincfl = 0.0025 by the 0.5·maxcfl default); the alternative 0.01
+  gave only 26 faces at f ≥ 0.5. With the split ON (wsplit config): faces f>0 = 8632,
+  f≥0.5 = 500, max f = 0.818, max CFL_z 2.755e-2 at np 1 (np 2: 8633 / 500; np 8: 8628 /
+  496); momadv-vinv-wsplit: 8647 / 497, max f 0.819. Consistency: f>0 count == faces
+  above mincfl and f≥0.5 count == faces above 2·maxcfl in every run, as derived.)
+- [x] gate configs: `wsplit FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005
   FESOM3_WSPLIT_EXPECT_SPLIT=1`, `momadv-vinv-wsplit` (same + `FESOM3_MOMADV_OPT=1`), an
   np=8 block for `wsplit`; ctest `fesom_conserve_zstar_wsplit_np{1,2}` and
   `fesom_conserve_zstar_vinv_wsplit_np{1,2}` (the halo path of `w_e/w_i` is read by the
-  next step's momentum advection — np ≥ 2 required)
-- [ ] run the full gate — GATE OK required before Task 5
+  next step's momentum advection — np ≥ 2 required) (the heredoc loop's `tail -7` became
+  `tail -9` and the np=8 block uses `tail -8` so the two statistics lines are visible for
+  every config; ctest now 42 tests)
+- [x] run the full gate — GATE OK required before Task 5 (GATE OK, 22 configs; wsplit
+  drift heat/salt/vol = 1.7e-14 / -9.5e-15 / -2.6e-14 at np 1, -8.5e-16 / 3.5e-16 /
+  3.9e-15 at np 8; momadv-vinv-wsplit -1.1e-14 / -4.1e-15 / 1.5e-14; all pre-existing
+  configs' drifts identical to the Task 3 gate log, i.e. the `use_wsplit=.false.` path is
+  unchanged; full ctest 42/42)
 
 ### Task 5: Verify acceptance criteria
 
