@@ -253,34 +253,42 @@ is retired; the hard split no longer exists to compare against).
   from the compared fields; comment why)
 - Modify: `test/test_wsplit.F90` (parts S and X, pi mesh at np 1/2 like `test_vinv`)
 
-- [ ] write part S: prescribe `w` (nonzero at every level incl. surface, both signs) and a
-  `cfl_z` field spanning `[0, 5]`; call `compute_Wvel_split`:
-  - S1 `|w_e + w_i − w| ≤ 1 ulp(w)` at every owned+halo face
+- [x] write part S: prescribe `w` (nonzero at every level incl. surface, both signs) and a
+  `cfl_z` field spanning `[0, 5]`; call `compute_Wvel_split` (sets `(0.5,1)`, `(0.9,1)`,
+  `(0.25,0.5)`; TDD: against the hard split S1 measured 2 ulp and S2 was not bitwise):
+  - S1 `|w_e + w_i − w| ≤ 1 ulp(w)` at every owned+halo face (measured max 1.00 ulp)
   - S2 `w_i(nz,n) == f(cfl_z(nz,n))·w(nz,n)` bitwise
   - S3 `use_wsplit=.false.` → `w_e == w`, `w_i == 0` bitwise (incl. sign of zero)
   - S4 faces with `cfl_z ≤ mincfl` have `w_i == 0`; faces with `cfl_z ≥ 2·maxcfl−mincfl`
-    have `|w_e|·cfl_z/|w| == maxcfl` to 1e-14·cfl_z
-- [ ] write part X (transition smoothness, non-FCT path; needs a minimal tracer set-up
+    have `|w_e|·cfl_z/|w| == maxcfl` to 1e-14·cfl_z (measured ≤ 2.3e-16; every class
+    populated: e.g. 11514 / 19796 / 73579 faces below/bend/capped for `(0.5,1)` at np 1)
+- [x] write part X (transition smoothness, non-FCT path; needs a minimal tracer set-up
   with `tra_adv_lim /= 'FCT'`, `Kv = 0`, no surface fluxes, Redi off):
   - X0 derive in the test header the closed-form derivative jump of the hard switch at the
     threshold for a quadratic `T` on uniform layers with uniform interior `w`:
-    `J = [UPW − QR4C](T)` at the probe cell
-  - X1 scan `Cu` on ≥ 600 points in `[0, 3·maxcfl]` (vary `|w|`, keep `cfl_z` consistent
-    with `compute_CFLz`); per point: split → `adv_tra_ver_qr4c(w_e)` →
-    `oce_tra_adv_flux2dtracer` → `diff_ver_part_impl_ale` (`do_wimpl` with `w_i`); record
-    the tendency at the probe cell; assert the first differences are continuous and the
-    second differences are `≤ 10·ΔCu·max|first difference|` everywhere
-  - X2 positive control: the same scan with the degenerate `(mincfl = maxcfl)` function
-    must violate the X1 criterion at `Cu = maxcfl` with a second difference `≥ 0.5·|J|·ΔCu`
-    (proves X1 has teeth and pins `J`)
-  - X3 fully explicit limit: for `Cu ≤ mincfl` the tendency equals the explicit QR4C
-    tendency with the full `w` bitwise; fully implicit limit: `w_e = 0` gives the pure
-    `do_wimpl` TDMA result
-- [ ] rewrite `compute_Wvel_split` (table in Technical Details); update its header
-- [ ] add `wsplit_mincfl` to `t_dyn` + serialization; extend `test_types` `test_dyn`;
-  drivers rely on the type default (only the env-hook drivers set it, Task 4)
-- [ ] `fesom_pressuredump`: comments, `w_i /= 0` count, `pressure_diff.py` field list
-- [ ] run `test_wsplit` np 1/2, `test_types`, full `ctest` — must pass before Task 3
+    `J = [UPW − QR4C](T)` at the probe cell (⚠️ derived EXACTLY: `J = cq·h²·(1+Cu_c)/2`
+    per unit `Cu`; the shorthand `[UPW − QR4C](T) = cq·h²/2` is its `Cu_c → 0` limit — the
+    factor `(1+Cu_c)` is the explicit pre-advection of `T` to `T*` at the threshold, which
+    the TDMA then acts on. Measured with the hard switch: `D2(kink)/(J·ΔCu) = 1.0025`,
+    the 0.25 % being the predicted `ΔCu/(1+Cu_c)` curvature of the implicit branch)
+  - X1 scan `Cu` on ≥ 600 points in `[0, 3·maxcfl]` (601 points, `ΔCu = 0.005`, probe
+    cell 5 of every owned column with ≥ 10 levels, both signs of `w`): measured
+    `max|D2|/(ΔCu·max|D1|) = 0.96` (w>0) / `1.17` (w<0) against the bound 10
+  - X2 positive control, the degenerate `(1,1)` function: ratio `100.3` / `64.1` (violates
+    X1 by 10x / 6.4x; the SAME numbers came out of the pre-rewrite hard split, which
+    failed X1 exactly this way); kink `D2 = 1.0025·J·ΔCu` (floor `0.5`, pinned to 5 %)
+  - X3 fully explicit limit: bitwise at all 101 scan points with `Cu ≤ mincfl` (every
+    owned cell); fully implicit limit: chain == pure `do_wimpl` TDMA bitwise, and the TDMA
+    == the closed-form upwind row recursion to 3.8e-16 relative (both signs)
+- [x] rewrite `compute_Wvel_split` (table in Technical Details); update its header
+  (`compute_CFLz`/`compute_Wvel_split` made public for the test)
+- [x] add `wsplit_mincfl` to `t_dyn` + serialization; extend `test_types` `test_dyn`
+  (non-default `use_wsplit=.true.`, `mincfl=0.3`, `maxcfl=0.8` round-tripped); drivers
+  rely on the type default (only the env-hook drivers set it, Task 4)
+- [x] `fesom_pressuredump`: comments, `w_i /= 0` count, `pressure_diff.py` field list
+  (`SKIP_FIELDS = {w_split_e, w_split_i}`, printed as SKIP)
+- [x] run `test_wsplit` np 1/2 (65 s / 38 s), `test_types`, full `ctest` 36/36 — must pass
+  before Task 3
 
 ### Task 3: Port `adv_tra_vert_impl` (FCT path) + driver-level assembly test
 

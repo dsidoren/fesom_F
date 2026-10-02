@@ -128,6 +128,8 @@ contains
         integer, parameter :: ne = 5, nn = 7, nl = 4
         a%opt_visc = 7; a%momadv_opt = 2; a%AB_order = 2
         a%visc_gamma0 = 0.025_WP
+        ! the w split parameters, all NON-default (type defaults .false. / 0.5 / 1.0)
+        a%use_wsplit = .true.; a%wsplit_mincfl = 0.3_WP; a%wsplit_maxcfl = 0.8_WP
         allocate(a%uv(2, nl-1, ne), a%uv_rhsAB(2, nl-1, ne, 2))
         allocate(a%uvnode(2, nl-1, nn), a%w(nl, nn))
         allocate(a%eta_n(nn), a%ssh_rhs(nn))
@@ -147,6 +149,9 @@ contains
 
         if (b%opt_visc /= a%opt_visc .or. b%momadv_opt /= a%momadv_opt) call fail('dyn config ints')
         if (b%visc_gamma0 /= a%visc_gamma0) call fail('dyn visc_gamma0')
+        if (b%use_wsplit .neqv. a%use_wsplit) call fail('dyn use_wsplit')
+        if (b%wsplit_mincfl /= a%wsplit_mincfl) call fail('dyn wsplit_mincfl')
+        if (b%wsplit_maxcfl /= a%wsplit_maxcfl) call fail('dyn wsplit_maxcfl')
         if (maxval(abs(b%uv - a%uv)) /= 0.0_WP) call fail('dyn uv')
         if (maxval(abs(b%uv_rhsAB - a%uv_rhsAB)) /= 0.0_WP) call fail('dyn uv_rhsAB (4D)')
         if (maxval(abs(b%uvnode - a%uvnode)) /= 0.0_WP) call fail('dyn uvnode')

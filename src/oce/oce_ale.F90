@@ -38,6 +38,7 @@ module oce_ale
     use mod_part_bounds, only: owned_bounds, is_multirank
     use mod_halo,       only: exchange_nod, exchange_elem, exchange_elem_full
     use mod_config,     only: which_ALE          ! M6 ALE: 'linfs'/'zlevel'/'zstar'
+    use oce_wsplit,     only: wsplit_implicit_fraction   ! the C^1 w_e/w_i split function
     implicit none
     private
     public :: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
@@ -45,6 +46,9 @@ module oce_ale
     ! at M2.8); update_thickness_ale is the linfs thickness commit (a no-op for which_ale=
     ! 'linfs'). Both join the faithful oce_timestep sequence assembled in mod_step_oce.
     public :: compute_vel_nodes, update_thickness_ale
+    ! The vertical-CFL / w-split pair at the end of vert_vel_ale, exported for
+    ! test/test_wsplit.F90 (parts S and X drive them on prescribed w).
+    public :: compute_CFLz, compute_Wvel_split
 
 contains
 
@@ -484,21 +488,44 @@ contains
 
     !===========================================================================
     subroutine compute_Wvel_split(dynamics, mesh, partit)
-        ! FESOM2 oce_ale.F90:3217-3265. Split Wvel into explicit (Wvel_e) and implicit
-        ! (Wvel_i) parts according to the vertical CFL, so the explicit part is capped at
-        ! wsplit_maxcfl. use_wsplit=.true. + wsplit_maxcfl=1.0 on pi. OVERWRITES dynamics%
-        ! w_e/w_i (the same arrays prescribed as M2.4/M2.5 inputs — fully consumed before
-        ! this runs; in the real timestep they feed the NEXT step's momadv/ivertvisc).
-        ! M2.12c-3: optional partit -> the FESOM2 owned+HALO node loop (:3251 do node=1,
-        ! myDim_nod2D+eDim_nod2D); Wvel/CFL_z are halo-valid so Wvel_e/Wvel_i are produced
-        ! at owned+halo with no trailing exchange (matches FESOM2).
+        ! Split Wvel into the explicitly (Wvel_e) and implicitly (Wvel_i) advected parts,
+        ! w = w_e + w_i, face by face as a function of the vertical Courant number CFL_z
+        ! (compute_CFLz: the face flux counted against BOTH adjacent cells, FESOM2's
+        ! definition, unchanged). Consumers: the momentum TDMA (w_i), momentum advection
+        ! (w_e), the tracer vertical-diffusion TDMA (do_wimpl, w_i) and the FCT
+        ! adv_tra_vert_impl (w_i); they read Wvel_e/Wvel_i at owned+halo on the NEXT step.
+        !
+        ! WHY NOT FESOM2's FORM. FESOM2 (oce_ale.F90:3217-3265) uses a hard switch:
+        !     CFL_z <= C : w_e = w        CFL_z > C : w_e = w*C/CFL_z   (C = wsplit_maxcfl)
+        ! so d(w_e)/d(CFL_z) jumps from 1 to 0 at C and a face oscillating around the
+        ! threshold flips between high-order explicit and partly first-order implicit
+        ! treatment (a first-order kink of the tracer tendency on the non-FCT path, where
+        ! QR4C and the upwind TDMA differ at first order; measured as a derivative jump
+        ! J = cq*h^2*(1+C)/2 per unit Courant number in test_wsplit X2). FESOM3 replaces it
+        ! by the C^1 limiting function of Shchepetkin (2015, Ocean Modelling 91, Sec. 3.1 /
+        ! Fig. 9; NEMO wAimp), oce_wsplit::wsplit_implicit_fraction: the implicit share f is
+        ! 0 up to wsplit_mincfl, bends smoothly, and from Cu_cut = 2*maxcfl - mincfl on caps
+        ! the explicit CFL_z EXACTLY at wsplit_maxcfl -- FESOM2's cap, reached without the
+        ! kink, so wsplit_maxcfl keeps its FESOM2 meaning. There is no hard-switch mode
+        ! (decision 2026-10-02, docs/plans/2026-10-02-wsplit-smooth.md): mincfl = maxcfl IS
+        ! the hard switch in exact arithmetic and serves only as a test control.
+        !
+        ! w_e = w - w_i (not a second product) makes w_e + w_i == w to 1 ulp, bitwise when
+        ! |w_i| >= |w|/2 (Sterbenz); no consumer needs more. use_wsplit=.false. is literally
+        ! the previous off path: w_e = w, w_i = +0 over the same face range.
+        ! OVERWRITES dynamics%w_e/w_i (the same arrays prescribed as M2.4/M2.5 inputs — fully
+        ! consumed before this runs). M2.12c-3: optional partit -> the FESOM2 owned+HALO node
+        ! loop (:3251 do node=1, myDim_nod2D+eDim_nod2D); Wvel/CFL_z are halo-valid so
+        ! Wvel_e/Wvel_i are produced at owned+halo with no trailing exchange (matches
+        ! FESOM2). Pinned by test/test_wsplit.F90 part S (the identities above on every
+        ! owned+halo face) and part X (transition smoothness on the tracer path).
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
         type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         integer       :: node, nz, nzmin, nzmax
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: dd
+        real(kind=WP) :: f
         real(kind=WP), dimension(:,:), pointer :: Wvel, Wvel_e, Wvel_i, CFL_z
 
         Wvel   => dynamics%w
@@ -507,17 +534,25 @@ contains
         CFL_z  => dynamics%cfl_z
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
+        if (.not. dynamics%use_wsplit) then
+            do node = 1, nNodL
+                nzmin = mesh%ulevels_nod2D(node)
+                nzmax = mesh%nlevels_nod2D(node)
+                do nz = nzmin, nzmax
+                    Wvel_e(nz, node) = Wvel(nz, node)
+                    Wvel_i(nz, node) = 0.0_WP
+                end do
+            end do
+            return
+        end if
+
         do node = 1, nNodL
             nzmin = mesh%ulevels_nod2D(node)
             nzmax = mesh%nlevels_nod2D(node)
             do nz = nzmin, nzmax
-                Wvel_e(nz, node) = Wvel(nz, node)
-                Wvel_i(nz, node) = 0.0_WP
-                if (dynamics%use_wsplit .and. (CFL_z(nz, node) > dynamics%wsplit_maxcfl)) then
-                    dd = max((CFL_z(nz, node)-dynamics%wsplit_maxcfl), 0.0_WP)/max(dynamics%wsplit_maxcfl, 1.e-12_WP)
-                    Wvel_e(nz, node) = (1.0_WP/(1.0_WP+dd))*Wvel(nz, node)   ! explicit (=1 if dd=0)
-                    Wvel_i(nz, node) = (dd    /(1.0_WP+dd))*Wvel(nz, node)   ! implicit (=1 if dd=inf)
-                end if
+                f = wsplit_implicit_fraction(CFL_z(nz, node), dynamics%wsplit_mincfl, dynamics%wsplit_maxcfl)
+                Wvel_i(nz, node) = f*Wvel(nz, node)
+                Wvel_e(nz, node) = Wvel(nz, node) - Wvel_i(nz, node)
             end do
         end do
     end subroutine compute_Wvel_split

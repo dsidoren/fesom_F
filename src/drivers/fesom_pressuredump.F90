@@ -498,7 +498,11 @@ program fesom_pressuredump
     ! solve. Build the ALE thickness state the update reads/writes: mesh%hbar (prescribed,
     ! the previous-step elevation), hbar_old/dhe (outputs), hnode_new=hnode (linfs never
     ! evolves it), and dyn%w/cfl_z. Force the pi wsplit config (use_wsplit=.true.,
-    ! wsplit_maxcfl=1.0). alpha=theta=1.0 already set above. The chain is, in order:
+    ! wsplit_maxcfl=1.0; wsplit_mincfl at its type default 0.5). The split is FESOM3's
+    ! smooth Shchepetkin function (oce_wsplit), NOT FESOM2's hard switch, so w_split_e/
+    ! w_split_i below are diagnostics and no longer byte-comparable (pressure_diff.py skips
+    ! them; the FESOM2 byte-gates are retired since bottom-at-vertices anyway).
+    ! alpha=theta=1.0 already set above. The chain is, in order:
     !   update_vel (UV += UV_rhs + SSH-grad) -> compute_hbar_ale (hbar/dhe/ssh_rhs_old)
     !   -> update_eta_n (eta_n=hbar) -> vert_vel_ale (w + cfl_z + Wvel split). dyn%uv_rhs
     ! is the post-TDMA uv_rhs_ivv; dyn%uv is the prescribed UV (update_vel overwrites it).
@@ -511,7 +515,7 @@ program fesom_pressuredump
     dyn%w          = 0.0_WP
     dyn%cfl_z      = 0.0_WP
     dyn%use_wsplit    = .true.             ! pi production value (namelist.dyn)
-    dyn%wsplit_maxcfl = 1.0_WP
+    dyn%wsplit_maxcfl = 1.0_WP             ! the explicit CFL_z cap; wsplit_mincfl = 0.5 (type default)
 
     ! analytic previous-step elevation hbar (sign-varying, ~0.6 m). MUST match the oracle.
     do n = 1, mesh%nod2D
@@ -560,19 +564,19 @@ program fesom_pressuredump
     call vert_vel_ale(dyn, mesh, dt_velrhs)         ! w + cfl_z + w_e/w_i split + (Fer_GM) fer_w
     Fer_GM = .false.; Redi = .false.   ! restore reduced-M2 for the downstream M2.8/M2.9 step
 
-    ! gate-strength diagnostic (NOT dumped): the Wvel split fires only where CFL_z >
-    ! wsplit_maxcfl. A non-zero share confirms the split formula (dd, Wvel_e/Wvel_i) is
-    ! genuinely exercised (not just the trivial Wvel_e=Wvel branch), the L11/L17 guard.
+    ! gate-strength diagnostic (NOT dumped): the smooth Wvel split fires (w_i /= 0) only
+    ! where CFL_z > wsplit_mincfl. A non-zero count confirms the split function is genuinely
+    ! exercised (not just the trivial w_e=w, w_i=0 range), the L11/L17 guard.
     n_cflsplit = 0
     do n = 1, mesh%nod2D
         do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)
-            if (dyn%cfl_z(nz,n) > dyn%wsplit_maxcfl) n_cflsplit = n_cflsplit + 1
+            if (dyn%w_i(nz,n) /= 0.0_WP) n_cflsplit = n_cflsplit + 1
         end do
     end do
     write(*,'(a,es10.3,a,es10.3,a,es10.3,a,i0)') &
         'fesom_pressuredump: ale: max|uv_upd|=', maxval(abs(uv_upd)), &
         ' ; max|hbar|=', maxval(abs(mesh%hbar)), ' ; max|w|=', maxval(abs(dyn%w)), &
-        ' ; CFL_z>maxcfl on ', n_cflsplit
+        ' ; w_i/=0 (split faces) on ', n_cflsplit
 
     ! ============== M2.8 PP (Pacanowski-Philander) vertical mixing ====================
     ! The Richardson-number mixing coefficients (FESOM2 oce_ale.F90:3728 -> oce_mixing_PP),
@@ -927,7 +931,9 @@ program fesom_pressuredump
     ! M2.7 ALE velocity/SSH/thickness-W update: the prescribed hbar input + the updated
     ! UV (update_vel) + the divergence ssh_rhs_old + new hbar/dhe (compute_hbar_ale) + the
     ! blended eta_n + the vertical velocity w (vert_vel_ale) + hnode_new (=hnode, linfs) +
-    ! cfl_z (compute_CFLz) + the explicit/implicit Wvel split (compute_Wvel_split).
+    ! cfl_z (compute_CFLz) + the explicit/implicit Wvel split (compute_Wvel_split; the
+    ! smooth FESOM3 split, so w_split_e/w_split_i are diagnostics only -- skipped by
+    ! pressure_diff.py, never byte-compared against FESOM2's hard split).
     call wr_r1(u, 'hbar_in',        real(hbar_in,          MP))
     call wr_r3(u, 'uv_upd',         real(uv_upd,           MP))
     call wr_r1(u, 'ssh_rhs_old',    real(dyn%ssh_rhs_old,  MP))
