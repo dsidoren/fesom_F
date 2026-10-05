@@ -176,7 +176,9 @@ the implicit donors' `T^{n+1}` (weights `(h − v·out_e)`, `v·in_e`, `v·in_i`
 explicit surface flux `−w·T·area` of `adv_tra_ver_upw1` (L57 form consistency). FESOM2
 computes `zbar_n/Z_n` here but never uses them — dropped. Columns with fewer than 2 layers
 are not supported by the row layout (same trap as `adv_tra_ver_upw1`, documented there):
-guard with `error stop` (pi minimum is 4 layers). The driver branch becomes FESOM2's:
+a PRECONDITION stated in the kernel header and asserted once at setup by `read_mesh`
+(`assert_min_layers`; review round 2 — the kernel validates nothing; pi minimum is 4
+layers). The driver branch becomes FESOM2's:
 `call adv_tra_vert_impl(dt, wi, fct_LO, mesh, partit)` then
 `call adv_tra_ver_upw1(w, ttf, mesh, adv_flux_ver, o_init_zero=.true., partit=partit)`
 with the FULL `w` (`pwvel => w` for FCT is already in place). Local `a,b,c,tr,cp,tp` are
@@ -548,6 +550,38 @@ Acceptance (Overview requirements against the code, 2026-10-02):
   consumer timing (tracers same step owned; momentum next step at owned elements' halo
   vertices), GM `fer_w` comment, HANDOFF/LESSONS breakpoint wording, all plan citations
   on the `docs/plans/completed/` path
+
+### Review fixes, round 2 (2026-10-05, style/convention pass)
+
+- [x] validation moved to SETUP, kernels stateless (house convention: `error stop` in
+  `src/oce` is config-time only; mesh invariants are walked once in `mod_mesh_read`):
+  `oce_wsplit::wsplit_assert_params(mincfl, maxcfl)` is the one call every driver that
+  enables `use_wsplit` makes (obligation documented in `t_dyn`; `fesom_conserve`,
+  `fesom_lifecycle_native_mr`, now also `fesom_pressuredump`); the ≥ 2-layer column
+  requirement is `mod_mesh_read::assert_min_layers`, called by `derive_vertical_bounds`
+  on every mesh path with a collective integer verdict (`mod_halo` gained
+  `allreduce_sum_i0`); `compute_Wvel_split` lost its per-call pair check, the `save`
+  flag and the real-valued count, `adv_tra_vert_impl` its per-column `error stop` — both
+  headers state the preconditions like `adv_tra_ver_upw1`
+- [x] `test_wimpl_tra_onelayer_np1` (hidden env-var mode + raw `add_test`) replaced by
+  `test/test_minlayers.F90` via `add_fesom_test` (pi passes, one column shrunk to one
+  layer → the walk must stop with "fewer than 2 layers")
+- [x] guard ctests keep the PASS-regex (right reason) + FAIL-regex (did not continue) pair:
+  `WILL_FAIL` cannot make the exit code load-bearing alongside a regex — CMake inverts
+  the verdict AFTER the regexes, so `WILL_FAIL` + a FAIL regex PASSES a driver that
+  prints the drift line and exits 0 (verified with CMake 3.26); the vacuous test's banner
+  regex no longer counts `f8.4` blanks
+- [x] naming/style: `use_wsplit` (not `_env`) for the presence toggle in both drivers, one
+  banner shape `'<driver>: … ENABLED (use_wsplit; wsplit_mincfl=…, wsplit_maxcfl=…)'`,
+  named statistics counters `n_split/n_capped/n_half` reduced with `allreduce_sum`,
+  `n_split_faces` in `fesom_pressuredump`, `0.0_WP` throughout `adv_tra_vert_impl`,
+  `partit=partit` keyword in the driver call, the header table of `fesom_conserve`
+  re-aligned, `kprobe` / `layer_kind` / `mod_constants::pi` / named selector thresholds /
+  `ctl_margin` in the tests, C1/C5 assert the `hnode_new > 0` precondition
+- [x] the gate triple is hoisted once per file (`WSPLIT_CFG` in `run_conserve_pi.sh`,
+  `_wsplit_cfg` in `test/CMakeLists.txt`); plan citations use the CURRENT path (the
+  final move commit updates them); `run_conserve_pi.sh` cites the moved
+  bottom-at-vertices plan at `completed/`
 
 ## Post-Completion
 

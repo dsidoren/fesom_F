@@ -36,9 +36,9 @@ module oce_ale
     use mod_dyn,        only: t_dyn
     use mod_partit,     only: t_partit
     use mod_part_bounds, only: owned_bounds, is_multirank
-    use mod_halo,       only: exchange_nod, exchange_elem, exchange_elem_full, allreduce_max
+    use mod_halo,       only: exchange_nod, exchange_elem, exchange_elem_full
     use mod_config,     only: which_ALE          ! M6 ALE: 'linfs'/'zlevel'/'zstar'
-    use oce_wsplit,     only: wsplit_implicit_fraction, wsplit_check_params   ! the C^1 w_e/w_i split function
+    use oce_wsplit,     only: wsplit_implicit_fraction   ! the C^1 w_e/w_i split function
     implicit none
     private
     public :: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
@@ -516,25 +516,20 @@ contains
         ! (the identities above on every owned+halo face) and part X (transition
         ! smoothness on the tracer path).
         !
-        ! ON-PATH VALIDATION. (1) The pair (wsplit_mincfl, wsplit_maxcfl) is checked on
-        ! every call (three comparisons, identical on all ranks): the t_dyn default
-        ! mincfl = 0.5 is an ABSOLUTE number, so a driver/namelist that lowers maxcfl
-        ! below it without touching mincfl would otherwise run an inadmissible pair in
-        ! silence -- for (0.5, 0.3) Cu_cut = 0.1 < mincfl and f jumps from 0 to 0.4 at
-        ! CFL_z = 0.5, the discontinuity this function exists to remove. (2) Once, on the
-        ! first split step, every owned column must have >= 2 layers (the row layout of
-        ! the implicit consumers adv_tra_vert_impl / do_wimpl), with a COLLECTIVE verdict
-        ! so all ranks stop together instead of one rank error-stopping inside a per-step
-        ! loop while the others proceed to the next exchange.
+        ! PRECONDITIONS, validated at SETUP and assumed here (stateless kernel, like the
+        ! rest of src/oce): (wsplit_mincfl, wsplit_maxcfl) admissible -- the driver that
+        ! enables use_wsplit called wsplit_assert_params once (the t_dyn default mincfl =
+        ! 0.5 is an ABSOLUTE number, so a driver that lowers maxcfl must set mincfl too);
+        ! every owned column has >= 2 layers, the row layout of the implicit consumers
+        ! adv_tra_vert_impl / do_wimpl (read_mesh's assert_min_layers).
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
         type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         integer       :: node, nz, nzmin, nzmax
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: f, nbad
+        real(kind=WP) :: f
         real(kind=WP), dimension(:,:), pointer :: Wvel, Wvel_e, Wvel_i, CFL_z
-        logical, save :: columns_checked = .false.
 
         Wvel   => dynamics%w
         Wvel_e => dynamics%w_e
@@ -552,19 +547,6 @@ contains
                 end do
             end do
             return
-        end if
-
-        if (.not. wsplit_check_params(dynamics%wsplit_mincfl, dynamics%wsplit_maxcfl)) &
-            error stop 'compute_Wvel_split: inadmissible (wsplit_mincfl, wsplit_maxcfl): need maxcfl > 0 and 0 <= mincfl <= maxcfl'
-        if (.not. columns_checked) then
-            nbad = 0.0_WP
-            do node = 1, nNodO
-                if (mesh%nlevels_nod2D(node) - mesh%ulevels_nod2D(node) < 2) nbad = nbad + 1.0_WP
-            end do
-            if (is_multirank(partit)) call allreduce_max(nbad, partit)
-            if (nbad > 0.0_WP) &
-                error stop 'compute_Wvel_split: an owned column with fewer than 2 layers (the implicit w_i consumers need 2)'
-            columns_checked = .true.
         end if
 
         do node = 1, nNodL

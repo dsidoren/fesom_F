@@ -22,6 +22,7 @@ program fesom_pressuredump
     use mod_mesh_read,    only: read_mesh
     use mod_mesh_areas,   only: compute_geometry
     use mod_dyn,          only: t_dyn
+    use oce_wsplit,       only: wsplit_assert_params
     use oce_pressure_bv,  only: pressure_bv, sw_alpha_beta, compute_sigma_xy, compute_neutral_slope
     use oce_fer_gm,       only: init_Redi_GM, fer_solve_Gamma, fer_gamma2vel
     use mod_param_phys,   only: K_GM_max, K_GM_min, K_GM_bvref, K_GM_rampmax, K_GM_rampmin, &
@@ -101,7 +102,7 @@ program fesom_pressuredump
     ! INPUT dump records still echo the prescription, not the M2.7 output.
     real(kind=WP), allocatable :: hbar_in(:), eta_n_in(:), w_e_in(:,:), w_i_in(:,:)
     real(kind=WP), allocatable :: uv_upd(:,:,:)
-    integer       :: n_cflsplit
+    integer       :: n_split_faces
     ! --- M2.8 PP vertical mixing (oce_mixing_pp -> Kv nodes / Av elements) ---
     real(kind=WP) :: shear, dz_inv, factor, fmin, fmax
     integer       :: nf, nf_big
@@ -518,6 +519,7 @@ program fesom_pressuredump
     dyn%cfl_z      = 0.0_WP
     dyn%use_wsplit    = .true.             ! pi production value (namelist.dyn)
     dyn%wsplit_maxcfl = 1.0_WP             ! the explicit CFL_z cap; wsplit_mincfl = 0.5 (type default)
+    call wsplit_assert_params(dyn%wsplit_mincfl, dyn%wsplit_maxcfl)   ! the t_dyn obligation
 
     ! analytic previous-step elevation hbar (sign-varying, ~0.6 m). MUST match the oracle.
     do n = 1, mesh%nod2D
@@ -569,16 +571,16 @@ program fesom_pressuredump
     ! gate-strength diagnostic (NOT dumped): the smooth Wvel split fires (w_i /= 0) only
     ! where CFL_z > wsplit_mincfl. A non-zero count confirms the split function is genuinely
     ! exercised (not just the trivial w_e=w, w_i=0 range), the L11/L17 guard.
-    n_cflsplit = 0
+    n_split_faces = 0
     do n = 1, mesh%nod2D
         do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)
-            if (dyn%w_i(nz,n) /= 0.0_WP) n_cflsplit = n_cflsplit + 1
+            if (dyn%w_i(nz,n) /= 0.0_WP) n_split_faces = n_split_faces + 1
         end do
     end do
     write(*,'(a,es10.3,a,es10.3,a,es10.3,a,i0)') &
         'fesom_pressuredump: ale: max|uv_upd|=', maxval(abs(uv_upd)), &
         ' ; max|hbar|=', maxval(abs(mesh%hbar)), ' ; max|w|=', maxval(abs(dyn%w)), &
-        ' ; w_i/=0 (split faces) on ', n_cflsplit
+        ' ; w_i/=0 (split faces) on ', n_split_faces
 
     ! ============== M2.8 PP (Pacanowski-Philander) vertical mixing ====================
     ! The Richardson-number mixing coefficients (FESOM2 oce_ale.F90:3728 -> oce_mixing_PP),

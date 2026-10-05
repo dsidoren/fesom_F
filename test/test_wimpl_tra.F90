@@ -3,7 +3,7 @@ program test_wimpl_tra
     ! w_i of the split vertical velocity (adv_tra_vert_impl, src/oce/oce_adv_tra_ver.F90,
     ! the port of FESOM2 oce_adv_tra_ver.F90:90-240) and its assembly in do_oce_adv_tra
     ! (src/oce/oce_adv_tra_driver.F90, FESOM2 oce_adv_tra_driver.F90:282-292).
-    ! docs/plans/completed/2026-10-02-wsplit-smooth.md, Task 3.
+    ! docs/plans/2026-10-02-wsplit-smooth.md, Task 3.
     !
     ! WHY THIS TEST EXISTS
     ! --------------------
@@ -108,17 +108,19 @@ program test_wimpl_tra
     ! SYNTHESISED COLUMNS (synth_columns; by the GLOBAL node index so np 1/2 agree). pi has
     ! ulevels_nod2D = 1 everywhere and at least 4 layers, so the nzmin-based row layout of
     ! adv_tra_vert_impl and of compute_CFLz / compute_Wvel_split would otherwise be tested
-    ! at nzmin = 1 only, and the 2-layer column the kernel's guard admits (empty interior
-    ! loop; surface row nzmin, bottom row nzmin+1) never. Every 10th global node with
-    ! >= 14 levels gets ulevels_nod2D = 3 (cavity), every 97th with >= 5 levels gets
-    ! nlevels_nod2D = ulevels + 2 (2 layers); C1-C5 run on the mix (C5 skips columns with
-    ! fewer than 3 layers: its single interior face is nzmin+2). The originals are restored
-    ! before C6: the driver's FCT limiter builds its clusters from ulevels(elem), which the
-    ! node-only synthesis would leave inconsistent. The 1-layer guard itself is tripped by
-    ! ctest test_wimpl_tra_onelayer_np1 (FESOM3_TEST_WIMPL_ONELAYER=1: one owned column
-    ! shrunk to a single layer, the kernel must error stop 'fewer than 2 layers').
+    ! at nzmin = 1 only, and the 2-layer column the row layout admits as its minimum (empty
+    ! interior loop; surface row nzmin, bottom row nzmin+1) never. Every 10th global node
+    ! with >= 14 levels gets ulevels_nod2D = 3 (cavity), every 97th with >= 5 levels gets
+    ! nlevels_nod2D = ulevels + 2 (2 layers; the selector constants are named at
+    ! synth_columns); C1-C5 run on the mix (C5 skips columns with fewer than 3 layers: its
+    ! single interior face is nzmin+2). The originals are restored before C6: the driver's
+    ! FCT limiter builds its clusters from ulevels(elem), which the node-only synthesis
+    ! would leave inconsistent. Columns with fewer than 2 layers are refused at SETUP by
+    ! read_mesh (assert_min_layers, ctest test_minlayers), not by the kernel, which is
+    ! stateless and validates nothing.
     use mpi
     use mod_precision,      only: WP, MP
+    use mod_constants,      only: pi
     use mod_mesh,           only: t_mesh
     use mod_dyn,            only: t_dyn
     use mod_tracer,         only: t_tracer
@@ -136,19 +138,19 @@ program test_wimpl_tra
     implicit none
 
     character(len=512) :: mesh_dir
-    character(len=64)  :: env
     type(t_partit) :: partit
     type(t_mesh)   :: mesh
     type(t_dyn)    :: dyn
     type(t_tracer) :: tracers
-    integer :: nfail, nsw, env_len, ios
+    integer :: nfail, nsw
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF, nl
     integer, allocatable :: ulev0(:), nlev0(:)      ! the mesh's own ulevels/nlevels (restored for C6)
     real(kind=WP), parameter :: dt   = 1800.0_WP     ! s
     real(kind=WP), parameter :: h0   = 10.0_WP       ! reference layer thickness [m]
     real(kind=WP), parameter :: t0   = 10.0_WP
     real(kind=WP), parameter :: thin = 0.08_WP       ! C4: thin cell = thin*h0
-    real(kind=WP), parameter :: pi   = acos(-1.0_WP)
+    real(kind=WP), parameter :: ctl_margin = 1.0e3_WP ! C6 (iii): the wrong assembly must differ by > ctl_margin*tol
+                                                     ! (measured 29.9/58.8 K m for w > 0, 3.9/1.4 for w < 0, tol 1e-11)
     integer,       parameter :: nsplit = 3
     real(kind=WP), parameter :: smin(nsplit) = [0.5_WP, 0.0_WP, 0.9_WP]
     real(kind=WP), parameter :: smax(nsplit) = [1.0_WP, 1.0_WP, 1.0_WP]
@@ -182,8 +184,6 @@ program test_wimpl_tra
     flux_v = 0.0_WP; flux_h = 0.0_WP; dttf_h = 0.0_WP; dttf_v = 0.0_WP
 
     call synth_columns()
-    call get_environment_variable('FESOM3_TEST_WIMPL_ONELAYER', env, length=env_len, status=ios)
-    if (ios == 0 .and. env_len > 0) call onelayer_mode()
 
     call part_c1()
     call part_c2_c3()
@@ -259,9 +259,16 @@ contains
     end function gall
 
     !=========================================================================
-    ! Synthesised columns (header) and the one-layer ctest mode
+    ! Synthesised columns (header)
     !=========================================================================
     subroutine synth_columns()
+        ! Selectors (by the global node index g): the cavity set is test_wsplit's
+        ! synth_cavity set (same constants), so the two tests exercise the same columns.
+        integer, parameter :: cav_every = 10       ! every 10th global node ...
+        integer, parameter :: cav_nlev_min = 14    ! ... with >= 14 levels keeps >= 11 layers below the cavity surface
+        integer, parameter :: cav_ulev = 3         ! the cavity surface level (nzmin = 3)
+        integer, parameter :: two_every = 97       ! every 97th global node (not a cavity one) ...
+        integer, parameter :: two_nlev_min = 5     ! ... with >= 4 layers (pi's minimum), so the cut only ever shrinks
         integer :: n, g, ncav, n2
         allocate(ulev0(nNodL), nlev0(nNodL))
         ulev0 = mesh%ulevels_nod2D(1:nNodL)
@@ -270,10 +277,10 @@ contains
         do n = 1, nNodL
             g = n
             if (partit%npes > 1) g = partit%myList_nod2D(n)
-            if (mod(g, 10) == 0 .and. mesh%nlevels_nod2D(n) >= 14) then
-                mesh%ulevels_nod2D(n) = 3
+            if (mod(g, cav_every) == 0 .and. mesh%nlevels_nod2D(n) >= cav_nlev_min) then
+                mesh%ulevels_nod2D(n) = cav_ulev
                 if (n <= nNodO) ncav = ncav + 1
-            else if (mod(g, 97) == 0 .and. mesh%nlevels_nod2D(n) >= 5) then
+            else if (mod(g, two_every) == 0 .and. mesh%nlevels_nod2D(n) >= two_nlev_min) then
                 mesh%nlevels_nod2D(n) = mesh%ulevels_nod2D(n) + 2
                 if (n <= nNodO) n2 = n2 + 1
             end if
@@ -285,32 +292,16 @@ contains
         call check_true('2-layer columns synthesised (nlevels_nod2D = ulevels + 2)', n2 > 0)
     end subroutine synth_columns
 
-    subroutine onelayer_mode()
-        ! ctest test_wimpl_tra_onelayer_np1: the first owned column shrunk to ONE layer, the
-        ! kernel called directly -- it must error stop 'adv_tra_vert_impl: a column with
-        ! fewer than 2 layers' (PASS_REGULAR_EXPRESSION). Reaching the write below is the
-        ! failure (the message then never appears).
-        mesh%nlevels_nod2D(1) = mesh%ulevels_nod2D(1) + 1
-        call build_layers(2)
-        tin = t0
-        dyn%w_i = 0.0_WP
-        call adv_tra_vert_impl(dt, dyn%w_i, tin, mesh, partit)
-        if (partit%mype == 0) write(*,'(a)') &
-            'test_wimpl_tra: ONELAYER mode: adv_tra_vert_impl did NOT stop on a 1-layer column'
-        call par_ex(partit%MPI_COMM_FESOM, partit%mype)
-        error stop 1
-    end subroutine onelayer_mode
-
     !=========================================================================
     ! State builders
     !=========================================================================
-    subroutine build_layers(kind)
+    subroutine build_layers(layer_kind)
         ! Prescribed layer thickness hnode at owned+halo nodes, with zbar_3d_n/Z_3d_n
         ! consistent with it (QR4C reads them); hnode_new = hnode until hnew_from_w.
-        !   kind 1: non-uniform h = h0*(1 + 0.25*cos(nz)) in [0.75, 1.25]*h0
-        !   kind 2: uniform h0
-        !   kind 3: uniform h0 with one thin cell thin*h0 at nzmin+2 (C4)
-        integer, intent(in) :: kind
+        !   layer_kind 1: non-uniform h = h0*(1 + 0.25*cos(nz)) in [0.75, 1.25]*h0
+        !   layer_kind 2: uniform h0
+        !   layer_kind 3: uniform h0 with one thin cell thin*h0 at nzmin+2 (C4)
+        integer, intent(in) :: layer_kind
         integer :: n, nz, nzmin, nzmax
         real(kind=WP) :: h, zb
         mesh%hnode = 0.0_MP; mesh%zbar_3d_n = 0.0_MP; mesh%Z_3d_n = 0.0_MP
@@ -320,7 +311,7 @@ contains
             zb = 0.0_WP
             mesh%zbar_3d_n(nzmin, n) = real(zb, MP)
             do nz = nzmin, nzmax - 1
-                select case (kind)
+                select case (layer_kind)
                 case (1)
                     h = h0*(1.0_WP + 0.25_WP*cos(real(nz, WP)))
                 case (2)
@@ -450,6 +441,7 @@ contains
         call build_layers(1)
         call w_divergent(1.0_WP, 0.3_WP)
         rmin = hnew_from_w()                  ! hnode_new /= hnode, w_i = 0
+        call check_true('C1 precondition hnode_new > 0', rmin > 0.0_WP)
         call profile_b(tin)
         tnew  = tin
         dyn%w_i = 0.0_WP
@@ -661,6 +653,7 @@ contains
                 dyn%w(mesh%ulevels_nod2D(n) + 2, n) = w0
             end do
             rmin = hnew_from_w()
+            call check_true('C5 precondition hnode_new > 0 '//stag, rmin > 0.0_WP)
             call profile_b(tin)
             tmax = gmax(maxval(abs(tin(:, 1:nNodO))))
 
@@ -899,7 +892,7 @@ contains
                 call check_true('C6 (ii) driver del_ttf_advvert == test assembly (limiter included) '//wtag//' '//stag, &
                                 err_v <= tol)
                 call check_true('C6 (iii) positive control: HO(w) - LO(w_e) differs by more than the tolerance '//wtag//' '//stag, &
-                                dmax > 1.0e3_WP*tol)
+                                dmax > ctl_margin*tol)
                 if (upward) then
                     call check_true('C6 (iii) positive control: the difference == the double-counted w_i transport '//wtag//' '//stag, &
                                     err_w <= 1.0e-12_WP*pmax)

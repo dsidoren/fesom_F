@@ -185,11 +185,10 @@ contains
         ! the combined step (test_wimpl_tra C4 asserts the precondition and the bound).
         ! FESOM2 also rebuilds zbar_n/Z_n (:142-150) but never uses them -- dropped.
         !
-        ! The row layout needs at least 2 layers (surface row nzmin, bottom row nzmax-1;
-        ! with one layer they are the same row -- the 1-layer trap adv_tra_ver_upw1's
-        ! module header notes). compute_Wvel_split validates this once, collectively, on
-        ! the first split step; the error stop below is the kernel's own cheap assertion
-        ! for callers that bypass it (ctest test_wimpl_tra_onelayer_np1 trips it).
+        ! PRECONDITION (not checked here, like the 1-layer trap the module header notes
+        ! for adv_tra_ver_upw1): every owned column has at least 2 layers -- the surface
+        ! row nzmin and the bottom row nzmax-1 would be the same row with one. read_mesh
+        ! asserts it once at setup (assert_min_layers, test_minlayers trips it).
         ! M2.12c: OWNED node loop (FESOM2 :120 do n=1,myDim_nod2D); the TDMA is per column
         ! (no halo coupling); the driver's exchange_nod(fct_LO) follows.
         real(kind=WP), intent(in)    :: dt
@@ -206,24 +205,23 @@ contains
         do n = 1, nNodO
             nzmax = mesh%nlevels_nod2D(n)
             nzmin = mesh%ulevels_nod2D(n)
-            if (nzmax - nzmin < 2) error stop 'adv_tra_vert_impl: a column with fewer than 2 layers'
             v = dt*mesh%area(n)/mesh%areasvol(n)
 
             ! coefficients: surface layer
             nz = nzmin
             a(nz) = 0.0_WP
-            b(nz) = mesh%hnode_new(nz,n) + w(nz,n)*v - min(0._WP, w(nz+1,n))*v
-            c(nz) =                                  - max(0._WP, w(nz+1,n))*v
+            b(nz) = mesh%hnode_new(nz,n) + w(nz,n)*v - min(0.0_WP, w(nz+1,n))*v
+            c(nz) =                                  - max(0.0_WP, w(nz+1,n))*v
             ! interior layers
             do nz = nzmin+1, nzmax-2
-                a(nz) =                        min(0._WP, w(nz,n))*v
-                b(nz) = mesh%hnode_new(nz,n) + max(0._WP, w(nz,n))*v - min(0._WP, w(nz+1,n))*v
-                c(nz) =                                              - max(0._WP, w(nz+1,n))*v
+                a(nz) =                        min(0.0_WP, w(nz,n))*v
+                b(nz) = mesh%hnode_new(nz,n) + max(0.0_WP, w(nz,n))*v - min(0.0_WP, w(nz+1,n))*v
+                c(nz) =                                              - max(0.0_WP, w(nz+1,n))*v
             end do
             ! bottom layer: zero bottom flux
             nz = nzmax-1
-            a(nz) =                        min(0._WP, w(nz,n))*v
-            b(nz) = mesh%hnode_new(nz,n) + max(0._WP, w(nz,n))*v
+            a(nz) =                        min(0.0_WP, w(nz,n))*v
+            b(nz) = mesh%hnode_new(nz,n) + max(0.0_WP, w(nz,n))*v
             c(nz) = 0.0_WP
 
             ! rhs = -(M - h')*T, the explicit upwind flux divergence of the current T

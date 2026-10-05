@@ -28,8 +28,9 @@ module mod_halo
     ! same reduction tree => byte-identical given byte-identical per-rank partial sums
     ! (the same determinism FESOM2 relies on, LESSONS L6). Guard callers with
     ! is_multirank — at npes==1 the local sum already IS the global sum (identity).
+    ! The integer variant sums COUNTS (mesh invariants, split statistics): exact.
     interface allreduce_sum
-        module procedure allreduce_sum_r0, allreduce_sum_r1
+        module procedure allreduce_sum_r0, allreduce_sum_r1, allreduce_sum_i0
     end interface
 
     ! Cross-rank floating-point MAX reduction. Mirrors the FESOM2 extrap_nod3D /
@@ -156,6 +157,14 @@ contains
         call MPI_Allreduce(MPI_IN_PLACE, s, size(s), MPI_WP, MPI_SUM, &
                            partit%MPI_COMM_FESOM, ierr)
     end subroutine allreduce_sum_r1
+
+    subroutine allreduce_sum_i0(s, partit)
+        integer,        intent(inout) :: s
+        type(t_partit), intent(in)    :: partit
+        integer :: ierr
+        call MPI_Allreduce(MPI_IN_PLACE, s, 1, MPI_INTEGER, MPI_SUM, &
+                           partit%MPI_COMM_FESOM, ierr)
+    end subroutine allreduce_sum_i0
 
     subroutine allreduce_max_r0(s, partit)
         real(kind=WP),  intent(inout) :: s

@@ -2462,7 +2462,7 @@ vertical Courant cap to the implicit upwind solves (momentum TDMA, tracer-diffus
 FCT `adv_tra_vert_impl`). FESOM2's split is a hard switch (`w_e = w·C/CFL_z` above
 `C = wsplit_maxcfl`): `d(w_e)/d(CFL_z)` jumps from 1 to 0 at `C`, so a face oscillating
 around the threshold flips between high-order explicit and partly first-order implicit
-treatment. The port (`docs/plans/completed/2026-10-02-wsplit-smooth.md`, commits
+treatment. The port (`docs/plans/2026-10-02-wsplit-smooth.md`, commits
 431e3e7..bf73965) replaced it by Shchepetkin's (2015, Ocean Modelling 91, Sec. 3.1) C¹
 limiting function `oce_wsplit::wsplit_implicit_fraction(Cu, Cu_min, Cu_max)` — `f = 0`
 below `Cu_min`, the bend `x²/(F + x²)` with `x = Cu − Cu_min`, `F = 4·Cu_max·(Cu_max −

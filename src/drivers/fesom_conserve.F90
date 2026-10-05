@@ -35,13 +35,10 @@ program fesom_conserve
     !   FESOM3_NSTEPS      number of steps                     default: 3
     !   FESOM3_WHICH_ALE   linfs | zlevel | zstar              default: linfs
     !   FESOM3_CONSERVE_TOL  max |relative drift| before error stop; unset/0 = report only
-    !   FESOM3_WSPLIT      presence -> dyn%use_wsplit (smooth w = w_e + w_i split, oce_wsplit)
-    !   FESOM3_WSPLIT_MAXCFL  explicit CFL_z cap (wsplit_maxcfl)        default: 1.0
-    !   FESOM3_WSPLIT_MINCFL  onset of the split (wsplit_mincfl)        default: 0.5*maxcfl
-    !   FESOM3_WSPLIT_EXPECT_SPLIT=N  error stop unless at least N owned faces split at the
-    !                      last step AND at least one of them has f >= 0.5 (keeps the wsplit
-    !                      gate configs from passing vacuously; ctest
-    !                      fesom_conserve_zstar_wsplit_vacuous_np1 pins the trip path)
+    !   FESOM3_WSPLIT      presence -> dyn%use_wsplit (smooth w = w_e + w_i split)
+    !   FESOM3_WSPLIT_MAXCFL  explicit CFL_z cap (maxcfl)      default: 1.0
+    !   FESOM3_WSPLIT_MINCFL  onset of the split (mincfl)      default: 0.5*maxcfl
+    !   FESOM3_WSPLIT_EXPECT_SPLIT=N  error stop unless >= N owned faces split (hook comment)
     !
     ! NOTE ON linfs. The linear free surface is NOT tracer-conserving by construction:
     ! hnode is frozen, so the surface vertical advective flux -w*T*area at nzmin is a real
@@ -85,7 +82,7 @@ program fesom_conserve
     use mod_step_oce,       only: step_oce
     use mod_config,         only: which_ALE
     use mod_halo,           only: allreduce_sum, allreduce_max
-    use oce_wsplit,         only: wsplit_check_params
+    use oce_wsplit,         only: wsplit_assert_params
     implicit none
 
     ! CORE2 namelist timestep: dt = 86400/step_per_day, step_per_day=48 -> 1800 s. Computed
@@ -105,7 +102,7 @@ program fesom_conserve
     real(kind=WP), allocatable :: relax_salt(:), real_salt_flux(:), stress_surf(:,:)
     real(kind=WP) :: is_nonlinfs
     integer       :: momadv_env   ! FESOM3_MOMADV_OPT (1 = vector invariant, 2 = scalar)
-    logical       :: use_wsplit_env, wsplit_expect_split      ! FESOM3_WSPLIT, _EXPECT_SPLIT
+    logical       :: use_wsplit, wsplit_expect_split          ! FESOM3_WSPLIT, _EXPECT_SPLIT
     integer       :: wsplit_expect_min                        ! FESOM3_WSPLIT_EXPECT_SPLIT value
     real(kind=WP) :: wsplit_mincfl_env, wsplit_maxcfl_env     ! FESOM3_WSPLIT_MINCFL/_MAXCFL
     real(kind=WP) :: content0(2), content(2), conserve_tol, drift(2)
@@ -164,11 +161,12 @@ program fesom_conserve
     ! the explicit schemes. Presence-based switch; the two parameters are VALUE-based.
     ! Defaults: the t_dyn cap 1.0 and an onset of 0.5*maxcfl, so a config that sets only
     ! FESOM3_WSPLIT_MAXCFL keeps the type's onset/cap ratio (the gate configs set a cap
-    ! far below 1.0 because the 20-step cold start never reaches CFL_z ~ 1). Validated as
-    ! t_dyn documents: maxcfl > 0, 0 <= mincfl <= maxcfl. An unparsable value is an error,
-    ! not a silent fall-back to the default (ctests fesom_conserve_wsplit_bad{params,value}).
+    ! far below 1.0 because the 20-step cold start never reaches CFL_z ~ 1). Validated
+    ! once here (wsplit_assert_params: maxcfl > 0, 0 <= mincfl <= maxcfl). An unparsable
+    ! value is an error, not a silent fall-back to the default (ctests
+    ! fesom_conserve_wsplit_bad{params,value}).
     call get_environment_variable('FESOM3_WSPLIT', env, length=env_len, status=ios)
-    use_wsplit_env = (ios == 0 .and. env_len > 0)
+    use_wsplit = (ios == 0 .and. env_len > 0)
     wsplit_maxcfl_env = 1.0_WP
     call get_environment_variable('FESOM3_WSPLIT_MAXCFL', env, length=env_len, status=ios)
     if (ios == 0 .and. env_len > 0) then
@@ -181,8 +179,7 @@ program fesom_conserve
         read(env, *, iostat=ios) wsplit_mincfl_env
         if (ios /= 0) error stop 'FESOM3_WSPLIT_MINCFL: not a real'
     end if
-    if (.not. wsplit_check_params(wsplit_mincfl_env, wsplit_maxcfl_env)) &
-        error stop 'FESOM3_WSPLIT_MINCFL/MAXCFL: need maxcfl > 0 and 0 <= mincfl <= maxcfl'
+    call wsplit_assert_params(wsplit_mincfl_env, wsplit_maxcfl_env)   ! the t_dyn obligation
     ! Gate guard (VALUE-based: the minimum number of split faces): a wsplit config in
     ! which no -- or only a handful of -- owned faces split at the last step, or none
     ! reaches the implicit-dominated range f >= 0.5, proves nothing about the split
@@ -293,12 +290,12 @@ program fesom_conserve
     dyn%visc_gamma1_h = 0.0_WP
     ! CORE2 production pins use_wsplit=.false. (M1.4/M2.9b precedent); FESOM3_WSPLIT turns
     ! the split on here so the gate can run the w_e/w_i consumers end to end.
-    dyn%use_wsplit    = use_wsplit_env
+    dyn%use_wsplit    = use_wsplit
     dyn%wsplit_mincfl = wsplit_mincfl_env
     dyn%wsplit_maxcfl = wsplit_maxcfl_env
-    if (partit%mype == 0 .and. dyn%use_wsplit) write(*,'(a,f8.4,a,f8.4)') &
-        'fesom_conserve: w = w_e + w_i split (use_wsplit) ENABLED, wsplit_mincfl=', &
-        dyn%wsplit_mincfl, '  wsplit_maxcfl=', dyn%wsplit_maxcfl
+    if (partit%mype == 0 .and. dyn%use_wsplit) write(*,'(a,f8.4,a,f8.4,a)') &
+        'fesom_conserve: implicit vertical advection split w = w_e + w_i ENABLED ' // &
+        '(use_wsplit; wsplit_mincfl=', dyn%wsplit_mincfl, ', wsplit_maxcfl=', dyn%wsplit_maxcfl, ')'
 
     !===========================================================================
     ! 2-tracer state (data(1)=T ID 1, data(2)=S ID 2; local sizes) + do_ic3d phc3.0 IC.
@@ -537,43 +534,45 @@ contains
         ! with f >= 0.5 (exactly CFL_z >= 2*maxcfl, the implicit-dominated range) and max f.
         ! MPI-summed/maxed, rank 0 prints. FESOM3_WSPLIT_EXPECT_SPLIT=N: error stop unless
         ! at least N faces split and at least one has f >= 0.5.
-        integer       :: j, k, cnt(3), ierr
+        integer       :: j, k
+        integer       :: n_split, n_capped, n_half   ! faces with w_i /= 0; CFL_z >= Cu_cut; f >= 0.5
         real(kind=WP) :: cfl, w, cflmax, fmax, cu_cut
 
         cu_cut = 2.0_WP*dyn%wsplit_maxcfl - dyn%wsplit_mincfl
-        cnt = 0; cflmax = 0.0_WP; fmax = 0.0_WP
+        n_split = 0; n_capped = 0; n_half = 0; cflmax = 0.0_WP; fmax = 0.0_WP
         do j = 1, nNodO
             if (mesh%nlevels_nod2D(j) <= 0) cycle
             do k = mesh%ulevels_nod2D(j), mesh%nlevels_nod2D(j)
                 cfl    = dyn%cfl_z(k,j)
                 cflmax = max(cflmax, cfl)
-                if (cfl >= cu_cut) cnt(2) = cnt(2) + 1
+                if (cfl >= cu_cut) n_capped = n_capped + 1
                 w = dyn%w(k,j)
                 if (dyn%w_i(k,j) /= 0.0_WP) then
-                    cnt(1) = cnt(1) + 1
-                    if (abs(dyn%w_i(k,j)) >= 0.5_WP*abs(w)) cnt(3) = cnt(3) + 1
+                    n_split = n_split + 1
+                    if (abs(dyn%w_i(k,j)) >= 0.5_WP*abs(w)) n_half = n_half + 1
                 end if
                 if (w /= 0.0_WP) fmax = max(fmax, abs(dyn%w_i(k,j))/abs(w))
             end do
         end do
         if (partit%npes > 1) then
-            call MPI_Allreduce(MPI_IN_PLACE, cnt, 3, MPI_INTEGER, MPI_SUM, &
-                               partit%MPI_COMM_FESOM, ierr)
+            call allreduce_sum(n_split, partit)
+            call allreduce_sum(n_capped, partit)
+            call allreduce_sum(n_half, partit)
             call allreduce_max(cflmax, partit)
             call allreduce_max(fmax, partit)
         end if
         if (partit%mype == 0) then
             write(*,'(a,es10.3,a,f8.4,a,i0,a,f8.4,a,i0,a,f8.4,a,i0,a,f8.5)') &
                 'fesom_conserve: last-step w split (owned faces): max CFL_z=', cflmax, &
-                ' ; w_i/=0 (CFL_z > mincfl=', dyn%wsplit_mincfl, '): ', cnt(1), &
-                ' ; capped (CFL_z >= Cu_cut=', cu_cut, '): ', cnt(2), &
-                ' ; f>=0.5 (CFL_z >= 2*maxcfl=', 2.0_WP*dyn%wsplit_maxcfl, '): ', cnt(3), &
+                ' ; w_i/=0 (CFL_z > mincfl=', dyn%wsplit_mincfl, '): ', n_split, &
+                ' ; capped (CFL_z >= Cu_cut=', cu_cut, '): ', n_capped, &
+                ' ; f>=0.5 (CFL_z >= 2*maxcfl=', 2.0_WP*dyn%wsplit_maxcfl, '): ', n_half, &
                 ' ; max f=', fmax
         end if
-        if (wsplit_expect_split .and. (cnt(1) < wsplit_expect_min .or. cnt(3) == 0)) then
+        if (wsplit_expect_split .and. (n_split < wsplit_expect_min .or. n_half == 0)) then
             if (partit%mype == 0) write(*,'(a,i0,a,i0,a,i0,a)') &
                 'fesom_conserve: FESOM3_WSPLIT_EXPECT_SPLIT=', wsplit_expect_min, &
-                ' but only ', cnt(1), ' faces split, ', cnt(3), ' with f >= 0.5 (vacuous config)'
+                ' but only ', n_split, ' faces split, ', n_half, ' with f >= 0.5 (vacuous config)'
             call par_ex(partit%MPI_COMM_FESOM, partit%mype)
             error stop 1
         end if

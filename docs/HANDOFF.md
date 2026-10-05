@@ -1457,11 +1457,15 @@ on uniform layers.
 
 Parameters: `t_dyn%wsplit_mincfl` (type default 0.5 — an ABSOLUTE number, `0.5·maxcfl`
 only at the default cap) and `%wsplit_maxcfl` (1.0), both serialized (`test_types` round
-trip); admissible iff `maxcfl > 0` and `0 ≤ mincfl ≤ maxcfl` (`wsplit_check_params`; the
-drivers `error stop` otherwise, and `compute_Wvel_split` re-checks the pair on every
-on-path call so a driver that lowers the cap without the onset cannot run the
-discontinuous pair in silence; it also checks once, collectively, that every owned column
-has ≥ 2 layers). Env hooks in `fesom_conserve` and `fesom_lifecycle_native_mr`:
+trip); admissible iff `maxcfl > 0` and `0 ≤ mincfl ≤ maxcfl` (`wsplit_check_params`).
+Validation is SETUP-time and the kernels are stateless (house convention): every driver
+that enables `use_wsplit` calls `wsplit_assert_params(mincfl, maxcfl)` once — the
+obligation is documented in `t_dyn` next to the parameters; `fesom_conserve`,
+`fesom_lifecycle_native_mr` and `fesom_pressuredump` do — so a driver that lowers the cap
+without the onset cannot run the discontinuous pair in silence; the ≥ 2-layer column
+precondition of the implicit solves is a mesh invariant asserted once, collectively, in
+`read_mesh` (`assert_min_layers`; ctest `test_minlayers_np1` trips it). Env hooks in
+`fesom_conserve` and `fesom_lifecycle_native_mr`:
 `FESOM3_WSPLIT` (presence → `use_wsplit`), `FESOM3_WSPLIT_MAXCFL` (value, default 1.0),
 `FESOM3_WSPLIT_MINCFL` (value, default `0.5·maxcfl`, so a config that sets only the cap
 keeps the type's onset/cap ratio; an unparsable value is an `error stop`, not the
@@ -1480,8 +1484,9 @@ momentum advection (`momentum_adv_scalar`, `momentum_adv_vinv`) reads `w_e`. (2)
 tracers — `do_wimpl` in the vertical-diffusion TDMA `diff_ver_part_impl_ale`. (3) FCT
 tracers — FESOM2's sequence in `do_oce_adv_tra` (`oce_adv_tra_driver.F90`): low-order
 upwind step with `w_e`, then `adv_tra_vert_impl(dt, w_i, fct_LO)` (per-column upwind
-backward-Euler TDMA on `fct_LO`, column sums `= hnode_new`, f3 1-D area rule, `error stop`
-on < 2 layers; `oce_adv_tra_ver.F90`), then the LO upwind flux RECOMPUTED with the full
+backward-Euler TDMA on `fct_LO`, column sums `= hnode_new`, f3 1-D area rule; ≥ 2 layers
+is a stated precondition, asserted at setup, not in the kernel; `oce_adv_tra_ver.F90`),
+then the LO upwind flux RECOMPUTED with the full
 `w` so the antidiffusive flux is `HO(w) − LO(w)`. (`HO(w) − LO(w_e)` would double-count
 the `w_i` transport and still telescope — a conservation gate cannot see it.)
 
@@ -1509,7 +1514,7 @@ of `w` — the assembly carries `oce_tra_adv_fct`, inactive for `w > 0` (every f
 on 95469 nonzero faces, closed form of the whole step to 1.4e-14 K) and active for
 `w < 0` — the wrong `HO(w) − LO(w_e)` differing by 29.9 / 58.8 K·m = the predicted
 double-counted `w_i` transport to 5e-14 for `w > 0`, by 3.9 / 1.4 K·m with the limiter
-for `w < 0`); ctest `test_wimpl_tra_onelayer_np1` trips the kernel's < 2-layer guard.
+for `w < 0`); ctest `test_minlayers_np1` trips the setup-time < 2-layer refusal.
 End to end: `fesom_conserve` prints for every config one last-step owned-face statistics
 line (max `CFL_z`; faces with `w_i ≠ 0` = `CFL_z > mincfl`; capped faces
 `CFL_z ≥ Cu_cut = 2·maxcfl − mincfl`; `f ≥ 0.5` = `CFL_z ≥ 2·maxcfl`; max `f`). The
@@ -1532,7 +1537,7 @@ no longer dumps `w_split_e/w_split_i` (nothing read them); `tools/pressure_diff.
 the FESOM2-side names in `SKIP_FIELDS` (printed as SKIP, never compared against FESOM2's
 hard split; the FESOM2 byte-gates are retired since bottom-at-vertices anyway). That
 driver calls `diff_tracers_ale` only, never `do_oce_adv_tra`, so it does not reach
-`adv_tra_vert_impl`. Plan: `docs/plans/completed/2026-10-02-wsplit-smooth.md`; see L57,
+`adv_tra_vert_impl`. Plan: `docs/plans/2026-10-02-wsplit-smooth.md`; see L57,
 L58.
 
 

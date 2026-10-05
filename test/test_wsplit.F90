@@ -1,6 +1,6 @@
 program test_wsplit
     ! Smooth Courant-number-dependent explicit/implicit vertical-velocity split
-    ! (oce_wsplit + compute_Wvel_split, docs/plans/completed/2026-10-02-wsplit-smooth.md).
+    ! (oce_wsplit + compute_Wvel_split, docs/plans/2026-10-02-wsplit-smooth.md).
     !
     ! WHY THIS TEST EXISTS
     ! --------------------
@@ -205,15 +205,20 @@ program test_wsplit
     real(kind=WP), parameter :: h0   = 10.0_WP       ! uniform layer thickness [m]
     real(kind=WP), parameter :: cq   = 1.0e-3_WP     ! quadratic coefficient of T(z)
     real(kind=WP), parameter :: t0   = 10.0_WP
-    integer,       parameter :: np   = 5             ! probe cell, counted from the column's surface (nzmin + np - 1)
+    integer,       parameter :: kprobe = 5           ! probe cell, counted from the column's surface (nzmin + kprobe - 1)
     integer,       parameter :: nlev_min = 10        ! columns probed: nlevels - ulevels + 1 >= this
+    ! ---- cavity columns (synth_cavity; the same constants select test_wimpl_tra's set) ----
+    integer,       parameter :: cav_every = 10       ! every 10th global node ...
+    integer,       parameter :: cav_ulev  = 3        ! ... gets its surface at level 3 (nzmin = 3) ...
+    integer,       parameter :: cav_nlev_min = nlev_min + cav_ulev + 1   ! ... if it keeps >= nlev_min + 2 levels
+                                                     ! below that surface (= 14): still probed by part X, with margin
     integer,       parameter :: nscan = 601
     real(kind=WP), parameter :: x_maxcfl = 1.0_WP, x_mincfl = 0.5_WP
     real(kind=WP), parameter :: x1_bound = 5.0_WP    ! X1: |D2| <= x1_bound*dCu*max|D1| (header: why 5)
     real(kind=WP), parameter :: cu_top_x = 3.0_WP*x_maxcfl
     real(kind=WP), parameter :: dcu = cu_top_x/real(nscan-1, WP)
-    ! T'(z_p) = bq + 2*cq*z_p = 4*cq*h0 at z_p = -(np-0.5)*h0 (depth relative to the column surface)
-    real(kind=WP), parameter :: bq = cq*h0*(2.0_WP*real(np, WP) + 3.0_WP)
+    ! T'(z_p) = bq + 2*cq*z_p = 4*cq*h0 at z_p = -(kprobe-0.5)*h0 (depth relative to the column surface)
+    real(kind=WP), parameter :: bq = cq*h0*(2.0_WP*real(kprobe, WP) + 3.0_WP)
     real(kind=WP), parameter :: jkink = cq*h0*h0*(1.0_WP + x_maxcfl)/2.0_WP   ! X0
     real(kind=WP), allocatable :: tref(:,:), tsplit(:,:), tother(:,:)
     real(kind=WP), allocatable :: flux_v(:,:), flux_h(:,:), dttf_h(:,:), dttf_v(:,:)
@@ -464,8 +469,8 @@ contains
         do n = 1, nNodL
             g = n
             if (partit%npes > 1) g = partit%myList_nod2D(n)
-            if (mod(g, 10) == 0 .and. mesh%nlevels_nod2D(n) >= 14) then
-                mesh%ulevels_nod2D(n) = 3
+            if (mod(g, cav_every) == 0 .and. mesh%nlevels_nod2D(n) >= cav_nlev_min) then
+                mesh%ulevels_nod2D(n) = cav_ulev
                 if (n <= nNodO) ncav = ncav + 1
             end if
         end do
@@ -770,7 +775,7 @@ contains
     end subroutine apply_chain
 
     subroutine run_scan(cmin, cmax, wsign, check_expl, ok_expl, n_expl)
-        ! Delta(Cu) at the probe cell nzmin + np - 1 of every owned column, Cu on the scan
+        ! Delta(Cu) at the probe cell nzmin + kprobe - 1 of every owned column, Cu on the scan
         ! grid; the velocity is derived from Cu and cfl_z is rebuilt by compute_CFLz (so
         ! the split sees exactly what the model would). With check_expl, X3a is checked
         ! on the fly: for Cu <= Cu_min the split chain must equal the explicit chain on
@@ -793,7 +798,7 @@ contains
             call compute_Wvel_split(dyn, mesh, partit)     ! sets dyn%w_e, dyn%w_i
             call apply_chain(dyn%w_e, .true., tref, tsplit)
             do n = 1, nNodO
-                p = mesh%ulevels_nod2D(n) + np - 1
+                p = mesh%ulevels_nod2D(n) + kprobe - 1
                 delta(k, n) = tsplit(p, n) - tref(p, n)
             end do
             if (check_expl .and. cu <= cmin) then

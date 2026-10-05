@@ -125,10 +125,12 @@ module mod_dyn
         logical       :: use_freeslip   = .false.
         ! Smooth Courant-dependent w = w_e + w_i split (oce_wsplit documents the function;
         ! compute_Wvel_split applies it). Admissible iff wsplit_check_params (maxcfl > 0,
-        ! 0 <= mincfl <= maxcfl), validated on the on path by compute_Wvel_split. The
-        ! default mincfl is the ABSOLUTE 0.5 (= 0.5*maxcfl only at the default maxcfl): a
-        ! driver that lowers maxcfl must set mincfl too (the env-hook drivers default it
-        ! to 0.5*maxcfl). Plan: docs/plans/completed/2026-10-02-wsplit-smooth.md.
+        ! 0 <= mincfl <= maxcfl). OBLIGATION: every driver that sets use_wsplit=.true.
+        ! calls wsplit_assert_params(wsplit_mincfl, wsplit_maxcfl) once at setup (the
+        ! kernels validate nothing). The default mincfl is the ABSOLUTE 0.5 (= 0.5*maxcfl
+        ! only at the default maxcfl): a driver that lowers maxcfl must set mincfl too
+        ! (the env-hook drivers default it to 0.5*maxcfl).
+        ! Plan: docs/plans/2026-10-02-wsplit-smooth.md.
         logical       :: use_wsplit     = .false.
         real(kind=WP) :: wsplit_mincfl  = 0.5_WP
         real(kind=WP) :: wsplit_maxcfl  = 1.0_WP

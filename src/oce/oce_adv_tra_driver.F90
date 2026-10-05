@@ -146,7 +146,7 @@ contains
                 ! upwind vertical flux is recomputed with the FULL w, so that the HO call
                 ! below (o_init_zero=.false.) leaves HO(w) - LO(w) as the antidiffusive flux.
                 ! (LO(w_e) there would double-count the w_i transport; test_wimpl_tra C6.)
-                call adv_tra_vert_impl(dt, wi, fct_LO, mesh, partit)
+                call adv_tra_vert_impl(dt, wi, fct_LO, mesh, partit=partit)
                 call adv_tra_ver_upw1(w, ttf, mesh, adv_flux_ver, o_init_zero=.true., partit=partit)
             end if
             ! M2.12b: share the low-order solution to the halo (FESOM2 :294) — the FCT

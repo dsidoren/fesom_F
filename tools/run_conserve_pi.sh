@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CONSERVATION + NO-LEAKAGE GATE for the bottom-at-vertices change (docs/plans/
+# CONSERVATION + NO-LEAKAGE GATE for the bottom-at-vertices change (docs/plans/completed/
 # 20260910-fesom3-bottom-at-vertices.md, Task 2). This is the numerical regression net
 # that replaces the retired FESOM2 byte-gates: it is FESOM_F-internal, needs no oracle,
 # and must stay green through every task of that plan.
@@ -31,7 +31,8 @@
 #       fer_w, which is added to w AND w_e at owned+halo right where the split's halo
 #       contract lives and bypasses the cap. The 20-step cold start never reaches
 #       CFL_z ~ 1 (measured last-step max 2.76e-2 on pi, split off), so the cap is set
-#       to FESOM3_WSPLIT_MAXCFL=0.005 (onset 0.0025 = the driver's 0.5*maxcfl default):
+#       to FESOM3_WSPLIT_MAXCFL=0.005 (onset 0.0025 = the driver's 0.5*maxcfl default;
+#       the triple is WSPLIT_CFG below, the same as test/CMakeLists.txt's _wsplit_cfg):
 #       measured 8632 owned faces with w_i /= 0, 500 with f = |w_i|/|w| >= 0.5, max f
 #       0.82 (np 1/2 identical to +-1 face). FESOM3_WSPLIT_EXPECT_SPLIT=1000 makes the
 #       driver error-stop unless >= 1000 faces split and one has f >= 0.5, so these
@@ -54,6 +55,8 @@ ICFILE="${ICFILE:-/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc}"
 NSTEPS="${1:-20}"
 TOL="${TOL:-1e-12}"
 MPIFLAGS="${MPIFLAGS:---mca pml ob1 --mca btl self,vader --oversubscribe}"
+# the tuned wsplit triple (header); re-tune the cap here AND in test/CMakeLists.txt
+WSPLIT_CFG="${WSPLIT_CFG:-FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1000}"
 
 [ -x "$BIN" ] || { echo "run_conserve_pi: missing $BIN (build first)"; exit 1; }
 [ -d "$PIMESH" ] || { echo "run_conserve_pi: missing pi mesh $PIMESH"; exit 1; }
@@ -81,6 +84,7 @@ done
 # default configuration proves nothing about the others.
 # NOTE read from fd 3: mpirun inherits stdin and CONSUMES the heredoc, so a plain
 # `while read ... done <<CFG` silently runs only the FIRST config and drops the rest.
+# The heredoc is unquoted so $WSPLIT_CFG expands (no other line contains $ or `).
 while read -r -u 3 label vars; do
     [ -z "$label" ] && continue
     echo "=== zstar + $label, np=1, $NSTEPS steps (conservation gate, tol=$TOL) ==="
@@ -90,7 +94,7 @@ while read -r -u 3 label vars; do
     else
         echo "run_conserve_pi: FAILED (zstar+$label np=1)"; fail=1
     fi
-done 3<<'CFG'
+done 3<<CFG
 Redi FESOM3_REDI=1
 KPP FESOM3_MIX_KPP=1
 TKE FESOM3_MIX_TKE=1
@@ -102,9 +106,9 @@ splines+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_MIX_TKE=1
 N2splines FESOM3_N2_SPLINES=1
 momadv-vinv FESOM3_MOMADV_OPT=1
 momadv-vinv-upw FESOM3_MOMADV_OPT=1 FESOM3_RVO_UPWIND=0.7
-wsplit FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1000
-momadv-vinv-wsplit FESOM3_MOMADV_OPT=1 FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1000
-GM+wsplit FESOM3_FER_GM=1 FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1000
+wsplit $WSPLIT_CFG
+momadv-vinv-wsplit FESOM3_MOMADV_OPT=1 $WSPLIT_CFG
+GM+wsplit FESOM3_FER_GM=1 $WSPLIT_CFG
 bothsplines+GM+Redi+TKE FESOM3_SHEAR_SPLINES=1 FESOM3_N2_SPLINES=1 FESOM3_FER_GM=1 FESOM3_REDI=1 FESOM3_MIX_TKE=1
 CFG
 
@@ -133,8 +137,7 @@ fi
 # vertices of owned elements, so the rank count where nNodL << nod2D is the one that runs
 # that consumer at scale (the halo values themselves are pinned by test_wsplit S5).
 echo "=== zstar + wsplit, np=8, $NSTEPS steps (conservation gate, tol=$TOL) ==="
-if FESOM3_WSPLIT=1 FESOM3_WSPLIT_MAXCFL=0.005 FESOM3_WSPLIT_EXPECT_SPLIT=1000 \
-     FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
+if env $WSPLIT_CFG FESOM3_WHICH_ALE=zstar FESOM3_CONSERVE_TOL="$TOL" \
      mpirun $MPIFLAGS -n 8 "$BIN" < /dev/null 2>&1 | tail -7; then
     :
 else

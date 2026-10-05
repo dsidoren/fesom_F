@@ -33,7 +33,7 @@ module oce_wsplit
     use mod_precision, only: WP
     implicit none
     private
-    public :: wsplit_implicit_fraction, wsplit_check_params
+    public :: wsplit_implicit_fraction, wsplit_check_params, wsplit_assert_params
 
 contains
 
@@ -59,10 +59,21 @@ contains
 
     pure function wsplit_check_params(cmin, cmax) result(ok)
         ! .true. iff (wsplit_mincfl, wsplit_maxcfl) is admissible: a positive cap and a
-        ! non-negative onset not above it. The drivers error-stop on .false.
+        ! non-negative onset not above it (wsplit_assert_params error-stops on .false.).
         real(kind=WP), intent(in) :: cmin, cmax
         logical :: ok
         ok = (cmax > 0.0_WP .and. cmin >= 0.0_WP .and. cmin <= cmax)
     end function wsplit_check_params
+
+    subroutine wsplit_assert_params(cmin, cmax)
+        ! The SETUP-TIME guard, the one call every driver that enables use_wsplit makes
+        ! once (t_dyn documents the obligation next to the parameters): error stop on an
+        ! inadmissible pair. The kernels (compute_Wvel_split, adv_tra_vert_impl) assume it
+        ! and validate nothing -- for (0.5, 0.3), say, Cu_cut = 0.1 < Cu_min and f would
+        ! jump from 0 to 0.4 at Cu = 0.5, the discontinuity the function exists to remove.
+        real(kind=WP), intent(in) :: cmin, cmax
+        if (.not. wsplit_check_params(cmin, cmax)) &
+            error stop 'wsplit_assert_params: need maxcfl > 0 and 0 <= mincfl <= maxcfl'
+    end subroutine wsplit_assert_params
 
 end module oce_wsplit

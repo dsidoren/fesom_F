@@ -75,30 +75,33 @@ foreach(_mix KPP TKE)
         SKIP_REGULAR_EXPRESSION "cannot open;No such file")
 endforeach()
 
-# Smooth w = w_e + w_i split (use_wsplit, docs/plans/completed/2026-10-02-wsplit-smooth.md)
-# with all its consumers live: momentum TDMA + advection, the tracer-diffusion TDMA and the
-# FCT adv_tra_vert_impl. The 20-step cold start never reaches CFL_z ~ 1 (measured max
+# Smooth w = w_e + w_i split (use_wsplit, docs/plans/2026-10-02-wsplit-smooth.md) with all
+# its consumers live: momentum TDMA + advection, the tracer-diffusion TDMA and the FCT
+# adv_tra_vert_impl. The 20-step cold start never reaches CFL_z ~ 1 (measured max
 # 2.76e-2), so the cap is 0.005 (onset 0.0025 by the driver's 0.5*maxcfl default): 8632
 # owned faces split, 500 with an implicit share >= 0.5. FESOM3_WSPLIT_EXPECT_SPLIT=1000
 # error-stops unless >= 1000 faces split and at least one has f >= 0.5 (no vacuous pass;
-# 8x below the measured count). np 2 runs the next step's consumers of the halo w_e/w_i
+# 8x below the measured count). The tuned triple is _wsplit_cfg below -- the same triple
+# as WSPLIT_CFG in tools/run_conserve_pi.sh; re-tune the cap in both places.
+# np 2 runs the next step's consumers of the halo w_e/w_i
 # (the momentum TDMA and, in the vinv variant, the vector-invariant advection read them at
 # the halo vertices of owned elements), but the conserve gate is BLIND to a wrong halo
 # value (heat/salt/volume still telescope): the halo contract itself is pinned bitwise by
 # test_wsplit S5 at np 2. The vinv variant runs the advective-form implicit w_i correction
 # of the momentum TDMA.
+set(_wsplit_cfg "FESOM3_WSPLIT=1;FESOM3_WSPLIT_MAXCFL=0.005;FESOM3_WSPLIT_EXPECT_SPLIT=1000")
 foreach(_np 1 2)
     add_test(NAME fesom_conserve_zstar_wsplit_np${_np}
              COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np ${_np}
                      $<TARGET_FILE:fesom_conserve>)
     set_tests_properties(fesom_conserve_zstar_wsplit_np${_np} PROPERTIES
-        ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_WSPLIT=1;FESOM3_WSPLIT_MAXCFL=0.005;FESOM3_WSPLIT_EXPECT_SPLIT=1000;FESOM3_CONSERVE_TOL=1e-12"
+        ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;${_wsplit_cfg};FESOM3_CONSERVE_TOL=1e-12"
         SKIP_REGULAR_EXPRESSION "cannot open;No such file")
     add_test(NAME fesom_conserve_zstar_vinv_wsplit_np${_np}
              COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np ${_np}
                      $<TARGET_FILE:fesom_conserve>)
     set_tests_properties(fesom_conserve_zstar_vinv_wsplit_np${_np} PROPERTIES
-        ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_MOMADV_OPT=1;FESOM3_WSPLIT=1;FESOM3_WSPLIT_MAXCFL=0.005;FESOM3_WSPLIT_EXPECT_SPLIT=1000;FESOM3_CONSERVE_TOL=1e-12"
+        ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_MOMADV_OPT=1;${_wsplit_cfg};FESOM3_CONSERVE_TOL=1e-12"
         SKIP_REGULAR_EXPRESSION "cannot open;No such file")
 endforeach()
 
@@ -107,9 +110,15 @@ endforeach()
 #  * vacuous config: cap 0.5 on the cold start splits nothing, so EXPECT_SPLIT must print
 #    "vacuous config" and stop BEFORE the drift report (FAIL_REGULAR_EXPRESSION). The pass
 #    regex also pins the driver-side default mincfl = 0.5*maxcfl (0.2500 at the cap 0.5 --
-#    the type's absolute 0.5 would print 0.5000); CMake's "." matches newlines.
+#    the type's absolute 0.5 would print 0.5000; " *" so the f8.4 blanks are not counted);
+#    CMake's "." matches newlines.
 #  * bad params: (mincfl, maxcfl) = (0.9, 0.5) must be rejected before init.
 #  * bad value: an unparsable FESOM3_WSPLIT_MAXCFL must be an error, not the default cap.
+# Each is a PASS regex (the message: stopped for the RIGHT reason) plus a FAIL regex (a
+# line the driver prints only if it went on). A PASS regex makes ctest ignore the exit
+# code, and WILL_FAIL cannot restore it: CMake inverts the verdict AFTER the regexes, so
+# WILL_FAIL + a FAIL regex would PASS a driver that prints the drift line and exits 0
+# (checked with CMake 3.26) -- hence the regex pair, not WILL_FAIL.
 # These three stop before the mesh is read (or never reach the drift), so they need no
 # skip rule; the vacuous one keeps it because it does read the mesh.
 add_test(NAME fesom_conserve_zstar_wsplit_vacuous_np1
@@ -117,7 +126,7 @@ add_test(NAME fesom_conserve_zstar_wsplit_vacuous_np1
                  $<TARGET_FILE:fesom_conserve>)
 set_tests_properties(fesom_conserve_zstar_wsplit_vacuous_np1 PROPERTIES
     ENVIRONMENT "FESOM3_MESH_DIR=/home/a/a270088/port2/fesom2/tests/data/MESHES/pi;FESOM3_IC_FILE=/pool/data/AWICM/FESOM2/INITIAL/phc3.0/phc3.0_winter.nc;FESOM3_NSTEPS=20;FESOM3_WHICH_ALE=zstar;FESOM3_WSPLIT=1;FESOM3_WSPLIT_MAXCFL=0.5;FESOM3_WSPLIT_EXPECT_SPLIT=1;FESOM3_CONSERVE_TOL=1e-12"
-    PASS_REGULAR_EXPRESSION "wsplit_mincfl=  0\\.2500  wsplit_maxcfl=  0\\.5000.*vacuous config"
+    PASS_REGULAR_EXPRESSION "wsplit_mincfl= *0\\.2500, wsplit_maxcfl= *0\\.5000.*vacuous config"
     FAIL_REGULAR_EXPRESSION "relative drift over the run"
     SKIP_REGULAR_EXPRESSION "cannot open;No such file")
 add_test(NAME fesom_conserve_wsplit_badparams_np1
@@ -135,12 +144,11 @@ set_tests_properties(fesom_conserve_wsplit_badvalue_np1 PROPERTIES
     PASS_REGULAR_EXPRESSION "FESOM3_WSPLIT_MAXCFL: not a real"
     FAIL_REGULAR_EXPRESSION "fesom_conserve: nod2D=")
 
-# adv_tra_vert_impl's < 2-layer guard, tripped: test_wimpl_tra shrinks one owned column to a
-# single layer and calls the kernel, which must error stop with this message.
-add_test(NAME test_wimpl_tra_onelayer_np1
-         COMMAND ${FESOM3_MPIEXEC} ${FESOM3_MPI_LAUNCH_FLAGS} -np 1
-                 $<TARGET_FILE:test_wimpl_tra>)
-set_tests_properties(test_wimpl_tra_onelayer_np1 PROPERTIES
-    ENVIRONMENT "FESOM3_TEST_WIMPL_ONELAYER=1"
-    PASS_REGULAR_EXPRESSION "adv_tra_vert_impl: a column with fewer than 2 layers"
+# The setup-time >= 2-layer column invariant (read_mesh's assert_min_layers, the
+# precondition of every vertical kernel's row layout), tripped: test_minlayers shrinks one
+# pi column to a single layer and re-walks derive_vertical_bounds, which must error stop
+# with this message (same regex pair as the guards above).
+add_fesom_test(test_minlayers 1)
+set_tests_properties(test_minlayers_np1 PROPERTIES
+    PASS_REGULAR_EXPRESSION "fewer than 2 layers"
     FAIL_REGULAR_EXPRESSION "did NOT stop")

@@ -8,7 +8,7 @@ module mod_mesh_read
     use mod_mesh,        only: t_mesh, MAX_NV, MAX_ADJACENT
     use mod_partit,      only: t_partit
     use mod_partitioning, only: read_mesh_dims
-    use mod_halo,        only: exchange_nod
+    use mod_halo,        only: exchange_nod, allreduce_sum
     use mod_mesh_rotate, only: init_mesh_rotation, g2r, r2g, trim_cyclic
     implicit none
     private
@@ -191,7 +191,7 @@ contains
         call derive_vertical_bounds(mesh, mesh%elem2D, mesh%nod2D, 'setup_vertical')
     end subroutine setup_vertical
 
-    subroutine derive_vertical_bounds(mesh, nElem, nNod, where, derive_elems)
+    subroutine derive_vertical_bounds(mesh, nElem, nNod, where, derive_elems, partit)
         ! FESOM3 BOTTOM AT VERTICES. Shared by all three mesh paths (1-rank read,
         ! analytic, multi-rank). The element vertical bounds are DERIVED from the vertex
         ! columns -- elvls.out is never read:
@@ -207,11 +207,17 @@ contains
         ! derive_elems=.false. (multi-rank): nlevels/ulevels were already filled for the
         ! full element halo from the GLOBAL node levels during the mesh scatter, because
         ! elem2D_nodes is populated for OWNED elements only. Only elem_depth, the node
-        ! ring bounds and the invariant are done here.
+        ! ring bounds and the invariants are done here.
+        !
+        ! Two vertical invariants are asserted at the end, once, at setup (the kernels
+        ! assume them and validate nothing): every owned column has >= 2 layers
+        ! (assert_min_layers; partit, when given, makes the verdict collective) and the
+        ! vertex-bottom invariant (assert_bottom_invariant).
         type(t_mesh),      intent(inout) :: mesh
         integer,           intent(in)    :: nElem, nNod
         character(len=*),  intent(in)    :: where
         logical, optional, intent(in)    :: derive_elems
+        type(t_partit), optional, intent(in) :: partit
         integer :: n, k, nv
         logical :: do_elems
         do_elems = .true.
@@ -231,8 +237,46 @@ contains
             mesh%nlevels_nod2D_min(n) = minval(mesh%nlevels(mesh%nod_in_elem2D(1:k, n)))
             mesh%ulevels_nod2D_max(n) = maxval(mesh%ulevels(mesh%nod_in_elem2D(1:k, n)))
         end do
+        call assert_min_layers(mesh, nNod, where, partit)
         call assert_bottom_invariant(mesh, nNod, where)
     end subroutine derive_vertical_bounds
+
+    subroutine assert_min_layers(mesh, nNod, where, partit)
+        ! REQUIRED INVARIANT of the vertical kernels: every column (nlevels_nod2D > 0)
+        ! has at least 2 layers,
+        !     nlevels_nod2D(n) - ulevels_nod2D(n) >= 2.
+        ! The explicit vertical advection reads ttf(nzmin-1) in a 1-layer column
+        ! (adv_tra_ver_upw1, the trap its module header notes) and the implicit solves
+        ! (adv_tra_vert_impl, do_wimpl, the momentum TDMA) lay out a surface row nzmin
+        ! and a bottom row nlevels-1 that coincide with one layer. pi/core2 minimum is 4.
+        ! Counted over the nNod OWNED columns; with partit at npes > 1 the count is
+        ! MPI-summed so every rank stops together (a rank-local stop would leave the
+        ! others in the next collective). Pinned by test/test_minlayers.F90.
+        type(t_mesh),     intent(in) :: mesh
+        integer,          intent(in) :: nNod
+        character(len=*), intent(in) :: where
+        type(t_partit), optional, intent(in) :: partit
+        integer :: n, nbad
+        nbad = 0
+        do n = 1, nNod
+            if (mesh%nod_in_elem2D_num(n) <= 0) cycle
+            if (mesh%nlevels_nod2D(n) <= 0) cycle
+            if (mesh%nlevels_nod2D(n) - mesh%ulevels_nod2D(n) < 2) then
+                if (nbad == 0) write(*,'(a,i0,a,i0,a,i0)') trim(where)// &
+                    ': a column with fewer than 2 layers at node ', n, ': ulevels_nod2D=', &
+                    mesh%ulevels_nod2D(n), ' nlevels_nod2D=', mesh%nlevels_nod2D(n)
+                nbad = nbad + 1
+            end if
+        end do
+        if (present(partit)) then
+            if (partit%npes > 1) call allreduce_sum(nbad, partit)
+        end if
+        if (nbad > 0) then
+            write(*,'(a,i0,a)') trim(where)//': ', nbad, &
+                ' owned column(s) with fewer than 2 layers; the vertical kernels need 2'
+            error stop 1
+        end if
+    end subroutine assert_min_layers
 
     subroutine assert_bottom_invariant(mesh, nNod, where)
         ! REQUIRED INVARIANT of the vertex-bottom scheme:
@@ -534,7 +578,7 @@ contains
         mesh%nlevels_nod2D_min = 0
         mesh%elem_depth = 0.0_MP
         call derive_vertical_bounds(mesh, nElemF, nNodO, 'setup_vertical_local', &
-                                    derive_elems=.false.)
+                                    derive_elems=.false., partit=partit)
         call exchange_nod(mesh%nlevels_nod2D_min, partit)
         call exchange_nod(mesh%ulevels_nod2D_max, partit)
     end subroutine setup_vertical_local
