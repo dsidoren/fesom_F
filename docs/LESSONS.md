@@ -291,11 +291,11 @@ Unlike M1.1–M1.3 (the shim INLINED the orchestration), M1.4 drives FESOM2's OW
   scalar constant in a SUM is usually fold-safe, but the only proof is the oracle gate.
 
 - **pi runs `use_wsplit=.true.`; the gate must FORCE `.false.` on both sides.** With w-split on,
-  the FCT path calls `adv_tra_vert_impl` (implicit vertical, NOT ported until M2) + recomputes the
-  LO vertical on full `w`. Forcing `dynamics%use_wsplit=.false.` in the shim (= the FESOM3 `t_dyn`
-  default) gates the matched EXPLICIT path (`w==w_e`, both passed the single prescribed wvel). Do
-  not gate against the production `.true.` setting — it would hit an unported kernel / the FESOM3
-  `error stop` guard. The implicit w-split path is a separate M2 gate.
+  the FCT path calls `adv_tra_vert_impl` (implicit vertical, not ported until 2026-10-02 — L58) +
+  recomputes the LO vertical on full `w`. Forcing `dynamics%use_wsplit=.false.` in the shim (= the
+  FESOM3 `t_dyn` default) gates the matched EXPLICIT path (`w==w_e`, both passed the single
+  prescribed wvel). Do not gate against the production `.true.` setting — at the time it would have
+  hit the unported kernel's FESOM3 `error stop` guard. The implicit w-split path is a separate gate.
 
 - **Non-FCT (`do_zero_flux`) + per-tracer order knobs closed in the same gate.** A second config
   on tracer 1 (MUSCL/QR4C/NON, ph=pv=0.75) exercises the `do_zero_flux=.true.` dispatch (HO scheme
@@ -926,8 +926,8 @@ kernel reads the PREVIOUS kernel's output, not a prescribed input — and gates 
   thickness-redistribution branch is taken (hnode/helem/zbar_3d_n/Z_3d_n fixed), only `exchange_elem(helem)` —
   a 1-rank no-op. The `hnode` THICKNESS dump equals the init value on both sides.
 - **`use_wsplit=.false.` is FORCED (M1.4 precedent).** `do_oce_adv_tra`'s `use_wsplit=.true.` path needs the FCT
-  implicit vertical-advection correction `adv_tra_vert_impl` (a distinct unported kernel; guarded with an explicit
-  `error stop`). With `.false.` the explicit/implicit split is trivial (`w_e=w`, `w_i=0`) AFTER `vert_vel_ale`, but
+  implicit vertical-advection correction `adv_tra_vert_impl` (a distinct kernel, unported until 2026-10-02 — L58 —
+  and until then guarded with an explicit `error stop`). With `.false.` the explicit/implicit split is trivial (`w_e=w`, `w_i=0`) AFTER `vert_vel_ale`, but
   `impl_vert_visc_ale` runs BEFORE `compute_Wvel_split` so it still consumes the PRESCRIBED `w_i` ≠ 0 (vertical
   momentum advection IS exercised). The w-split itself is gated at M2.7. Porting `adv_tra_vert_impl` +
   `use_wsplit=.true.` is a scoped follow-up.
@@ -2451,4 +2451,99 @@ Gated on `momadv_opt == 1`, so the FESOM2-pinned path is structurally untouched.
   `adv_tra_vert_impl` is unported. The momentum fix is therefore pinned at unit level
   only (I1-I4) and is dormant in every driver; the end-to-end gate belongs to the
   `adv_tra_vert_impl` port, and the driver hook was reverted rather than left as a
-  knob that always aborts.
+  knob that always aborts. (Superseded 2026-10-02: `adv_tra_vert_impl` is ported, the
+  hook is back as `FESOM3_WSPLIT`, and the `wsplit` / `momadv-vinv-wsplit` gate configs
+  run — L58.)
+
+## L58 — "Smooth vs hard" CFL switching is ONE parameter, not two schemes; the FCT low-order explicit/implicit upwind pair is EXACTLY split-invariant, so a smoothness test needs operators that differ at first order; the constancy test is the consistency proof of an operator split; and a cold-start gate needs a MEASURED cap or it is vacuous
+
+**Context.** `use_wsplit` (FESOM2 `compute_Wvel_split`) sends the part of `w` above a
+vertical Courant cap to the implicit upwind solves (momentum TDMA, tracer-diffusion TDMA,
+FCT `adv_tra_vert_impl`). FESOM2's split is a hard switch (`w_e = w·C/CFL_z` above
+`C = wsplit_maxcfl`): `d(w_e)/d(CFL_z)` jumps from 1 to 0 at `C`, so a face oscillating
+around the threshold flips between high-order explicit and partly first-order implicit
+treatment. The port (`docs/plans/completed/2026-10-02-wsplit-smooth.md`, commits
+431e3e7..bf73965) replaced it by Shchepetkin's (2015, Ocean Modelling 91, Sec. 3.1) C¹
+limiting function `oce_wsplit::wsplit_implicit_fraction(Cu, Cu_min, Cu_max)` — `f = 0`
+below `Cu_min`, the bend `x²/(F + x²)` with `x = Cu − Cu_min`, `F = 4·Cu_max·(Cu_max −
+Cu_min)`, and `f = (Cu − Cu_max)/Cu` above `Cu_cut = 2·Cu_max − Cu_min` — and ported the
+one missing consumer, the FCT `adv_tra_vert_impl`, so `use_wsplit=.true.` runs end to end
+for the first time (L57's dormant momentum correction is live). There is no FESOM2 oracle
+for the smooth split; the tests are the specification (L54).
+
+**What settled it.**
+- *One parameter.* At `Cu_min = Cu_max`, `F = 0` and `Cu_cut = Cu_max`: the function
+  collapses to FESOM2's switch in exact arithmetic. The hard switch is the corner `(1,1)`
+  of the parameter space, not a second scheme — it needs no mode flag and serves as the
+  positive control of the smoothness test (`test_wsplit` X2). Plumbing the new parameter
+  through the old `dd` branch first (TDD stage 2) failed S1/S2 by 2 ulp / non-bitwise and
+  X1 by 10x — the same numbers the final positive control reproduces.
+- *Split invariance of the LO pair.* Explicit upwind with `w_e` followed by implicit
+  upwind with `w_i` across ONE face leaves the donor cell at
+  `T₂·(h₂ − dt·w_e)/(h₂ − dt·w + dt·w_i) = T₂` and the receiver at `T₁h₁ + dt·w·T₂`, for
+  ANY `f`. The FCT low-order pair therefore has no first-order kink to show: the smoothness
+  test the plan first put there would have passed for the hard switch too (a tautology,
+  L54). The kink is first order only where the explicit and implicit operators differ at
+  first order — the non-FCT path, QR4C (centred) on `w_e` plus the upwind TDMA on `w_i`,
+  where the tendency's derivative with respect to `w` jumps by `J = [UPW − QR4C](T)` for
+  a `T` with curvature. `test_wsplit` X runs there (`Kv = 0`, quadratic `T`, 601-point
+  `Cu` scan): second-difference ratio `max|D2|/(ΔCu·max|D1|)` 0.96 / 1.17 (`w ≷ 0`) for
+  the smooth function, 100.3 / 64.1 for the `(1,1)` control (bound 10), and the control's
+  kink equals the closed form `J = cq·h²·(1+Cu_c)/2` per unit `Cu` to 0.25 %
+  (`D2/(J·ΔCu) = 1.0025`; the factor `(1+Cu_c)` is the explicit pre-advection
+  `T* = T + w_c·P_q T` the TDMA then acts on — the shorthand `cq·h²/2` would have read
+  2.005, and the 0.25 % is the predicted `ΔCu/(1+Cu_c)` curvature of the implicit branch).
+- *The constancy test is the proof.* `hnode_new` is advanced by the FULL `w`; for uniform
+  `T` the explicit LO step with `w_e` gives
+  `T* = T·(1 + dt·δw_i·area/(areasvol·hnode_new))` and the implicit step solves
+  `(hnode_new + dt·δw_i·area/areasvol)·T^{n+1} = hnode_new·T*`, so `T^{n+1} = T` exactly,
+  for any split with `w_e + w_i = w`. One test (`test_wimpl_tra` C2/C2b: ≤ 5.3e-16 for
+  three parameter sets, both signs, non-uniform layers, open surface) pins the split
+  identity, the flux-form coefficients, the unsigned surface row and the `hnode_new`
+  usage at once.
+- *The wiring bug a conservation gate cannot see.* The antidiffusive flux must be
+  `HO(w) − LO(w)`, the LO flux RECOMPUTED on the full `w` after the implicit step;
+  `HO(w) − LO(w_e)` double-counts the `w_i` transport yet still telescopes, so heat and
+  salt conserve to round-off either way. `test_wimpl_tra` C6 calls `do_oce_adv_tra` itself
+  and compares with the test's own assembly from the public parts: bitwise equal at
+  np 1/2, while the wrong assembly differs by 29.9 / 58.8 K·m — exactly the predicted
+  double-counted transport `(−w_i(nz)·T(nz) + w_i(nz+1)·T(nz+1))·area·dt/areasvol` to
+  5e-14 — and the whole step matches a closed form to 1.4e-14 K.
+- *A cap must be measured.* The 20-step pi cold start from rest has max `CFL_z` =
+  2.76e-2 (owned faces above 0.005 / 0.01 / 0.02 / 0.04: 2568 / 499 / 26 / 0). At the
+  default cap 1.0 a `wsplit` conserve config splits NOTHING and would have passed as a
+  no-op; with `FESOM3_WSPLIT_EXPECT_SPLIT=1` it exits 1 (the positive control). The gate
+  cap 0.005 (onset 0.0025) gives 8632 split faces, 500 at `f ≥ 0.5`, max `f` 0.82 and
+  thousands of faces on the capped branch; 0.01 would have left 26 faces at `f ≥ 0.5`, a
+  margin a small dynamics shift erases. `fesom_conserve` prints the statistics for every
+  config, with the counts at the breakpoints `mincfl` / `maxcfl` / `2·maxcfl` (where
+  `f > 0`, the cap starts, `f ≥ 0.5`) — they equal the `w_i ≠ 0` and `f ≥ 0.5` counts in
+  every run, as derived.
+
+**Lessons.**
+- **Before adding a "mode", check whether it is a corner of the parameter space.** The
+  hard switch is `Cu_min = Cu_max`; "smooth vs hard" is one knob. A degenerate corner is a
+  free positive control and needs no flag.
+- **A smoothness (or any sensitivity) test needs operators that differ at FIRST order.**
+  Work out what the kink is proportional to before choosing the path: the obvious pair
+  (the LO explicit/implicit upwind pair) is exactly invariant and would have passed for
+  the broken scheme. Derive the closed-form jump and require the positive control to
+  REPRODUCE it (1.0025·J), not merely to fail the bound.
+- **A free-stream/constancy identity is the consistency proof of an operator split.** It
+  holds for every split that sums to `w` and only with the right `hnode_new`, so it fails
+  on any coefficient, surface-row or thickness mistake. Run it first; a conservation test
+  proves less (column sums alone).
+- **A conservation gate is blind to telescoping wiring bugs.** Assert the ASSEMBLY against
+  an independent assembly from the public parts — bitwise where the parts are the same
+  calls — and make the wrong assembly's difference equal its predicted value.
+- **A gate config that may fire nothing must prove it fired.** Measure the quantity the
+  switch keys on (max `CFL_z` 2.8e-2 here), set the threshold from the measurement with a
+  margin, print the counts, and make an empty count a FAILURE (`EXPECT_SPLIT`).
+- **Tolerance lessons from the review.** (i) Test C⁰ at a joint by evaluating BOTH branch
+  formulas at the joint and requiring agreement (`test_wsplit` W4): a value check of the
+  function alone cannot tell continuity from a lucky branch selection. (ii) At a joint
+  whose closed-form slope is 0 a relative tolerance is meaningless; bound the one-sided
+  difference quotients ABSOLUTELY (`|q| ≤ 2h/F`, W5). (iii) Above the cap `1 − f =
+  Cu_max/Cu` is formed by cancellation, so the error of `Cu·(1−f)` scales as `eps·Cu`,
+  not with ulps of `Cu_max`: the first "4 ulp of `Cu_max`" bound failed at `Cu ≈ 17.5`
+  (measured 1.23 eps·Cu), the error-model bound `4·eps·Cu` passes with a 3x margin (W6).

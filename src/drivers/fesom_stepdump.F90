@@ -144,12 +144,14 @@ program fesom_stepdump
     dyn%visc_gamma2   = 0.285_WP
     dyn%visc_gamma0_h = 0.0_WP
     dyn%visc_gamma1_h = 0.0_WP
-    ! use_wsplit=.false. for the step gate (M1.4 precedent): the FCT implicit
-    ! vertical-advection correction (adv_tra_vert_impl, the use_wsplit=.true. path of
-    ! do_oce_adv_tra) is a distinct unported kernel. With .false. the explicit/implicit
-    ! split is trivial (w_e=w, w_i=0) AFTER vert_vel_ale; impl_vert_visc_ale still runs on
-    ! the prescribed w_i (it precedes compute_Wvel_split), so vertical momentum advection is
-    ! exercised. The use_wsplit=.true. split itself is gated separately at M2.7.
+    ! use_wsplit=.false. for the step gate (M1.4 precedent): the FESOM2 oracle of this
+    ! dump has the hard CFL switch, FESOM3 the smooth Shchepetkin split (oce_wsplit), so
+    ! the use_wsplit=.true. path (incl. the FCT adv_tra_vert_impl of do_oce_adv_tra) is
+    ! not byte-comparable here; its nets are test_wsplit / test_wimpl_tra and the
+    ! fesom_conserve wsplit gate configs. With .false. the explicit/implicit split is
+    ! trivial (w_e=w, w_i=0) AFTER vert_vel_ale; impl_vert_visc_ale still runs on the
+    ! prescribed w_i (it precedes compute_Wvel_split), so vertical momentum advection is
+    ! exercised.
     dyn%use_wsplit    = .false.
     dyn%wsplit_maxcfl = 1.0_WP
 

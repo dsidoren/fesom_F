@@ -454,16 +454,28 @@ Acceptance (Overview requirements against the code, 2026-10-02):
 
 ### Task 6: [Final] Update documentation
 
-- [ ] `docs/HANDOFF.md`: `use_wsplit` section (function, parameters, env vars, where the
-  implicit parts act, the FCT sequence, the retired pressure byte-gate fields)
-- [ ] `docs/LESSONS.md`: one entry (hard switch = degenerate case of the C¹ function;
+- [x] `docs/HANDOFF.md`: `use_wsplit` section (function, parameters, env vars, where the
+  implicit parts act, the FCT sequence, the retired pressure byte-gate fields) (the
+  "Implicit vertical advection (`use_wsplit`)" paragraph under "Momentum advection
+  options" — which still said no end-to-end gate was possible and the correction was
+  dormant — rewritten into the subsection "Implicit vertical advection: the smooth
+  `use_wsplit` split" with the measured net numbers of Tasks 1-5; the M2-era "unported
+  kernel" bullet marked ported)
+- [x] `docs/LESSONS.md`: one entry (hard switch = degenerate case of the C¹ function;
   the single-face LO explicit/implicit pair is exactly split-invariant, so a smoothness
   test needs operators that differ at first order; the constancy test is the consistency
-  proof)
-- [ ] stale comments: `src/oce/oce_adv_tra_driver.F90:26-28`, `src/oce/oce_ale.F90:489-496`,
+  proof) (L58, plus the measured-cap and the review's tolerance lessons; L57's last bullet
+  and the two M1.4/M2.9b-era "unported" mentions carry a superseded note pointing to L58)
+- [x] stale comments: `src/oce/oce_adv_tra_driver.F90:26-28`, `src/oce/oce_ale.F90:489-496`,
   `src/drivers/fesom_stepdump.F90:147-152`, `fesom_pressuredump.F90:498-501, 563-565`,
-  `src/oce/oce_ale_tracer.F90:536-537`
-- [ ] move this plan to `docs/plans/completed/`
+  `src/oce/oce_ale_tracer.F90:536-537` (the driver header, the `compute_Wvel_split`
+  header and the pressuredump comments were already rewritten in Tasks 2/3 — verified, no
+  change; rewritten now: the `fesom_stepdump` note, the `oce_ale_tracer` module header
+  and its `do_wimpl` comment, the `oce_dyn_ivertvisc` header (the split is active above
+  `wsplit_mincfl`, not `maxcfl`; end-to-end net named); tree grep for "unported" /
+  "dormant" / "not yet supported" clean outside `docs/plans/` and `HANDOFF-archive.md`;
+  comment-only edits, build clean, smoke ctest green)
+- [x] move this plan to `docs/plans/completed/` (moved by the harness at the end of the run)
 
 ## Post-Completion
 

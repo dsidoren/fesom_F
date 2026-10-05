@@ -29,12 +29,13 @@ module oce_dyn_ivertvisc
     ! scheme (momadv_opt==1, oce_dyn_vinv) is ADVECTIVE form in both directions
     ! (zeta x u + grad KE; Block C does w_e du/dz as d(w_e u)/dz - u dw_e/dz), so the
     ! flux-form operator would leave a spurious u*dw_i/dz wherever the split is active
-    ! (CFL_z > wsplit_maxcfl). For momadv_opt==1 the diagonal is therefore corrected by
+    ! (CFL_z > wsplit_mincfl, oce_wsplit). For momadv_opt==1 the diagonal is therefore corrected by
     !   b -= (wu-wd)*zinv            (bottom row: b -= wu*zinv, its wd is dropped)
     ! which turns the operator into the upwind ADVECTIVE form w_i du/dz (inflow-face
     ! velocity), zero row sums, constants preserved implicitly, diagonal dominance kept.
     ! Structurally gated: the ==2 path is untouched, and with use_wsplit=.false. w_i==0.
-    ! Net: test/test_ivertvisc.F90 (closed forms for both options).
+    ! Net: test/test_ivertvisc.F90 (closed forms for both options); end to end in the
+    ! fesom_conserve wsplit / momadv-vinv-wsplit gate configs (FESOM3_WSPLIT).
     ! Boundary rows: the surface row carries the wind-stress flux
     !   ur(top) += zinv*stress_surf(1,elem)/density_0 ;  vr(top) += zinv*stress_surf(2,elem)/density_0
     ! and the bottom row the quadratic bottom drag

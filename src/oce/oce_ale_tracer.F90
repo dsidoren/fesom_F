@@ -15,14 +15,16 @@ module oce_ale_tracer
     !                               consumer of the M2.8 PP vertical diffusivity dyn%work%Kv
     ! Gated for the pi / reduced-M2 config:
     !   Redi=.false.        -> the isoneutral slope (slope_tapered/Ki) terms vanish (isredi=0)
-    !   tra_adv_lim='FCT'   -> do_wimpl=.false. (implicit vertical advection off; the FCT
-    !                          scheme carries vertical advection explicitly via the full w)
+    !   tra_adv_lim='FCT'   -> do_wimpl=.false. (an FCT tracer takes the implicit part w_i
+    !                          of the use_wsplit split through adv_tra_vert_impl inside
+    !                          do_oce_adv_tra instead; without the split w_i = 0 anyway)
     !   i_vert_diff=.true.  -> the implicit (not explicit) vertical-diffusion path
     !   PP mixing (not KPP) -> use_kpp_nonlclflx=.false.; no sw-penetration / icebergs
     ! The branches deferred for that config (Redi explicit slopes, KPP nonlocal fluxes,
     ! shortwave penetration, icebergs, the explicit diff_ver_part_expl_ale, the biharmonic
     ! diff_part_bh) enter with their enabling features (M2.10+); the do_wimpl advection
-    ! terms are transcribed but unexercised on FCT (gated .false.). 1-rank only; the FESOM2
+    ! terms (use_wsplit, non-FCT tracers) are pinned by test_wsplit part X (QR4C + this
+    ! TDMA, Kv = 0) and are off for FCT tracers. 1-rank only; the FESOM2
     ! exchange_nod(values) loop tail is a no-op here (M2.12).
     use mod_precision,      only: WP, MP
     use mod_constants,      only: vcpw
@@ -506,9 +508,12 @@ contains
         ! relaxation), and solves it with the Thomas algorithm; then T += dTnew.
         !
         ! Redi (isredi=0) zeroes the isoneutral Ty/Ty1 terms; do_wimpl (use_wsplit .and. not
-        ! FCT) adds the implicit vertical advection, transcribed but .false. on the pi FCT
-        ! tracers. KPP nonlocal fluxes / shortwave penetration / icebergs are deferred with
-        ! their features (M2.10+).
+        ! FCT) adds the implicit upwind advection of w_i (the implicit part of the smooth
+        ! split, compute_Wvel_split) to the same TDMA -- live for non-FCT tracers and pinned
+        ! by test_wsplit part X (the chain == this TDMA bitwise in the fully implicit limit);
+        ! FCT tracers take w_i through adv_tra_vert_impl in do_oce_adv_tra instead. KPP
+        ! nonlocal fluxes / shortwave penetration / icebergs are deferred with their
+        ! features (M2.10+).
         integer,        intent(in)            :: tr_num
         real(kind=WP),  intent(in)            :: dt
         type(t_dyn),    intent(inout), target :: dynamics
