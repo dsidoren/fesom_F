@@ -1537,7 +1537,7 @@ no longer dumps `w_split_e/w_split_i` (nothing read them); `tools/pressure_diff.
 the FESOM2-side names in `SKIP_FIELDS` (printed as SKIP, never compared against FESOM2's
 hard split; the FESOM2 byte-gates are retired since bottom-at-vertices anyway). That
 driver calls `diff_tracers_ale` only, never `do_oce_adv_tra`, so it does not reach
-`adv_tra_vert_impl`. Plan: `docs/plans/2026-10-02-wsplit-smooth.md`; see L57,
+`adv_tra_vert_impl`. Plan: `docs/plans/completed/2026-10-02-wsplit-smooth.md`; see L57,
 L58.
 
 

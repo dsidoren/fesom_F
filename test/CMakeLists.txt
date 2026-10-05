@@ -75,7 +75,7 @@ foreach(_mix KPP TKE)
         SKIP_REGULAR_EXPRESSION "cannot open;No such file")
 endforeach()
 
-# Smooth w = w_e + w_i split (use_wsplit, docs/plans/2026-10-02-wsplit-smooth.md) with all
+# Smooth w = w_e + w_i split (use_wsplit, docs/plans/completed/2026-10-02-wsplit-smooth.md) with all
 # its consumers live: momentum TDMA + advection, the tracer-diffusion TDMA and the FCT
 # adv_tra_vert_impl. The 20-step cold start never reaches CFL_z ~ 1 (measured max
 # 2.76e-2), so the cap is 0.005 (onset 0.0025 by the driver's 0.5*maxcfl default): 8632

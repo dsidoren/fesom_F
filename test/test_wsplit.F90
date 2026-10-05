@@ -1,6 +1,6 @@
 program test_wsplit
     ! Smooth Courant-number-dependent explicit/implicit vertical-velocity split
-    ! (oce_wsplit + compute_Wvel_split, docs/plans/2026-10-02-wsplit-smooth.md).
+    ! (oce_wsplit + compute_Wvel_split, docs/plans/completed/2026-10-02-wsplit-smooth.md).
     !
     ! WHY THIS TEST EXISTS
     ! --------------------

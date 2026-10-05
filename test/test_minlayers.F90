@@ -5,7 +5,7 @@ program test_minlayers
     ! It is the precondition of the vertical kernels' row layouts (the 1-layer trap of
     ! adv_tra_ver_upw1; the surface/bottom rows of adv_tra_vert_impl, do_wimpl and the
     ! momentum TDMA), which validate nothing themselves: config-time checks, stateless
-    ! kernels (docs/plans/2026-10-02-wsplit-smooth.md, review round 2). Loads pi (minimum
+    ! kernels (docs/plans/completed/2026-10-02-wsplit-smooth.md, review round 2). Loads pi (minimum
     ! 4 layers: the walk passes inside read_mesh), then shrinks one owned column to ONE
     ! layer and re-walks: the walk must error stop with 'fewer than 2 layers' (ctest
     ! PASS_REGULAR_EXPRESSION); reaching the final write is the failure

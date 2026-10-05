@@ -3,7 +3,7 @@ program test_wimpl_tra
     ! w_i of the split vertical velocity (adv_tra_vert_impl, src/oce/oce_adv_tra_ver.F90,
     ! the port of FESOM2 oce_adv_tra_ver.F90:90-240) and its assembly in do_oce_adv_tra
     ! (src/oce/oce_adv_tra_driver.F90, FESOM2 oce_adv_tra_driver.F90:282-292).
-    ! docs/plans/2026-10-02-wsplit-smooth.md, Task 3.
+    ! docs/plans/completed/2026-10-02-wsplit-smooth.md, Task 3.
     !
     ! WHY THIS TEST EXISTS
     ! --------------------
