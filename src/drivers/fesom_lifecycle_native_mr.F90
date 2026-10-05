@@ -226,14 +226,22 @@ program fesom_lifecycle_native_mr
     ! FESOM3_MOMADV_OPT. Defaults: the t_dyn cap 1.0 and an onset of 0.5*maxcfl, so setting
     ! only FESOM3_WSPLIT_MAXCFL keeps the type's onset/cap ratio. Validated as t_dyn
     ! documents: maxcfl > 0, 0 <= mincfl <= maxcfl. Off unless set (production precedent).
+    ! An unparsable value is an error, not a silent fall-back to the default: a production
+    ! run must never carry a cap other than the one the job file asked for.
     call get_environment_variable('FESOM3_WSPLIT', env, length=env_len, status=ios)
     use_wsplit_env = (ios == 0 .and. env_len > 0)
     wsplit_maxcfl_env = 1.0_WP
     call get_environment_variable('FESOM3_WSPLIT_MAXCFL', env, length=env_len, status=ios)
-    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) wsplit_maxcfl_env
+    if (ios == 0 .and. env_len > 0) then
+        read(env, *, iostat=ios) wsplit_maxcfl_env
+        if (ios /= 0) error stop 'FESOM3_WSPLIT_MAXCFL: not a real'
+    end if
     wsplit_mincfl_env = 0.5_WP*wsplit_maxcfl_env
     call get_environment_variable('FESOM3_WSPLIT_MINCFL', env, length=env_len, status=ios)
-    if (ios == 0 .and. env_len > 0) read(env, *, iostat=ios) wsplit_mincfl_env
+    if (ios == 0 .and. env_len > 0) then
+        read(env, *, iostat=ios) wsplit_mincfl_env
+        if (ios /= 0) error stop 'FESOM3_WSPLIT_MINCFL: not a real'
+    end if
     if (.not. wsplit_check_params(wsplit_mincfl_env, wsplit_maxcfl_env)) &
         error stop 'FESOM3_WSPLIT_MINCFL/MAXCFL: need maxcfl > 0 and 0 <= mincfl <= maxcfl'
     if (partit%mype == 0 .and. (shear_splines .or. N2_splines)) write(*,'(a,l1,a,l1,a)') &

@@ -132,8 +132,12 @@ contains
         ! M4c GM bolus ADD (FESOM2 oce_ale_tracer.F90:199-211): advect with the residual-mean
         ! velocity UV + fer_uv / Wvel + fer_w. Added over owned+halo (advection reads the halo;
         ! fer_uv/fer_w were exchanged in fer_gamma2vel/vert_vel_ale), subtracted after the tracer
-        ! loop. fer_w goes into BOTH w and w_e (faithful; w_e is unused at use_wsplit=.false.).
-        ! Guarded by Fer_GM -> the GM-off (M2/M3) tracer solve is byte-unchanged.
+        ! loop. fer_w goes into BOTH w and w_e (faithful: the non-FCT high-order vertical
+        ! advection reads w_e, the FCT low-order step reads w_e and w; with the split off
+        ! w_e == w). With use_wsplit the whole bolus velocity is added to the EXPLICIT part
+        ! and bypasses the CFL cap (FESOM2 behaviour; the GM+wsplit gate config of
+        ! tools/run_conserve_pi.sh runs this combination). Guarded by Fer_GM -> the GM-off
+        ! (M2/M3) tracer solve is byte-unchanged.
         if (Fer_GM) then
             do elem = 1, nElemL
                 dynamics%uv(:,:,elem) = dynamics%uv(:,:,elem) + dynamics%fer_uv(:,:,elem)

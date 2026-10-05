@@ -7,12 +7,13 @@ module oce_adv_tra_ver
     !                               of the split vertical velocity (use_wsplit); acts in
     !                               place on the FCT low-order solution, no flux output
     !
-    ! Each returns a flux given at the vertical interfaces of the scalar volumes,
-    ! flux(nz,node) with nz = 1..nl interfaces (surface = ulevels_nod2D, zero at the
-    ! bottom interface nlevels_nod2D). o_init_zero=.true. zeroes the flux first;
-    ! .false. SUBTRACTS the new contribution from the input flux (so an HO call after
-    ! an LO call yields the antidiffusive flux). flux is NOT multiplied by dt — the
-    ! driver scatters it as (flux(nz)-flux(nz+1))*dt/areasvol (oce_adv_tra_flux).
+    ! The two explicit kernels return a flux given at the vertical interfaces of the
+    ! scalar volumes, flux(nz,node) with nz = 1..nl interfaces (surface = ulevels_nod2D,
+    ! zero at the bottom interface nlevels_nod2D); adv_tra_vert_impl updates ttf in place.
+    ! o_init_zero=.true. zeroes the flux first; .false. SUBTRACTS the new contribution
+    ! from the input flux (so an HO call after an LO call yields the antidiffusive flux).
+    ! flux is NOT multiplied by dt — the driver scatters it as
+    ! (flux(nz)-flux(nz+1))*dt/areasvol (oce_adv_tra_flux).
     !
     ! area(nz,n) is the geom-proven node control-volume area. Z_3d_n/zbar_3d_n are the
     ! ALE per-node mid-depth / interface-depth arrays; at the initial state (no cavity,
@@ -22,10 +23,12 @@ module oce_adv_tra_ver
     ! so the -no-prec-div reciprocal matches (cf. LESSONS L7: the trap is a runtime vs
     ! LITERAL divisor mismatch, not a runtime divisor per se).
     !
-    ! 1-rank only (myDim_nod2D == nod2D). On pi the shallowest column is 4 layers, so
-    ! neither the 1-layer ttf(0) read nor the QR4C 2-layer double-write (2nd-layer and
-    ! bottom-1 both hitting interface nzmin+1) occurs; the statement order below still
-    ! reproduces both faithfully for deeper-min meshes.
+    ! The explicit kernels were ported 1-rank (myDim_nod2D == nod2D) and later given the
+    ! optional partit -> owned-node loop; adv_tra_vert_impl is owned-loop via owned_bounds
+    ! from the start (the driver's exchange_nod(fct_LO) follows it). On pi the shallowest
+    ! column is 4 layers, so neither the 1-layer ttf(0) read nor the QR4C 2-layer
+    ! double-write (2nd-layer and bottom-1 both hitting interface nzmin+1) occurs; the
+    ! statement order below still reproduces both faithfully for deeper-min meshes.
     use mod_precision,   only: WP
     use mod_mesh,        only: t_mesh
     use mod_partit,      only: t_partit
@@ -163,15 +166,31 @@ contains
         ! Column sums of M are h' except the surface column, h' + w(nzmin)*v: the UNSIGNED
         ! surface transport, the implicit twin of the explicit -w*T*area of adv_tra_ver_upw1
         ! (L57: an implicit operator inherits the form of the explicit scheme it completes),
-        ! so the solve conserves h'*T up to that surface flux. Strictly diagonally dominant
-        ! with non-positive off-diagonals: the Thomas sweep below is stable and T^{n+1} is
-        ! a convex combination of the T* it starts from. FESOM2 also rebuilds zbar_n/Z_n
-        ! (:122-132) but never uses them -- dropped.
+        ! so the solve conserves h'*T up to that surface flux. The off-diagonals are
+        ! non-positive and the ROW margin is
+        !     b - |a| - |c| = h' + (w_i(nz) - w_i(nz+1))*v = h - (w_e(nz) - w_e(nz+1))*v,
+        ! the thickness the cell has LEFT after the explicit step with w_e. M is therefore
+        ! diagonally dominant (Thomas sweep stable, pivots > 0) iff no cell was drained by
+        ! the explicit step -- a PRECONDITION this kernel does not check (inherited from
+        ! FESOM2): the cap bounds every FACE Courant number (CFL_z <= wsplit_maxcfl), and a
+        ! cell with explicit outflow through both faces between much thicker neighbours
+        ! can still lose up to ~2*maxcfl*h_min/h of its thickness. Under the precondition
+        ! the COMBINED explicit+implicit step is the convex combination
+        !     T^{n+1} = [(h - v*out_e)*T + v*in_e*T_donor^n + v*in_i*T_donor^{n+1}]
+        !             / [(h - v*out_e) + v*in_e + v*in_i]
+        ! (out/in = the upwind outflow/inflow face velocities of the cell, split into
+        ! their explicit and implicit parts), i.e. bounded by T, the explicit donors' old
+        ! and the implicit donors' new values. The implicit solve ALONE weights T* by
+        ! h'/(h' + v*out_i) and is NOT a convex combination of T*; boundedness belongs to
+        ! the combined step (test_wimpl_tra C4 asserts the precondition and the bound).
+        ! FESOM2 also rebuilds zbar_n/Z_n (:142-150) but never uses them -- dropped.
         !
         ! The row layout needs at least 2 layers (surface row nzmin, bottom row nzmax-1;
         ! with one layer they are the same row -- the 1-layer trap adv_tra_ver_upw1's
-        ! module header notes). Guarded with error stop (pi's shallowest column has 4).
-        ! M2.12c: OWNED node loop (FESOM2 :106 do n=1,myDim_nod2D); the TDMA is per column
+        ! module header notes). compute_Wvel_split validates this once, collectively, on
+        ! the first split step; the error stop below is the kernel's own cheap assertion
+        ! for callers that bypass it (ctest test_wimpl_tra_onelayer_np1 trips it).
+        ! M2.12c: OWNED node loop (FESOM2 :120 do n=1,myDim_nod2D); the TDMA is per column
         ! (no halo coupling); the driver's exchange_nod(fct_LO) follows.
         real(kind=WP), intent(in)    :: dt
         type(t_mesh),  intent(in)    :: mesh

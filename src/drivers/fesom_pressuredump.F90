@@ -498,10 +498,12 @@ program fesom_pressuredump
     ! solve. Build the ALE thickness state the update reads/writes: mesh%hbar (prescribed,
     ! the previous-step elevation), hbar_old/dhe (outputs), hnode_new=hnode (linfs never
     ! evolves it), and dyn%w/cfl_z. Force the pi wsplit config (use_wsplit=.true.,
-    ! wsplit_maxcfl=1.0; wsplit_mincfl at its type default 0.5). The split is FESOM3's
-    ! smooth Shchepetkin function (oce_wsplit), NOT FESOM2's hard switch, so w_split_e/
-    ! w_split_i below are diagnostics and no longer byte-comparable (pressure_diff.py skips
-    ! them; the FESOM2 byte-gates are retired since bottom-at-vertices anyway).
+    ! wsplit_maxcfl=1.0; wsplit_mincfl at its type default 0.5) so compute_Wvel_split runs
+    ! here (the w_i /= 0 count below is its evidence). The split is FESOM3's smooth
+    ! Shchepetkin function (oce_wsplit), NOT FESOM2's hard switch, so w_e/w_i are not
+    ! byte-comparable and are NOT dumped; FESOM2's w_split_e/w_split_i records are listed
+    ! in pressure_diff.py's SKIP_FIELDS (the FESOM2 byte-gates are retired since
+    ! bottom-at-vertices anyway).
     ! alpha=theta=1.0 already set above. The chain is, in order:
     !   update_vel (UV += UV_rhs + SSH-grad) -> compute_hbar_ale (hbar/dhe/ssh_rhs_old)
     !   -> update_eta_n (eta_n=hbar) -> vert_vel_ale (w + cfl_z + Wvel split). dyn%uv_rhs
@@ -931,9 +933,9 @@ program fesom_pressuredump
     ! M2.7 ALE velocity/SSH/thickness-W update: the prescribed hbar input + the updated
     ! UV (update_vel) + the divergence ssh_rhs_old + new hbar/dhe (compute_hbar_ale) + the
     ! blended eta_n + the vertical velocity w (vert_vel_ale) + hnode_new (=hnode, linfs) +
-    ! cfl_z (compute_CFLz) + the explicit/implicit Wvel split (compute_Wvel_split; the
-    ! smooth FESOM3 split, so w_split_e/w_split_i are diagnostics only -- skipped by
-    ! pressure_diff.py, never byte-compared against FESOM2's hard split).
+    ! cfl_z (compute_CFLz). The explicit/implicit split w_e/w_i (compute_Wvel_split) is
+    ! the smooth FESOM3 function and is NOT dumped: nothing reads it, and FESOM2's
+    ! w_split_e/w_split_i records are skipped by pressure_diff.py (never byte-compared).
     call wr_r1(u, 'hbar_in',        real(hbar_in,          MP))
     call wr_r3(u, 'uv_upd',         real(uv_upd,           MP))
     call wr_r1(u, 'ssh_rhs_old',    real(dyn%ssh_rhs_old,  MP))
@@ -943,8 +945,6 @@ program fesom_pressuredump
     call wr_r2(u, 'w',              real(dyn%w(1:nl, :),   MP))
     call wr_r2(u, 'hnode_new',      real(mesh%hnode_new(1:nl-1, :), MP))
     call wr_r2(u, 'cfl_z',          real(dyn%cfl_z(1:nl, :), MP))
-    call wr_r2(u, 'w_split_e',      real(dyn%w_e(1:nl, :), MP))
-    call wr_r2(u, 'w_split_i',      real(dyn%w_i(1:nl, :), MP))
     ! M4b GM: the diffusivity fer_K (nl) + gravity-wave fer_c (cm^2) + scaling fer_scal +
     ! the streamfunction fer_gamma (fer_solve_Gamma TDMA) + bolus velocity fer_uv
     ! (fer_gamma2vel) + bolus vertical velocity fer_w (vert_vel_ale, Fer_GM branch).

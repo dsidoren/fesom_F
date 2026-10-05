@@ -3,7 +3,7 @@ program test_wimpl_tra
     ! w_i of the split vertical velocity (adv_tra_vert_impl, src/oce/oce_adv_tra_ver.F90,
     ! the port of FESOM2 oce_adv_tra_ver.F90:90-240) and its assembly in do_oce_adv_tra
     ! (src/oce/oce_adv_tra_driver.F90, FESOM2 oce_adv_tra_driver.F90:282-292).
-    ! docs/plans/2026-10-02-wsplit-smooth.md, Task 3.
+    ! docs/plans/completed/2026-10-02-wsplit-smooth.md, Task 3.
     !
     ! WHY THIS TEST EXISTS
     ! --------------------
@@ -61,21 +61,29 @@ program test_wimpl_tra
     !       and h'_d*T_d + h'_r*T_r == h_d*T_d + h_r*T_r; errors < 1e-12 relative
     !   C6  driver-level assembly: do_oce_adv_tra (FCT; UPW1 horizontal with vel = 0; QR4C
     !       vertical, num_ord = 1) with use_wsplit (0.5,1), a linear T(z) (horizontally
-    !       uniform, both signs of the slope), uniform w0 > 0 through the surface and the
-    !       interior faces down to the second-last cell, the last cell inert (w = 0 at both
-    !       its faces), Cu = 2*w0*dt/h0 = 1.2 -- the configuration where the FCT limiter is
-    !       provably inactive (below). Asserted:
-    !       (i)   the limiter leaves the antidiffusive flux unchanged (the driver's clipped
-    !             adv_flux_ver == the unclipped HO(w) - LO(w) at every owned face, and
-    !             every limiting factor b3 applies to a nonzero face is exactly 1)
-    !       (ii)  the driver's fct_LO and del_ttf_advvert == the test's own assembly from
-    !             the public parts: adv_tra_ver_upw1(w_e) -> the LO update ->
-    !             adv_tra_vert_impl(w_i) -> HO(w) - LO(w) -> oce_tra_adv_flux2dtracer(use_lo)
-    !       (iii) positive control: the WRONG assembly HO(w) - LO(w_e) differs from the
-    !             driver's by exactly the double-counted w_i transport,
+    !       uniform, both signs of the slope), uniform w0 of BOTH signs through the surface
+    !       and the interior faces down to the second-last cell, the last cell inert (w = 0
+    !       at both its faces), Cu = 2|w0|dt/h0 = 1.2. For w0 > 0 the FCT limiter is
+    !       provably inactive (below); for w0 < 0 it is active, so the test's own assembly
+    !       carries the limiter (oce_tra_adv_fct) and the wiring is checked with it live.
+    !       Asserted:
+    !       (i)   [w > 0] the limiter leaves the antidiffusive flux unchanged (the driver's
+    !             clipped adv_flux_ver == the unclipped HO(w) - LO(w) at every owned face,
+    !             every limiting factor b3 applies to a nonzero face is exactly 1, and the
+    !             number of nonzero antidiffusive faces is > 0 -- the non-vacuity guard of
+    !             the factor check, which an identically-zero flux would pass);
+    !             [w < 0] the limiter IS active (some applied factor < 1), as derived
+    !       (ii)  [both signs] the driver's fct_LO and del_ttf_advvert == the test's own
+    !             assembly from the public parts: adv_tra_ver_upw1(w_e) -> the LO update ->
+    !             adv_tra_vert_impl(w_i) -> exchange_nod(lo) -> HO(w) - LO(w) ->
+    !             oce_tra_adv_fct -> oce_tra_adv_flux2dtracer(use_lo)
+    !       (iii) positive control: the WRONG assembly HO(w) - LO(w_e). [w > 0, unlimited]
+    !             differs from the driver's by exactly the double-counted w_i transport,
     !             (-w_i(nz)*T(nz) + w_i(nz+1)*T(nz+1))*area*dt/areasvol, far above the
-    !             tolerance (the wiring bug a conservation gate cannot see: it telescopes)
-    !       (iv)  the closed form of the whole step. s = T(nz) - T(nz+1), r_i(nz) =
+    !             tolerance (the wiring bug a conservation gate cannot see: it telescopes);
+    !             [w < 0, limited like the driver] differs by more than the tolerance (the
+    !             limiter does not mask the wiring bug)
+    !       (iv)  [w > 0] the closed form of the whole step. s = T(nz) - T(nz+1), r_i(nz) =
     !             w_i(nz)*dt/h0 (the split's own w_i), cells nzmin..N (N = nzmax-1):
     !             LO: d_{N-1} = 0 (drained end cell: split invariance), d_N = 0 (inert),
     !             d_n = ((Cu/2)*s + r_i(n+1)*d_{n+1})/(1 + r_i(n)) upward, lo = T - d;
@@ -92,9 +100,23 @@ program test_wimpl_tra
     ! cell below it supplies the room (its value T - s; the HO move is (Cu/4)*s/(1 - Cu/2)
     ! < s for Cu < 4/3). For downward flow the drained end is the surface cell and nothing
     ! is above it (and with an open surface the unsigned surface flux carries T(1) both
-    ! ways, so lo(1) = T(1) and the HO increase Cu*s/4 is clipped). Hence w > 0 only; the
-    ! plan's "uniform interior w" with w = 0 at the bottom face is clipped at its last
-    ! cell, which is why the last cell is made inert here. (i) asserts the premise.
+    ! ways, so lo(1) = T(1) and the HO increase Cu*s/4 is clipped). Hence the closed form
+    ! and the inactive-limiter premise hold for w > 0 only; the plan's "uniform interior w"
+    ! with w = 0 at the bottom face is clipped at its last cell, which is why the last cell
+    ! is made inert here. (i) asserts the premise for w > 0 and its negation for w < 0.
+    !
+    ! SYNTHESISED COLUMNS (synth_columns; by the GLOBAL node index so np 1/2 agree). pi has
+    ! ulevels_nod2D = 1 everywhere and at least 4 layers, so the nzmin-based row layout of
+    ! adv_tra_vert_impl and of compute_CFLz / compute_Wvel_split would otherwise be tested
+    ! at nzmin = 1 only, and the 2-layer column the kernel's guard admits (empty interior
+    ! loop; surface row nzmin, bottom row nzmin+1) never. Every 10th global node with
+    ! >= 14 levels gets ulevels_nod2D = 3 (cavity), every 97th with >= 5 levels gets
+    ! nlevels_nod2D = ulevels + 2 (2 layers); C1-C5 run on the mix (C5 skips columns with
+    ! fewer than 3 layers: its single interior face is nzmin+2). The originals are restored
+    ! before C6: the driver's FCT limiter builds its clusters from ulevels(elem), which the
+    ! node-only synthesis would leave inconsistent. The 1-layer guard itself is tripped by
+    ! ctest test_wimpl_tra_onelayer_np1 (FESOM3_TEST_WIMPL_ONELAYER=1: one owned column
+    ! shrunk to a single layer, the kernel must error stop 'fewer than 2 layers').
     use mpi
     use mod_precision,      only: WP, MP
     use mod_mesh,           only: t_mesh
@@ -104,20 +126,24 @@ program test_wimpl_tra
     use mod_partitioning,   only: par_init, par_ex, set_partition
     use mod_mesh_read,      only: read_mesh
     use mod_mesh_areas,     only: compute_geometry
-    use mod_part_bounds,    only: owned_bounds
+    use mod_part_bounds,    only: owned_bounds, is_multirank
+    use mod_halo,           only: exchange_nod
     use oce_ale,            only: compute_CFLz, compute_Wvel_split
     use oce_adv_tra_ver,    only: adv_tra_ver_upw1, adv_tra_ver_qr4c, adv_tra_vert_impl
     use oce_adv_tra_flux,   only: oce_tra_adv_flux2dtracer
+    use oce_adv_tra_fct,    only: oce_tra_adv_fct
     use oce_adv_tra_driver, only: do_oce_adv_tra
     implicit none
 
     character(len=512) :: mesh_dir
+    character(len=64)  :: env
     type(t_partit) :: partit
     type(t_mesh)   :: mesh
     type(t_dyn)    :: dyn
     type(t_tracer) :: tracers
-    integer :: nfail, nsw
+    integer :: nfail, nsw, env_len, ios
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF, nl
+    integer, allocatable :: ulev0(:), nlev0(:)      ! the mesh's own ulevels/nlevels (restored for C6)
     real(kind=WP), parameter :: dt   = 1800.0_WP     ! s
     real(kind=WP), parameter :: h0   = 10.0_WP       ! reference layer thickness [m]
     real(kind=WP), parameter :: t0   = 10.0_WP
@@ -155,10 +181,16 @@ program test_wimpl_tra
     allocate(flux_v(nl, nNodL), flux_h(nl-1, nEdgeO), dttf_h(nl-1, nNodL), dttf_v(nl-1, nNodL))
     flux_v = 0.0_WP; flux_h = 0.0_WP; dttf_h = 0.0_WP; dttf_v = 0.0_WP
 
+    call synth_columns()
+    call get_environment_variable('FESOM3_TEST_WIMPL_ONELAYER', env, length=env_len, status=ios)
+    if (ios == 0 .and. env_len > 0) call onelayer_mode()
+
     call part_c1()
     call part_c2_c3()
     call part_c4()
     call part_c5()
+    mesh%ulevels_nod2D(1:nNodL) = ulev0          ! C6: the driver's FCT limiter needs the
+    mesh%nlevels_nod2D(1:nNodL) = nlev0          ! mesh's own (element-consistent) levels
     call part_c6()
 
     if (partit%mype == 0) then
@@ -225,6 +257,49 @@ contains
         if (partit%npes > 1) call MPI_Allreduce(l, a, 1, MPI_LOGICAL, MPI_LAND, &
                                                 partit%MPI_COMM_FESOM, ierr)
     end function gall
+
+    !=========================================================================
+    ! Synthesised columns (header) and the one-layer ctest mode
+    !=========================================================================
+    subroutine synth_columns()
+        integer :: n, g, ncav, n2
+        allocate(ulev0(nNodL), nlev0(nNodL))
+        ulev0 = mesh%ulevels_nod2D(1:nNodL)
+        nlev0 = mesh%nlevels_nod2D(1:nNodL)
+        ncav = 0; n2 = 0
+        do n = 1, nNodL
+            g = n
+            if (partit%npes > 1) g = partit%myList_nod2D(n)
+            if (mod(g, 10) == 0 .and. mesh%nlevels_nod2D(n) >= 14) then
+                mesh%ulevels_nod2D(n) = 3
+                if (n <= nNodO) ncav = ncav + 1
+            else if (mod(g, 97) == 0 .and. mesh%nlevels_nod2D(n) >= 5) then
+                mesh%nlevels_nod2D(n) = mesh%ulevels_nod2D(n) + 2
+                if (n <= nNodO) n2 = n2 + 1
+            end if
+        end do
+        ncav = gsum(ncav); n2 = gsum(n2)
+        if (partit%mype == 0) write(*,'(a,i0,a,i0)') '  synthesised owned columns: cavity (ulevels = 3) ', ncav, &
+                                                     '  2-layer ', n2
+        call check_true('cavity columns synthesised (ulevels_nod2D = 3)', ncav > 0)
+        call check_true('2-layer columns synthesised (nlevels_nod2D = ulevels + 2)', n2 > 0)
+    end subroutine synth_columns
+
+    subroutine onelayer_mode()
+        ! ctest test_wimpl_tra_onelayer_np1: the first owned column shrunk to ONE layer, the
+        ! kernel called directly -- it must error stop 'adv_tra_vert_impl: a column with
+        ! fewer than 2 layers' (PASS_REGULAR_EXPRESSION). Reaching the write below is the
+        ! failure (the message then never appears).
+        mesh%nlevels_nod2D(1) = mesh%ulevels_nod2D(1) + 1
+        call build_layers(2)
+        tin = t0
+        dyn%w_i = 0.0_WP
+        call adv_tra_vert_impl(dt, dyn%w_i, tin, mesh, partit)
+        if (partit%mype == 0) write(*,'(a)') &
+            'test_wimpl_tra: ONELAYER mode: adv_tra_vert_impl did NOT stop on a 1-layer column'
+        call par_ex(partit%MPI_COMM_FESOM, partit%mype)
+        error stop 1
+    end subroutine onelayer_mode
 
     !=========================================================================
     ! State builders
@@ -582,7 +657,7 @@ contains
             w0 = wsign*0.4_WP*h0/dt
             dyn%w = 0.0_WP
             do n = 1, nNodL
-                if (mesh%nlevels_nod2D(n) <= 0) cycle
+                if (mesh%nlevels_nod2D(n) - mesh%ulevels_nod2D(n) < 3) cycle   ! face nzmin+2 must be interior
                 dyn%w(mesh%ulevels_nod2D(n) + 2, n) = w0
             end do
             rmin = hnew_from_w()
@@ -600,7 +675,7 @@ contains
 
             err_a = 0.0_WP; err_b = 0.0_WP; err_m = 0.0_WP
             do n = 1, nNodO
-                if (mesh%nlevels_nod2D(n) <= 0) cycle
+                if (mesh%nlevels_nod2D(n) - mesh%ulevels_nod2D(n) < 3) cycle   ! (w = 0 there: untouched)
                 nzmin = mesh%ulevels_nod2D(n); nzmax = mesh%nlevels_nod2D(n)
                 k  = nzmin + 2
                 v  = dt*real(mesh%area(n), WP)/real(mesh%areasvol(n), WP)
@@ -643,14 +718,17 @@ contains
     ! C6 - driver-level assembly
     !=========================================================================
     subroutine part_c6()
-        integer :: isg, n, nz, nzmin, nzmax, n_lo, n_mid, n_hi
-        real(kind=WP) :: bz, w0, cu, rmin, s, ri, rin, tol, err_lo, err_v, err_w, err_cf, dmax, pmax
+        integer :: isg, iw, n, nz, nzmin, nzmax, n_lo, n_mid, n_hi, nnz
+        real(kind=WP) :: bz, w0, wsign, cu, rmin, s, ri, rin, tol, err_lo, err_v, err_w, err_cf, dmax, pmax
         real(kind=WP) :: d(nl), inc(nl), tdrv, tcf, hmin_fp, hmin_fm
-        logical :: ok_lim
-        character(len=8) :: stag
-        real(kind=WP), allocatable :: adf_test(:,:), dttf_wrong(:,:)
+        logical :: ok_lim, upward
+        character(len=8) :: stag, wtag
+        real(kind=WP), allocatable :: adf_test(:,:), adf_unlim(:,:), dttf_wrong(:,:)
+        real(kind=WP), allocatable :: fmin_t(:,:), fmax_t(:,:), fplus_t(:,:), fminus_t(:,:), adfh_t(:,:)
 
-        allocate(adf_test(nl, nNodL), dttf_wrong(nl-1, nNodL))
+        allocate(adf_test(nl, nNodL), adf_unlim(nl, nNodL), dttf_wrong(nl-1, nNodL))
+        allocate(fmin_t(nl-1, nNodL), fmax_t(nl-1, nNodL), fplus_t(nl-1, nNodL), fminus_t(nl-1, nNodL))
+        allocate(adfh_t(nl-1, nEdgeO))
         ! the one-tracer FCT state the driver reads (shapes as fesom_conserve)
         tracers%num_tracers = 1
         allocate(tracers%data(1))
@@ -673,132 +751,162 @@ contains
 
         call build_layers(2)
         cu = 1.2_WP
-        w0 = cu*h0/(2.0_WP*dt)
-        dyn%w = 0.0_WP
-        do n = 1, nNodL
-            if (mesh%nlevels_nod2D(n) <= 0) cycle
-            nzmin = mesh%ulevels_nod2D(n); nzmax = mesh%nlevels_nod2D(n)
-            dyn%w(nzmin:nzmax-2, n) = w0        ! open surface ... cell nzmax-2 drained; cell nzmax-1 inert
-        end do
-        rmin = hnew_from_w()
-        call check_true('C6 precondition hnode_new > 0', rmin > 0.0_WP)
-        call split(0.5_WP, 1.0_WP, n_lo, n_mid, n_hi)
-        call check_true('C6 the split is active (faces on the bend)', n_mid > 0)
-
-        do isg = 1, 2
-            bz   = merge(0.02_WP, -0.02_WP, isg == 1)      ! K/m; s = T(nz) - T(nz+1) = bz*h0
-            stag = merge('(s > 0)', '(s < 0)', isg == 1)
-            s    = bz*h0
+        do iw = 1, 2
+            upward = (iw == 1)
+            wsign  = merge(1.0_WP, -1.0_WP, upward)
+            wtag   = merge('(w > 0)', '(w < 0)', upward)
+            w0 = wsign*cu*h0/(2.0_WP*dt)
+            dyn%w = 0.0_WP
             do n = 1, nNodL
-                tin(:, n) = t0
-                if (mesh%nlevels_nod2D(n) <= 0) cycle
-                do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n) - 1
-                    tin(nz, n) = t0 + bz*real(mesh%Z_3d_n(nz, n), WP)
-                end do
-            end do
-            tol = 1.0e-13_WP*t0*h0
-
-            ! ---- the driver ----------------------------------------------------------------
-            tracers%data(1)%values   = tin
-            tracers%data(1)%valuesAB = tin
-            tracers%work%del_ttf_advhoriz = 0.0_MP
-            tracers%work%del_ttf_advvert  = 0.0_MP
-            call do_oce_adv_tra(dt, vel, dyn%w, dyn%w_i, dyn%w_e, 1, dyn, tracers, mesh, partit)
-
-            ! ---- the test's own assembly from the public parts -----------------------------
-            call lo_step(dyn%w_e, tin, tlo)                                 ! explicit LO with w_e
-            call adv_tra_vert_impl(dt, dyn%w_i, tlo, mesh, partit)          ! implicit with w_i
-            call adv_tra_ver_upw1(dyn%w, tin, mesh, adf_test, o_init_zero=.true., partit=partit)  ! LO(w)
-            call adv_tra_ver_qr4c(dyn%w, tin, mesh, tracers%data(1)%tra_adv_pv, adf_test, &
-                                  o_init_zero=.false., partit=partit)                              ! HO(w) - LO(w)
-            dttf_h = 0.0_WP; dttf_v = 0.0_WP; flux_h = 0.0_WP
-            call oce_tra_adv_flux2dtracer(dt, dttf_h, dttf_v, flux_h, adf_test, mesh, &
-                                          use_lo=.true., ttf=tin, lo=tlo, partit=partit)
-            ! ---- the WRONG assembly: HO(w) - LO(w_e) ---------------------------------------
-            call adv_tra_ver_upw1(dyn%w_e, tin, mesh, flux_v, o_init_zero=.true., partit=partit)
-            call adv_tra_ver_qr4c(dyn%w, tin, mesh, tracers%data(1)%tra_adv_pv, flux_v, &
-                                  o_init_zero=.false., partit=partit)
-            dttf_h = 0.0_WP; dttf_wrong = 0.0_WP; flux_h = 0.0_WP
-            call oce_tra_adv_flux2dtracer(dt, dttf_h, dttf_wrong, flux_h, flux_v, mesh, &
-                                          use_lo=.true., ttf=tin, lo=tlo, partit=partit)
-
-            ok_lim = .true.; err_lo = 0.0_WP; err_v = 0.0_WP; err_w = 0.0_WP; err_cf = 0.0_WP
-            dmax = 0.0_WP; pmax = 0.0_WP; hmin_fp = 1.0_WP; hmin_fm = 1.0_WP
-            do n = 1, nNodO
                 if (mesh%nlevels_nod2D(n) <= 0) cycle
                 nzmin = mesh%ulevels_nod2D(n); nzmax = mesh%nlevels_nod2D(n)
-                ! (i) the limiter left the antidiffusive flux alone: the clipped flux equals the
-                ! unclipped one, and every factor b3 APPLIES to a nonzero face is exactly 1
-                ! (b3: a face flux >= 0 is clipped by fct_minus(nz-1) and fct_plus(nz), < 0 by
-                ! fct_plus(nz-1) and fct_minus(nz); the surface face by its own cell's factor
-                ! only). Unused factors can be 0 -- e.g. the surface cell's one-sided factor
-                ! on the side with no antidiffusive contribution, whose a3 cluster is the
-                ! surface level alone -- and must not be counted.
-                do nz = nzmin, nzmax
-                    if (tracers%work%adv_flux_ver(nz, n) /= adf_test(nz, n)) ok_lim = .false.
-                end do
-                do nz = nzmin, nzmax - 1
-                    if (adf_test(nz, n) == 0.0_WP) cycle
-                    if (adf_test(nz, n) >= 0.0_WP) then
-                        hmin_fp = min(hmin_fp, real(tracers%work%fct_plus(nz, n), WP))
-                        if (nz > nzmin) hmin_fm = min(hmin_fm, real(tracers%work%fct_minus(nz-1, n), WP))
-                    else
-                        hmin_fm = min(hmin_fm, real(tracers%work%fct_minus(nz, n), WP))
-                        if (nz > nzmin) hmin_fp = min(hmin_fp, real(tracers%work%fct_plus(nz-1, n), WP))
-                    end if
-                end do
-                ! (ii) driver == test assembly
-                err_lo = max(err_lo, maxval(abs(real(tracers%work%fct_LO(nzmin:nzmax-1, n), WP) - tlo(nzmin:nzmax-1, n))))
-                err_v  = max(err_v,  maxval(abs(real(tracers%work%del_ttf_advvert(nzmin:nzmax-1, n), WP) - dttf_v(nzmin:nzmax-1, n))))
-                ! (iii) wrong - driver == the double-counted w_i transport
-                do nz = nzmin, nzmax - 1
-                    tcf = -dyn%w_i(nz, n)*tin(nz, n)
-                    if (nz + 1 <= nzmax - 1) tcf = tcf + dyn%w_i(nz+1, n)*tin(nz+1, n)
-                    tcf  = tcf*mesh%area(n)*dt/mesh%areasvol(n)
-                    tdrv = dttf_wrong(nz, n) - real(tracers%work%del_ttf_advvert(nz, n), WP)
-                    dmax  = max(dmax, abs(tdrv))
-                    pmax  = max(pmax, abs(tcf))
-                    err_w = max(err_w, abs(tdrv - tcf))
-                end do
-                ! (iv) closed form of the whole step: T_new = T - d + inc
-                d = 0.0_WP; inc = 0.0_WP
-                do nz = nzmax - 3, nzmin, -1
-                    ri  = dyn%w_i(nz, n)*dt/h0
-                    rin = dyn%w_i(nz+1, n)*dt/h0
-                    d(nz) = (0.5_WP*cu*s + rin*d(nz+1))/(1.0_WP + ri)
-                end do
-                inc(nzmin)   = 0.25_WP*cu*s
-                inc(nzmax-2) = inc(nzmax-2) - 0.25_WP*cu*s/(1.0_WP - 0.5_WP*cu)
-                do nz = nzmin, nzmax - 1
-                    ! the ALE reconstruct of the driver's tendency: T + (dttf_v + T*(h - h'))/h'
-                    tdrv = tin(nz, n) + (real(tracers%work%del_ttf_advvert(nz, n), WP) &
-                                         + tin(nz, n)*(mesh%hnode(nz, n) - mesh%hnode_new(nz, n)))/mesh%hnode_new(nz, n)
-                    tcf  = tin(nz, n) - d(nz) + inc(nz)
-                    err_cf = max(err_cf, abs(tdrv - tcf))
-                end do
+                dyn%w(nzmin:nzmax-2, n) = w0        ! open surface ... cell nzmax-2 is the flow's end; cell nzmax-1 inert
             end do
-            err_lo = gmax(err_lo); err_v = gmax(err_v); err_w = gmax(err_w); err_cf = gmax(err_cf)
-            dmax = gmax(dmax); pmax = gmax(pmax); hmin_fp = gmin(hmin_fp); hmin_fm = gmin(hmin_fm)
-            if (partit%mype == 0) then
-                write(*,'(a,a,a,f6.3,a,f6.3)')         '  C6  ', stag, ': min limiting factor b3 applies to a nonzero face: fct_plus = ', &
-                                                       hmin_fp, '  fct_minus = ', hmin_fm
-                write(*,'(a,a,a,es10.2,a,es10.2,a,es9.2,a)') '  C6  ', stag, ': |fct_LO - test LO| = ', err_lo, &
-                                                       '  |del_ttf_advvert - test| = ', err_v, '  (tol ', tol, ' K m)'
-                write(*,'(a,a,a,es10.2,a,es10.2,a,es10.2)') '  C6  ', stag, ': wrong assembly |delta| = ', dmax, &
-                                                       '  predicted = ', pmax, '  |delta - predicted| = ', err_w
-                write(*,'(a,a,a,es10.2,a)')            '  C6  ', stag, ': |T_new(driver) - closed form| = ', err_cf, ' K'
-            end if
-            call check_true('C6 (i) the limiter leaves the antidiffusive flux unchanged '//stag, gall(ok_lim))
-            call check_true('C6 (i) every limiting factor applied to a nonzero face == 1 '//stag, &
-                            hmin_fp == 1.0_WP .and. hmin_fm == 1.0_WP)
-            call check_true('C6 (ii) driver fct_LO == test assembly LO '//stag, err_lo <= tol)
-            call check_true('C6 (ii) driver del_ttf_advvert == test assembly '//stag, err_v <= tol)
-            call check_true('C6 (iii) positive control: HO(w) - LO(w_e) differs by more than the tolerance '//stag, &
-                            dmax > 1.0e3_WP*tol)
-            call check_true('C6 (iii) positive control: the difference == the double-counted w_i transport '//stag, &
-                            err_w <= 1.0e-12_WP*pmax)
-            call check_true('C6 (iv) driver result == closed form of the FCT+wsplit step (1e-12) '//stag, &
-                            err_cf <= 1.0e-12_WP*t0)
+            rmin = hnew_from_w()
+            call check_true('C6 precondition hnode_new > 0 '//wtag, rmin > 0.0_WP)
+            call split(0.5_WP, 1.0_WP, n_lo, n_mid, n_hi)
+            call check_true('C6 the split is active (faces on the bend) '//wtag, n_mid > 0)
+
+            do isg = 1, 2
+                bz   = merge(0.02_WP, -0.02_WP, isg == 1)      ! K/m; s = T(nz) - T(nz+1) = bz*h0
+                stag = merge('(s > 0)', '(s < 0)', isg == 1)
+                s    = bz*h0
+                do n = 1, nNodL
+                    tin(:, n) = t0
+                    if (mesh%nlevels_nod2D(n) <= 0) cycle
+                    do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n) - 1
+                        tin(nz, n) = t0 + bz*real(mesh%Z_3d_n(nz, n), WP)
+                    end do
+                end do
+                tol = 1.0e-13_WP*t0*h0
+
+                ! ---- the driver ----------------------------------------------------------------
+                tracers%data(1)%values   = tin
+                tracers%data(1)%valuesAB = tin
+                tracers%work%del_ttf_advhoriz = 0.0_MP
+                tracers%work%del_ttf_advvert  = 0.0_MP
+                call do_oce_adv_tra(dt, vel, dyn%w, dyn%w_i, dyn%w_e, 1, dyn, tracers, mesh, partit)
+
+                ! ---- the test's own assembly from the public parts, limiter included ---------
+                call lo_step(dyn%w_e, tin, tlo)                                 ! explicit LO with w_e
+                call adv_tra_vert_impl(dt, dyn%w_i, tlo, mesh, partit)          ! implicit with w_i
+                if (is_multirank(partit)) call exchange_nod(tlo, partit)        ! the limiter's a1 reads lo at the halo
+                call adv_tra_ver_upw1(dyn%w, tin, mesh, adf_test, o_init_zero=.true., partit=partit)  ! LO(w)
+                call adv_tra_ver_qr4c(dyn%w, tin, mesh, tracers%data(1)%tra_adv_pv, adf_test, &
+                                      o_init_zero=.false., partit=partit)                              ! HO(w) - LO(w)
+                adf_unlim = adf_test                                            ! the unclipped flux, for (i)
+                adfh_t = 0.0_WP; fmin_t = 0.0_WP; fmax_t = 0.0_WP; fplus_t = 0.0_WP; fminus_t = 0.0_WP
+                call oce_tra_adv_fct(dt, tin, tlo, adfh_t, adf_test, fmin_t, fmax_t, fplus_t, fminus_t, &
+                                     mesh, partit=partit)
+                dttf_h = 0.0_WP; dttf_v = 0.0_WP; flux_h = 0.0_WP
+                call oce_tra_adv_flux2dtracer(dt, dttf_h, dttf_v, flux_h, adf_test, mesh, &
+                                              use_lo=.true., ttf=tin, lo=tlo, partit=partit)
+                ! ---- the WRONG assembly: HO(w) - LO(w_e); unlimited for w > 0 (exact identity),
+                !      limited like the driver for w < 0 (the limiter must not mask the bug) ----
+                call adv_tra_ver_upw1(dyn%w_e, tin, mesh, flux_v, o_init_zero=.true., partit=partit)
+                call adv_tra_ver_qr4c(dyn%w, tin, mesh, tracers%data(1)%tra_adv_pv, flux_v, &
+                                      o_init_zero=.false., partit=partit)
+                if (.not. upward) then
+                    adfh_t = 0.0_WP; fmin_t = 0.0_WP; fmax_t = 0.0_WP; fplus_t = 0.0_WP; fminus_t = 0.0_WP
+                    call oce_tra_adv_fct(dt, tin, tlo, adfh_t, flux_v, fmin_t, fmax_t, fplus_t, fminus_t, &
+                                         mesh, partit=partit)
+                end if
+                dttf_h = 0.0_WP; dttf_wrong = 0.0_WP; flux_h = 0.0_WP
+                call oce_tra_adv_flux2dtracer(dt, dttf_h, dttf_wrong, flux_h, flux_v, mesh, &
+                                              use_lo=.true., ttf=tin, lo=tlo, partit=partit)
+
+                ok_lim = .true.; err_lo = 0.0_WP; err_v = 0.0_WP; err_w = 0.0_WP; err_cf = 0.0_WP
+                dmax = 0.0_WP; pmax = 0.0_WP; hmin_fp = 1.0_WP; hmin_fm = 1.0_WP; nnz = 0
+                do n = 1, nNodO
+                    if (mesh%nlevels_nod2D(n) <= 0) cycle
+                    nzmin = mesh%ulevels_nod2D(n); nzmax = mesh%nlevels_nod2D(n)
+                    ! (i) the limiter's effect: the driver's clipped flux against the unclipped
+                    ! one, and the factors b3 APPLIES to nonzero faces (b3: a face flux >= 0 is
+                    ! clipped by fct_minus(nz-1) and fct_plus(nz), < 0 by fct_plus(nz-1) and
+                    ! fct_minus(nz); the surface face by its own cell's factor only). Unused
+                    ! factors can be 0 -- e.g. the surface cell's one-sided factor on the side
+                    ! with no antidiffusive contribution, whose a3 cluster is the surface level
+                    ! alone -- and must not be counted. nnz counts the nonzero faces so the
+                    ! factor check cannot pass on an identically-zero flux.
+                    do nz = nzmin, nzmax
+                        if (tracers%work%adv_flux_ver(nz, n) /= adf_unlim(nz, n)) ok_lim = .false.
+                    end do
+                    do nz = nzmin, nzmax - 1
+                        if (adf_unlim(nz, n) == 0.0_WP) cycle
+                        nnz = nnz + 1
+                        if (adf_unlim(nz, n) >= 0.0_WP) then
+                            hmin_fp = min(hmin_fp, real(tracers%work%fct_plus(nz, n), WP))
+                            if (nz > nzmin) hmin_fm = min(hmin_fm, real(tracers%work%fct_minus(nz-1, n), WP))
+                        else
+                            hmin_fm = min(hmin_fm, real(tracers%work%fct_minus(nz, n), WP))
+                            if (nz > nzmin) hmin_fp = min(hmin_fp, real(tracers%work%fct_plus(nz-1, n), WP))
+                        end if
+                    end do
+                    ! (ii) driver == test assembly
+                    err_lo = max(err_lo, maxval(abs(real(tracers%work%fct_LO(nzmin:nzmax-1, n), WP) - tlo(nzmin:nzmax-1, n))))
+                    err_v  = max(err_v,  maxval(abs(real(tracers%work%del_ttf_advvert(nzmin:nzmax-1, n), WP) - dttf_v(nzmin:nzmax-1, n))))
+                    ! (iii) wrong - driver (== the double-counted w_i transport for w > 0)
+                    do nz = nzmin, nzmax - 1
+                        tcf = -dyn%w_i(nz, n)*tin(nz, n)
+                        if (nz + 1 <= nzmax - 1) tcf = tcf + dyn%w_i(nz+1, n)*tin(nz+1, n)
+                        tcf  = tcf*mesh%area(n)*dt/mesh%areasvol(n)
+                        tdrv = dttf_wrong(nz, n) - real(tracers%work%del_ttf_advvert(nz, n), WP)
+                        dmax  = max(dmax, abs(tdrv))
+                        pmax  = max(pmax, abs(tcf))
+                        err_w = max(err_w, abs(tdrv - tcf))
+                    end do
+                    ! (iv) closed form of the whole step (w > 0): T_new = T - d + inc
+                    d = 0.0_WP; inc = 0.0_WP
+                    do nz = nzmax - 3, nzmin, -1
+                        ri  = dyn%w_i(nz, n)*dt/h0
+                        rin = dyn%w_i(nz+1, n)*dt/h0
+                        d(nz) = (0.5_WP*cu*s + rin*d(nz+1))/(1.0_WP + ri)
+                    end do
+                    inc(nzmin)   = 0.25_WP*cu*s
+                    inc(nzmax-2) = inc(nzmax-2) - 0.25_WP*cu*s/(1.0_WP - 0.5_WP*cu)
+                    do nz = nzmin, nzmax - 1
+                        ! the ALE reconstruct of the driver's tendency: T + (dttf_v + T*(h - h'))/h'
+                        tdrv = tin(nz, n) + (real(tracers%work%del_ttf_advvert(nz, n), WP) &
+                                             + tin(nz, n)*(mesh%hnode(nz, n) - mesh%hnode_new(nz, n)))/mesh%hnode_new(nz, n)
+                        tcf  = tin(nz, n) - d(nz) + inc(nz)
+                        err_cf = max(err_cf, abs(tdrv - tcf))
+                    end do
+                end do
+                err_lo = gmax(err_lo); err_v = gmax(err_v); err_w = gmax(err_w); err_cf = gmax(err_cf)
+                dmax = gmax(dmax); pmax = gmax(pmax); hmin_fp = gmin(hmin_fp); hmin_fm = gmin(hmin_fm); nnz = gsum(nnz)
+                if (partit%mype == 0) then
+                    write(*,'(a,a,a,a,a,f6.3,a,f6.3,a,i0,a)') '  C6  ', wtag, ' ', stag, &
+                        ': min limiting factor b3 applies to a nonzero face: fct_plus = ', &
+                        hmin_fp, '  fct_minus = ', hmin_fm, '  (', nnz, ' nonzero faces)'
+                    write(*,'(a,a,a,a,a,es10.2,a,es10.2,a,es9.2,a)') '  C6  ', wtag, ' ', stag, ': |fct_LO - test LO| = ', err_lo, &
+                        '  |del_ttf_advvert - test| = ', err_v, '  (tol ', tol, ' K m)'
+                    write(*,'(a,a,a,a,a,es10.2,a,es10.2,a,es10.2)') '  C6  ', wtag, ' ', stag, ': wrong assembly |delta| = ', dmax, &
+                        '  predicted = ', pmax, '  |delta - predicted| = ', err_w
+                    if (upward) write(*,'(a,a,a,a,a,es10.2,a)') '  C6  ', wtag, ' ', stag, &
+                        ': |T_new(driver) - closed form| = ', err_cf, ' K'
+                end if
+                if (upward) then
+                    call check_true('C6 (i) the limiter leaves the antidiffusive flux unchanged '//wtag//' '//stag, gall(ok_lim))
+                    call check_true('C6 (i) every limiting factor applied to a nonzero face == 1 '//wtag//' '//stag, &
+                                    hmin_fp == 1.0_WP .and. hmin_fm == 1.0_WP)
+                    call check_true('C6 (i) nonzero antidiffusive faces > 0 (non-vacuity of the factor check) '//wtag//' '//stag, &
+                                    nnz > 0)
+                else
+                    call check_true('C6 (i) the limiter is active for downward flow, as derived '//wtag//' '//stag, &
+                                    nnz > 0 .and. (hmin_fp < 1.0_WP .or. hmin_fm < 1.0_WP))
+                end if
+                call check_true('C6 (ii) driver fct_LO == test assembly LO '//wtag//' '//stag, err_lo <= tol)
+                call check_true('C6 (ii) driver del_ttf_advvert == test assembly (limiter included) '//wtag//' '//stag, &
+                                err_v <= tol)
+                call check_true('C6 (iii) positive control: HO(w) - LO(w_e) differs by more than the tolerance '//wtag//' '//stag, &
+                                dmax > 1.0e3_WP*tol)
+                if (upward) then
+                    call check_true('C6 (iii) positive control: the difference == the double-counted w_i transport '//wtag//' '//stag, &
+                                    err_w <= 1.0e-12_WP*pmax)
+                    call check_true('C6 (iv) driver result == closed form of the FCT+wsplit step (1e-12) '//wtag//' '//stag, &
+                                    err_cf <= 1.0e-12_WP*t0)
+                end if
+            end do
         end do
     end subroutine part_c6
 end program test_wimpl_tra

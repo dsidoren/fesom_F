@@ -36,9 +36,9 @@ module oce_ale
     use mod_dyn,        only: t_dyn
     use mod_partit,     only: t_partit
     use mod_part_bounds, only: owned_bounds, is_multirank
-    use mod_halo,       only: exchange_nod, exchange_elem, exchange_elem_full
+    use mod_halo,       only: exchange_nod, exchange_elem, exchange_elem_full, allreduce_max
     use mod_config,     only: which_ALE          ! M6 ALE: 'linfs'/'zlevel'/'zstar'
-    use oce_wsplit,     only: wsplit_implicit_fraction   ! the C^1 w_e/w_i split function
+    use oce_wsplit,     only: wsplit_implicit_fraction, wsplit_check_params   ! the C^1 w_e/w_i split function
     implicit none
     private
     public :: update_vel, compute_hbar_ale, update_eta_n, vert_vel_ale
@@ -47,7 +47,8 @@ module oce_ale
     ! 'linfs'). Both join the faithful oce_timestep sequence assembled in mod_step_oce.
     public :: compute_vel_nodes, update_thickness_ale
     ! The vertical-CFL / w-split pair at the end of vert_vel_ale, exported for
-    ! test/test_wsplit.F90 (parts S and X drive them on prescribed w).
+    ! test/test_wsplit.F90 (parts S and X drive them on prescribed w) and
+    ! test/test_wimpl_tra.F90 (C2-C6 build their split with them).
     public :: compute_CFLz, compute_Wvel_split
 
 contains
@@ -455,7 +456,8 @@ contains
         ! M2.12c-3: optional partit -> the FESOM2 owned+HALO node loops (:3154/:3161 do node=
         ! 1, myDim_nod2D+eDim_nod2D); Wvel/hnode_new are halo-valid from vert_vel_ale's two
         ! exchange_nod's, so CFL_z is built over owned+halo (feeds compute_Wvel_split's
-        ! owned+halo Wvel_e/Wvel_i, which the NEXT step's momentum advection reads at halo).
+        ! owned+halo Wvel_e/Wvel_i, which the NEXT step's momentum TDMA and vector-invariant
+        ! advection read at the halo vertices of owned elements; test_wsplit S5).
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
         real(kind=WP), intent(in) :: dt
@@ -489,44 +491,50 @@ contains
     !===========================================================================
     subroutine compute_Wvel_split(dynamics, mesh, partit)
         ! Split Wvel into the explicitly (Wvel_e) and implicitly (Wvel_i) advected parts,
-        ! w = w_e + w_i, face by face as a function of the vertical Courant number CFL_z
-        ! (compute_CFLz: the face flux counted against BOTH adjacent cells, FESOM2's
-        ! definition, unchanged). Consumers: the momentum TDMA (w_i), momentum advection
-        ! (w_e), the tracer vertical-diffusion TDMA (do_wimpl, w_i) and the FCT
-        ! adv_tra_vert_impl (w_i); they read Wvel_e/Wvel_i at owned+halo on the NEXT step.
+        ! w = w_e + w_i, face by face: w_i = f*w with the implicit share f from
+        ! oce_wsplit::wsplit_implicit_fraction(CFL_z, wsplit_mincfl, wsplit_maxcfl), the C^1
+        ! Shchepetkin function that replaces FESOM2's hard switch (oce_ale.F90:3217-3265;
+        ! WHY, the three branches and the no-hard-switch-mode decision are documented ONCE,
+        ! in oce_wsplit). CFL_z is compute_CFLz's (the face flux counted against BOTH
+        ! adjacent cells, FESOM2's definition, unchanged), so wsplit_maxcfl keeps its FESOM2
+        ! meaning: the explicit CFL_z never exceeds it.
         !
-        ! WHY NOT FESOM2's FORM. FESOM2 (oce_ale.F90:3217-3265) uses a hard switch:
-        !     CFL_z <= C : w_e = w        CFL_z > C : w_e = w*C/CFL_z   (C = wsplit_maxcfl)
-        ! so d(w_e)/d(CFL_z) jumps from 1 to 0 at C and a face oscillating around the
-        ! threshold flips between high-order explicit and partly first-order implicit
-        ! treatment (a first-order kink of the tracer tendency on the non-FCT path, where
-        ! QR4C and the upwind TDMA differ at first order; measured as a derivative jump
-        ! J = cq*h^2*(1+C)/2 per unit Courant number in test_wsplit X2). FESOM3 replaces it
-        ! by the C^1 limiting function of Shchepetkin (2015, Ocean Modelling 91, Sec. 3.1 /
-        ! Fig. 9; NEMO wAimp), oce_wsplit::wsplit_implicit_fraction: the implicit share f is
-        ! 0 up to wsplit_mincfl, bends smoothly, and from Cu_cut = 2*maxcfl - mincfl on caps
-        ! the explicit CFL_z EXACTLY at wsplit_maxcfl -- FESOM2's cap, reached without the
-        ! kink, so wsplit_maxcfl keeps its FESOM2 meaning. There is no hard-switch mode
-        ! (decision 2026-10-02, docs/plans/2026-10-02-wsplit-smooth.md): mincfl = maxcfl IS
-        ! the hard switch in exact arithmetic and serves only as a test control.
+        ! Consumers. Same step, OWNED columns: the FCT adv_tra_vert_impl and the non-FCT
+        ! do_wimpl TDMA (both run in the tracer step after vert_vel_ale). NEXT step, at the
+        ! halo vertices of owned elements: the momentum TDMA impl_vert_visc_ale (w_i) and
+        ! the vector-invariant advection momentum_adv_vinv (w_e); momentum_adv_scalar reads
+        ! w_e at owned nodes only. M2.12c-3: optional partit -> the FESOM2 owned+HALO node
+        ! loop (:3251 do node=1, myDim_nod2D+eDim_nod2D); Wvel/CFL_z are halo-valid so
+        ! Wvel_e/Wvel_i are produced at owned+halo with no trailing exchange (matches
+        ! FESOM2; halo == owner bitwise, test_wsplit S5).
         !
         ! w_e = w - w_i (not a second product) makes w_e + w_i == w to 1 ulp, bitwise when
         ! |w_i| >= |w|/2 (Sterbenz); no consumer needs more. use_wsplit=.false. is literally
-        ! the previous off path: w_e = w, w_i = +0 over the same face range.
-        ! OVERWRITES dynamics%w_e/w_i (the same arrays prescribed as M2.4/M2.5 inputs — fully
-        ! consumed before this runs). M2.12c-3: optional partit -> the FESOM2 owned+HALO node
-        ! loop (:3251 do node=1, myDim_nod2D+eDim_nod2D); Wvel/CFL_z are halo-valid so
-        ! Wvel_e/Wvel_i are produced at owned+halo with no trailing exchange (matches
-        ! FESOM2). Pinned by test/test_wsplit.F90 part S (the identities above on every
-        ! owned+halo face) and part X (transition smoothness on the tracer path).
+        ! the previous off path: w_e = w, w_i = +0 over the same face range, validated
+        ! nothing. OVERWRITES dynamics%w_e/w_i (the same arrays prescribed as M2.4/M2.5
+        ! inputs — fully consumed before this runs). Pinned by test/test_wsplit.F90 part S
+        ! (the identities above on every owned+halo face) and part X (transition
+        ! smoothness on the tracer path).
+        !
+        ! ON-PATH VALIDATION. (1) The pair (wsplit_mincfl, wsplit_maxcfl) is checked on
+        ! every call (three comparisons, identical on all ranks): the t_dyn default
+        ! mincfl = 0.5 is an ABSOLUTE number, so a driver/namelist that lowers maxcfl
+        ! below it without touching mincfl would otherwise run an inadmissible pair in
+        ! silence -- for (0.5, 0.3) Cu_cut = 0.1 < mincfl and f jumps from 0 to 0.4 at
+        ! CFL_z = 0.5, the discontinuity this function exists to remove. (2) Once, on the
+        ! first split step, every owned column must have >= 2 layers (the row layout of
+        ! the implicit consumers adv_tra_vert_impl / do_wimpl), with a COLLECTIVE verdict
+        ! so all ranks stop together instead of one rank error-stopping inside a per-step
+        ! loop while the others proceed to the next exchange.
         type(t_dyn),  intent(inout), target :: dynamics
         type(t_mesh), intent(in),    target :: mesh
         type(t_partit), intent(in), optional :: partit
         !______________________________________________________________________
         integer       :: node, nz, nzmin, nzmax
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        real(kind=WP) :: f
+        real(kind=WP) :: f, nbad
         real(kind=WP), dimension(:,:), pointer :: Wvel, Wvel_e, Wvel_i, CFL_z
+        logical, save :: columns_checked = .false.
 
         Wvel   => dynamics%w
         Wvel_e => dynamics%w_e
@@ -544,6 +552,19 @@ contains
                 end do
             end do
             return
+        end if
+
+        if (.not. wsplit_check_params(dynamics%wsplit_mincfl, dynamics%wsplit_maxcfl)) &
+            error stop 'compute_Wvel_split: inadmissible (wsplit_mincfl, wsplit_maxcfl): need maxcfl > 0 and 0 <= mincfl <= maxcfl'
+        if (.not. columns_checked) then
+            nbad = 0.0_WP
+            do node = 1, nNodO
+                if (mesh%nlevels_nod2D(node) - mesh%ulevels_nod2D(node) < 2) nbad = nbad + 1.0_WP
+            end do
+            if (is_multirank(partit)) call allreduce_max(nbad, partit)
+            if (nbad > 0.0_WP) &
+                error stop 'compute_Wvel_split: an owned column with fewer than 2 layers (the implicit w_i consumers need 2)'
+            columns_checked = .true.
         end if
 
         do node = 1, nNodL

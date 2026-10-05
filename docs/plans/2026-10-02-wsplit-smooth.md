@@ -165,8 +165,14 @@ interior a = min(0,w(nz))·v;  b = hnode_new + max(0,w(nz))·v − min(0,w(nz+1)
 bottom   a = min(0,w(nz))·v;  b = hnode_new + max(0,w(nz))·v;  c = 0
 rhs      tr = −a·T(nz−1) − (b − hnode_new)·T(nz) − c·T(nz+1);  solve;  T += tr
 ```
-Column sums of the matrix equal `hnode_new` (conservative); strictly diagonally dominant
-with non-positive off-diagonals (TDMA stable). The unsigned surface term matches the
+Column sums of the matrix equal `hnode_new` (conservative). Row sums are
+`h' + (w_i(nz) − w_i(nz+1))·v = h − (w_e(nz) − w_e(nz+1))·v`, the thickness left after the
+EXPLICIT step, so diagonal dominance (TDMA stable, pivots > 0) holds iff no cell is
+drained by the explicit step — a PRECONDITION, not a kernel property (the cap bounds
+faces, not cells: "What the cap bounds" above; C4 asserts it). Boundedness belongs to the
+COMBINED step: `T^{n+1}` is a convex combination of `T^n`, the explicit donors' `T^n` and
+the implicit donors' `T^{n+1}` (weights `(h − v·out_e)`, `v·in_e`, `v·in_i`), NOT of the
+`T*` the implicit solve starts from (review 2026-10-05). The unsigned surface term matches the
 explicit surface flux `−w·T·area` of `adv_tra_ver_upw1` (L57 form consistency). FESOM2
 computes `zbar_n/Z_n` here but never uses them — dropped. Columns with fewer than 2 layers
 are not supported by the row layout (same trap as `adv_tra_ver_upw1`, documented there):
@@ -194,18 +200,29 @@ kink of the hard switch is FIRST order only where explicit and implicit operator
 at first order — the non-FCT path: QR4C (centred) on `w_e` plus the upwind TDMA on `w_i`.
 There the tendency's derivative with respect to `w` jumps by `[UPW − QR4C](T)` at the
 threshold, which is non-zero for a `T` with curvature (for linear `T` and uniform `w` the
-two flux divergences coincide). Hence part X below runs on QR4C + `diff_ver_part_impl_ale`
-with `Kv = 0`, quadratic `T`, uniform interior `w`, and derives the jump in closed form.
+two flux divergences coincide). Exactly (X0): `J = cq·h²·(1+Cu_c)/2` per unit `Cu` — the
+shorthand `[UPW − QR4C](T) = cq·h²/2` is its `Cu_c → 0` limit; the factor `(1+Cu_c)` is
+the explicit pre-advection `T* = T + w_c·P_q T` at the threshold, which the TDMA then acts
+on (measured kink `1.0025·J`; the shorthand would read 2.005). Hence part X below runs on
+QR4C + `diff_ver_part_impl_ale` with `Kv = 0`, quadratic `T`, uniform interior `w`, and
+derives the jump in closed form.
 
 ### Diagnostics
 
-`fesom_conserve`: at the last step the number of faces with `f > 0`, with `f ≥ 0.5`, and
-`max f` over owned nodes (MPI-summed/maxed), printed; with `FESOM3_WSPLIT_EXPECT_SPLIT=1`
-an `error stop` if no face split (so the gate config cannot be vacuous). The production
-driver prints the parameters in its banner. `fesom_pressuredump`: its `cfl_z > maxcfl`
-count becomes a count of `w_i ≠ 0`; `w_split_e/w_split_i` stay in the dump as
-diagnostics but are dropped from `tools/pressure_diff.py`'s compared fields (the byte-gate
-is retired; the hard split no longer exists to compare against).
+`fesom_conserve` (as built; amended after review 2026-10-05): ONE statistics line printed
+for EVERY config (max `CFL_z` is how a cap is chosen for a config, so it must be visible
+with the split off), over owned faces at the last step, MPI-summed/maxed: max `CFL_z`,
+faces with `w_i ≠ 0` (= `CFL_z > mincfl`, the onset), faces on the CAPPED branch
+`CFL_z ≥ Cu_cut = 2·maxcfl − mincfl` (where `Cu_e` saturates exactly at `maxcfl`; at
+`CFL_z = maxcfl` a face is still on the bend), faces with `f ≥ 0.5` (= `CFL_z ≥ 2·maxcfl`)
+and `max f`. `FESOM3_WSPLIT_EXPECT_SPLIT=N` (VALUE-based): `error stop` unless at least `N`
+faces split and at least one has `f ≥ 0.5` (the gate configs use `N = 1000`, 8x below
+the measured 8632; the trip path is ctest `fesom_conserve_zstar_wsplit_vacuous_np1`).
+The production driver prints the parameters in its banner. `fesom_pressuredump`: its
+`cfl_z > maxcfl` count becomes a count of `w_i ≠ 0`; `w_split_e/w_split_i` are NO LONGER
+dumped (nothing read them); `tools/pressure_diff.py` keeps them in `SKIP_FIELDS` so the
+FESOM2-side records do not fail the "MISSING in F3" test (the byte-gate is retired; the
+hard split no longer exists to compare against).
 
 ## What Goes Where
 
@@ -274,12 +291,22 @@ is retired; the hard split no longer exists to compare against).
   - X1 scan `Cu` on ≥ 600 points in `[0, 3·maxcfl]` (601 points, `ΔCu = 0.005`, probe
     cell 5 of every owned column with ≥ 10 levels, both signs of `w`): measured
     `max|D2|/(ΔCu·max|D1|) = 0.96` (w>0) / `1.17` (w<0) against the bound 10
+    (➕ review 2026-10-05: the bound is now 5 — a C⁰-but-not-C¹ linear ramp of `f` would
+    have passed 10 for w<0 (expected ratio ~8); the probe is cell `nzmin + 4` of ONE
+    representative column per `(ulevels, nlevels)` class (every other column shrunk to
+    2 layers for the scan: equal-depth columns are identical by construction, and this
+    took the test from 65-92 s to 10 s), with cavity columns `ulevels = 3` synthesised
+    on every 10th global node; measured values unchanged, 0.962 / 1.170)
   - X2 positive control, the degenerate `(1,1)` function: ratio `100.3` / `64.1` (violates
     X1 by 10x / 6.4x; the SAME numbers came out of the pre-rewrite hard split, which
     failed X1 exactly this way); kink `D2 = 1.0025·J·ΔCu` (floor `0.5`, pinned to 5 %)
   - X3 fully explicit limit: bitwise at all 101 scan points with `Cu ≤ mincfl` (every
     owned cell); fully implicit limit: chain == pure `do_wimpl` TDMA bitwise, and the TDMA
     == the closed-form upwind row recursion to 3.8e-16 relative (both signs)
+    (➕ review 2026-10-05: the "chain == pure TDMA bitwise" check was a tautology — with
+    `w_e = 0` the QR4C flux is identically zero, so the chain IS the TDMA by
+    construction — and was dropped; the chain is compared with the closed-form recursion
+    directly, 3.6e-16)
 - [x] rewrite `compute_Wvel_split` (table in Technical Details); update its header
   (`compute_CFLz`/`compute_Wvel_split` made public for the test)
 - [x] add `wsplit_mincfl` to `t_dyn` + serialization; extend `test_types` `test_dyn`
@@ -380,7 +407,12 @@ is retired; the hard split no longer exists to compare against).
   `w = 0`, plus `max CFL_z` and the counts above `mincfl` / `maxcfl` / `2·maxcfl` — the
   breakpoints at which `f > 0`, the cap starts and `f ≥ 0.5`; MPI-summed/maxed, rank 0;
   printed for EVERY config; positive control: `EXPECT_SPLIT=1` with the cap 1.0 gives
-  0 split faces and exit 1)
+  0 split faces and exit 1) (⚠️ review 2026-10-05: the cap does NOT start at `maxcfl` —
+  `Cu_e` saturates at `Cu_cut = 2·maxcfl − mincfl`; the "`> maxcfl`" column counted the
+  faces FESOM2's hard switch would have split. Rebuilt as one line (Technical Details →
+  Diagnostics): `w_i ≠ 0` / capped `CFL_z ≥ Cu_cut` / `f ≥ 0.5` / max `f` / max `CFL_z`;
+  measured capped faces 1130 at the gate cap. `EXPECT_SPLIT` is value-based, the trip
+  path is a ctest)
 - [x] measure `max CFL_z` of the 20-step pi conserve run (cold start from rest: expected
   far below 0.5) and choose `FESOM3_WSPLIT_MAXCFL` for the gate config so that a
   substantial number of faces split, some with `f ≥ 0.5`; record the measured counts here
@@ -398,7 +430,7 @@ is retired; the hard split no longer exists to compare against).
   next step's momentum advection — np ≥ 2 required) (the heredoc loop's `tail -7` became
   `tail -9` and the np=8 block uses `tail -8` so the two statistics lines are visible for
   every config; ctest now 42 tests)
-- [x] run the full gate — GATE OK required before Task 5 (GATE OK, 22 configs; wsplit
+- [x] run the full gate — GATE OK required before Task 5 (GATE OK, 21 configs; wsplit
   drift heat/salt/vol = 1.7e-14 / -9.5e-15 / -2.6e-14 at np 1, -8.5e-16 / 3.5e-16 /
   3.9e-15 at np 8; momadv-vinv-wsplit -1.1e-14 / -4.1e-15 / 1.5e-14; all pre-existing
   configs' drifts identical to the Task 3 gate log, i.e. the `use_wsplit=.false.` path is
@@ -444,8 +476,10 @@ Acceptance (Overview requirements against the code, 2026-10-02):
   (`oce_ale_tracer.F90:532`); the FCT path ported: `adv_tra_vert_impl`
   (`oce_adv_tra_ver.F90:140-241`) + LO flux on the full `w` (`oce_adv_tra_driver.F90:
   149-150`), no error stop left
-- ✓ nothing else in the discretization changed: `git diff 66177c4..HEAD -- src/` is 8
-  files (new module, the split, the FCT branch, the `t_dyn` field, three drivers)
+- ✓ nothing else in the discretization changed: `git diff 66177c4..HEAD -- src/` was 8
+  files at Task 5 (new module, the split, the FCT branch, the `t_dyn` field, three
+  drivers); +3 comment-only files in Task 6 (`fesom_stepdump`, `oce_ale_tracer`,
+  `oce_dyn_ivertvisc`); the review fixes below touch the same set
 - ✓ diagnostics/hooks: `FESOM3_WSPLIT` / `_MINCFL` / `_MAXCFL` + banners in both drivers;
   `fesom_conserve` `wsplit_statistics` (:510-561) + `FESOM3_WSPLIT_EXPECT_SPLIT`;
   `fesom_pressuredump` counts `w_i ≠ 0`; `pressure_diff.py` skips `w_split_e/w_split_i`
@@ -477,12 +511,51 @@ Acceptance (Overview requirements against the code, 2026-10-02):
   comment-only edits, build clean, smoke ctest green)
 - [x] move this plan to `docs/plans/completed/` (moved by the harness at the end of the run)
 
+### Review fixes (2026-10-05, after the five-agent review)
+
+- [x] guards as ctests: `fesom_conserve_zstar_wsplit_vacuous_np1` (cap 0.5 splits nothing →
+  "vacuous config" and no drift report; the pass regex also pins the driver default
+  `mincfl = 0.5·maxcfl` = 0.2500), `fesom_conserve_wsplit_badparams_np1` ((0.9, 0.5)
+  rejected), `fesom_conserve_wsplit_badvalue_np1` (`MAXCFL=0.5x` → "not a real"; the
+  `read(env,*,iostat=)` results were unchecked in both env-hook drivers),
+  `test_wimpl_tra_onelayer_np1` (the kernel's < 2-layer `error stop`)
+- [x] `FESOM3_WSPLIT_EXPECT_SPLIT=N` value-based: ≥ N split faces AND ≥ 1 face at `f ≥ 0.5`
+  (gate/ctest configs `N = 1000`)
+- [x] halo contract: `test_wsplit` S5 (global-index inputs → `cfl_z/w_e/w_i` at every halo
+  node == owner bitwise against an `exchange_nod`'d copy, 1429 faces at np 2, 0
+  mismatches; positive control with local-index inputs: 1429/1429 mismatch). The np 2
+  conserve tests run the halo consumers but cannot see a wrong halo value.
+- [x] `compute_Wvel_split` validates on the on path: the pair on every call (the `t_dyn`
+  default `mincfl = 0.5` is absolute), the ≥ 2-layer column requirement once with a
+  collective verdict (the kernel's rank-local `error stop` stays as a cheap assertion)
+- [x] cavity (`ulevels = 3`) and 2-layer columns synthesised by global index in both tests
+  (309 / 29 owned on pi); `test_wimpl_tra` C1-C5 run on the mix (restored for C6: the
+  FCT limiter needs element-consistent `ulevels`); C6 now also assembles w < 0 with
+  `oce_tra_adv_fct` in the test's own assembly (limiter active, wiring bitwise; the
+  wrong assembly differs by 3.9 / 1.4 K·m) and counts the nonzero antidiffusive faces
+  (95469) so (i) cannot pass vacuously
+- [x] `test_wsplit`: one representative column per `(ulevels, nlevels)` class (10 s / 6 s
+  at np 1/2, was 65-92 / 38-41 s), X1 bound 5, X3a not re-run on the X2 scan, the X3b
+  tautology and W4's grid comparison against the test's own formula copies dropped, W7
+  reworded (a compiler-path check under `-no-prec-div -fimf-use-svml`, kept), the
+  `apply_chain(dyn%w_e, dyn%w_i, …)` aliasing (F2008 12.5.2.13) removed
+- [x] statistics: one line, breakpoints `mincfl` / `Cu_cut` / `2·maxcfl` (capped faces
+  1130 at the gate cap); gate tails fixed so the line is visible for every config;
+  `GM+wsplit` gate config added (22 configs); `fesom_pressuredump` no longer dumps
+  `w_split_e/w_split_i`
+- [x] docs: the dominance claim → precondition + combined-step convexity (kernel header,
+  above), FESOM2 line refs (:120, :142-150), module header (in-place kernel, owned loop),
+  consumer timing (tracers same step owned; momentum next step at owned elements' halo
+  vertices), GM `fer_w` comment, HANDOFF/LESSONS breakpoint wording, all plan citations
+  on the `docs/plans/completed/` path
+
 ## Post-Completion
 
 *No checkboxes — informational.*
 
 - **Production**: `job_levante` decides `FESOM3_WSPLIT=1` and `FESOM3_WSPLIT_MINCFL`
-  (default 0.5). Use a fresh RUNID; do not switch it on together with other changes.
+  (default `0.5·maxcfl`). Use a fresh RUNID; do not switch it on together with other
+  changes.
 - **Evaluation**: compare a short run with/without the split on core2 — split-face
   statistics per step, `w` and tracer fields near thin z* surface layers and in
   convective columns, conservation drift.

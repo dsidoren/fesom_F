@@ -1096,7 +1096,8 @@ multi-rank ✅ DONE + byte-gated 2026-06-23/24 (`max|Δ|=0`, CORE2 1-rank AND di
   oracle base namelist IS work_core (GM params already correct) so `run_lifecycle_core2.sh` gained `FER_GM=1` to KEEP
   `Fer_GM=.true.` (Redi sed off); FESOM3 `fesom_lifecycle` gained `FESOM3_FER_GM` (sets `Fer_GM` + work_core GM config
   + allocates/inits the GM arrays). NO oracle source change. `compute_neutral_slope` SKIPPED (Redi/Ktaper-only,
-  unconsumed at M4c → M4d). `fer_w` into BOTH `w` and `w_e` (faithful; `w_e` unused at `use_wsplit=.false.`). No
+  unconsumed at M4c → M4d). `fer_w` into BOTH `w` and `w_e` (faithful: the non-FCT HO vertical advection reads `w_e`; it
+  equals `w` when the split is off). No
   regression: GM-OFF lifecycle 195 `|Δ|=0` (the `Fer_GM`-guarded edits are byte-neutral), step-65 1-rank `|Δ|=0`,
   ctest 13/13.
 - **M4d** — Redi isopycnal diffusion, gated `Fer_GM=T + Redi=T` (production GM+Redi) UNFORCED lifecycle: **`max|Δ|=0`,
@@ -1410,10 +1411,9 @@ ice step + `oce_fluxes` into a forced lifecycle, drop the prescribed fluxes, the
 Both only ADD into `UV_rhsAB`, dispatched as siblings in `compute_vel_rhs`; `momadv_opt==2`
 is unreachable from the `==1` branch, so enabling the new scheme cannot perturb the old one.
 
-`FESOM3_MOMADV_OPT` (**value**-based, not presence-based — `momadv_opt` is 1 or 2) selects
-it in `fesom_conserve`; `tools/run_conserve_pi.sh` gates it at np=1 and np=8. No production
-driver sets `momadv_opt = 1` — exposing it in `fesom_lifecycle_native_mr` is a separate,
-deliberate step.
+`FESOM3_MOMADV_OPT` (**value**-based, not presence-based — `momadv_opt` is 1 or 2; default
+2) is read by `fesom_conserve` and `fesom_lifecycle_native_mr`; `tools/run_conserve_pi.sh`
+gates it at np=1 and np=8. The other production drivers pin `momadv_opt = 2`.
 
 `rvo_upwind` (`FESOM3_RVO_UPWIND`, value in [0,1], default 0) blends the face
 relative-vorticity reconstruction toward the 1-2 upwind edge-neighbours, weighted by the
@@ -1455,17 +1455,24 @@ The argument is FESOM2's `CFL_z` (`compute_CFLz`, unchanged):
 cells (one term at the surface), so `wsplit_maxcfl = 1` means `|w|·dt/h ≈ 0.5` per cell
 on uniform layers.
 
-Parameters: `t_dyn%wsplit_mincfl` (type default 0.5) and `%wsplit_maxcfl` (1.0), both
-serialized (`test_types` round trip); admissible iff `maxcfl > 0` and
-`0 ≤ mincfl ≤ maxcfl` (`wsplit_check_params`; the drivers `error stop` otherwise). Env
-hooks in `fesom_conserve` and `fesom_lifecycle_native_mr`: `FESOM3_WSPLIT` (presence →
-`use_wsplit`), `FESOM3_WSPLIT_MAXCFL` (value, default 1.0), `FESOM3_WSPLIT_MINCFL` (value,
-default `0.5·maxcfl`, so a config that sets only the cap keeps the type's onset/cap
-ratio), `FESOM3_WSPLIT_EXPECT_SPLIT` (`fesom_conserve` only: `error stop` if no owned face
-split at the last step). OFF in every production driver (`use_wsplit=.false.` pinned:
-`w_e == w`, `w_i == +0` bitwise, the previous off path verbatim, every pre-existing gate
-drift row unchanged); switching it on in `job_levante` and choosing `wsplit_mincfl` is the
-user's call.
+Parameters: `t_dyn%wsplit_mincfl` (type default 0.5 — an ABSOLUTE number, `0.5·maxcfl`
+only at the default cap) and `%wsplit_maxcfl` (1.0), both serialized (`test_types` round
+trip); admissible iff `maxcfl > 0` and `0 ≤ mincfl ≤ maxcfl` (`wsplit_check_params`; the
+drivers `error stop` otherwise, and `compute_Wvel_split` re-checks the pair on every
+on-path call so a driver that lowers the cap without the onset cannot run the
+discontinuous pair in silence; it also checks once, collectively, that every owned column
+has ≥ 2 layers). Env hooks in `fesom_conserve` and `fesom_lifecycle_native_mr`:
+`FESOM3_WSPLIT` (presence → `use_wsplit`), `FESOM3_WSPLIT_MAXCFL` (value, default 1.0),
+`FESOM3_WSPLIT_MINCFL` (value, default `0.5·maxcfl`, so a config that sets only the cap
+keeps the type's onset/cap ratio; an unparsable value is an `error stop`, not the
+default), `FESOM3_WSPLIT_EXPECT_SPLIT=N` (value; `fesom_conserve` only: `error stop`
+unless ≥ N owned faces split at the last step and ≥ 1 has `f ≥ 0.5`). Off by default
+everywhere: `fesom_lifecycle`, `_mr`, `_native`, `fesom_stepdump*`, `fesom_stepfull_mr`,
+`fesom_advhordump_mr` pin `use_wsplit=.false.`; `fesom_conserve` and
+`fesom_lifecycle_native_mr` default to `.false.` unless `FESOM3_WSPLIT` is set. With it
+off: `w_e == w`, `w_i == +0` bitwise, the previous off path verbatim, every pre-existing
+gate drift row unchanged. Switching it on in `job_levante` and choosing `wsplit_mincfl`
+is the user's call.
 
 Where `w_i` acts: (1) momentum — the TDMA `impl_vert_visc_ale` in upwind flux form, with
 the advective-form diagonal correction for `momadv_opt==1` (L57; `test_ivertvisc` I1-I5);
@@ -1480,37 +1487,52 @@ the `w_i` transport and still telescope — a conservation gate cannot see it.)
 
 Nets: `test/test_wsplit.F90` W (function: cap error ≤ 4.4e-17, joints exact, C¹ to
 1.6e-6, `Cu_e` monotone to 1.23 eps·Cu), S (split identities on pi: `w_e + w_i = w` to
-1 ulp, `w_i = f·w` bitwise, every `CFL_z` class populated), X (transition smoothness of
-the non-FCT chain QR4C + `do_wimpl`, `Kv = 0`, quadratic `T`, 601-point `Cu` scan over
-`[0, 3·maxcfl]`: second-difference ratio `max|D2|/(ΔCu·max|D1|)` = 0.96 / 1.17 for
-`w ≷ 0` against the bound 10; positive control = the degenerate `(1,1)` function: 100.3 /
-64.1, its kink `D2 = 1.0025·J·ΔCu` at the closed-form jump `J = cq·h²·(1+Cu_c)/2`).
-`test/test_wimpl_tra.F90` C1-C6 (identity bitwise; constancy of uniform `T` through
-explicit(`w_e`) + implicit(`w_i`) with `hnode_new` advanced by the full `w` ≤ 5.3e-16 for
-three parameter sets, both signs, open surface; conservation ≤ 1e-15; boundedness at
-`CFL_z` 10.8 / 14.0 against an uncapped positive control overshooting by 0.95 / 5.6 of the
-range; the fully implicit closed form; C6 the driver `do_oce_adv_tra` BITWISE equal to the
-test's own assembly at np 1/2, the wrong `HO(w) − LO(w_e)` differing by 29.9 / 58.8 K·m =
-the predicted double-counted `w_i` transport to 5e-14). End to end: `fesom_conserve`
-prints for every config the last-step owned-face statistics (max `CFL_z`, counts above
-`mincfl` / `maxcfl` / `2·maxcfl`, faces with `w_i ≠ 0`, `f ≥ 0.5`, max `f`). The 20-step pi
-cold start has max `CFL_z` = 2.76e-2, so the default cap 1.0 splits NOTHING
-(`EXPECT_SPLIT=1` then exits 1 — the measured positive control); the gate configs
-`wsplit` / `momadv-vinv-wsplit` use `FESOM3_WSPLIT_MAXCFL=0.005` (onset 0.0025, chosen
-over 0.01 which left 26 faces at `f ≥ 0.5`): 8632 faces split, 500 at `f ≥ 0.5`, max `f`
-0.818 (np 8: 8628 / 496; vinv: 8647 / 497), drift heat/salt/vol ~1e-14
-(`tools/run_conserve_pi.sh` np 1/8 + vinv np 1; ctest
-`fesom_conserve_zstar_{wsplit,vinv_wsplit}_np{1,2}` — np ≥ 2 because the halo `w_e/w_i`
-is read by the next step's momentum advection). The conserve tracers are FCT, so the gate
-runs path (3) and the momentum TDMA; path (2) is pinned at unit level by X3 (chain ==
-pure `do_wimpl` TDMA bitwise, TDMA == the closed-form upwind row recursion).
+1 ulp, `w_i = f·w` bitwise, every `CFL_z` class populated), S5 (the HALO contract: inputs
+from the global node index, then `cfl_z/w_e/w_i` at every halo node == the owner's
+bitwise against an `exchange_nod`'d copy — 1429 faces at np 2, 0 mismatches; positive
+control with local-index inputs 1429/1429 mismatch. No consumer exchanges `w_e/w_i` and
+the conserve gate is blind to a wrong halo value, so this is the only net on it), X
+(transition smoothness of the non-FCT chain QR4C + `do_wimpl`, `Kv = 0`, quadratic `T`,
+601-point `Cu` scan over `[0, 3·maxcfl]` on one representative column per
+`(ulevels, nlevels)` class: second-difference ratio `max|D2|/(ΔCu·max|D1|)` = 0.96 / 1.17
+for `w ≷ 0` against the bound 5 (a C⁰ linear ramp would pass 10 for `w < 0`); positive
+control = the degenerate `(1,1)` function: 100.3 / 64.1, its kink `D2 = 1.0025·J·ΔCu` at
+the closed-form jump `J = cq·h²·(1+Cu_c)/2`). Both tests synthesise cavity columns
+(`ulevels = 3` on every 10th global node) so the `nzmin`-based layouts are not tested at
+`nzmin = 1` only. `test/test_wimpl_tra.F90` C1-C6 (identity bitwise; constancy of uniform
+`T` through explicit(`w_e`) + implicit(`w_i`) with `hnode_new` advanced by the full `w`
+≤ 5.3e-16 for three parameter sets, both signs, open surface, incl. a 2-layer column;
+conservation ≤ 1e-15; boundedness at `CFL_z` 10.8 / 14.0 against an uncapped positive
+control overshooting by 0.95 / 5.6 of the range; the fully implicit closed form; C6 the
+driver `do_oce_adv_tra` BITWISE equal to the test's own assembly at np 1/2 for BOTH signs
+of `w` — the assembly carries `oce_tra_adv_fct`, inactive for `w > 0` (every factor 1
+on 95469 nonzero faces, closed form of the whole step to 1.4e-14 K) and active for
+`w < 0` — the wrong `HO(w) − LO(w_e)` differing by 29.9 / 58.8 K·m = the predicted
+double-counted `w_i` transport to 5e-14 for `w > 0`, by 3.9 / 1.4 K·m with the limiter
+for `w < 0`); ctest `test_wimpl_tra_onelayer_np1` trips the kernel's < 2-layer guard.
+End to end: `fesom_conserve` prints for every config one last-step owned-face statistics
+line (max `CFL_z`; faces with `w_i ≠ 0` = `CFL_z > mincfl`; capped faces
+`CFL_z ≥ Cu_cut = 2·maxcfl − mincfl`; `f ≥ 0.5` = `CFL_z ≥ 2·maxcfl`; max `f`). The
+20-step pi cold start has max `CFL_z` = 2.76e-2, so the default cap 1.0 splits NOTHING;
+the gate configs `wsplit` / `momadv-vinv-wsplit` / `GM+wsplit` use
+`FESOM3_WSPLIT_MAXCFL=0.005` (onset 0.0025, chosen over 0.01 which left 26 faces at
+`f ≥ 0.5`): 8632 faces split, 1130 capped, 500 at `f ≥ 0.5`, max `f` 0.818 (np 8: 8628 /
+496; vinv: 8647 / 497), drift heat/salt/vol ~1e-14 (`tools/run_conserve_pi.sh` np 1/8 +
+vinv np 1 + GM np 1; ctest `fesom_conserve_zstar_{wsplit,vinv_wsplit}_np{1,2}` with
+`EXPECT_SPLIT=1000`). The guards are ctests too: `fesom_conserve_zstar_wsplit_vacuous_np1`
+(cap 0.5 → "vacuous config", no drift report; also pins the driver default
+`mincfl = 0.5·maxcfl`), `fesom_conserve_wsplit_badparams_np1` ((0.9, 0.5) rejected),
+`fesom_conserve_wsplit_badvalue_np1` (`MAXCFL=0.5x` rejected). The conserve tracers are
+FCT, so the gate runs path (3) and the momentum TDMA; path (2) is pinned at unit level by
+X3 (the chain in the fully implicit limit == the closed-form upwind row recursion).
 
 Retired byte-gate fields: `fesom_pressuredump` still forces `use_wsplit=.true.` (cap 1.0)
-and dumps `w_split_e/w_split_i`, but they are now the smooth split and
-`tools/pressure_diff.py` lists them in `SKIP_FIELDS` (printed as SKIP, never compared
-against FESOM2's hard split; the FESOM2 byte-gates are retired since bottom-at-vertices
-anyway); its diagnostic counts faces with `w_i ≠ 0`. That driver calls `diff_tracers_ale`
-only, never `do_oce_adv_tra`, so it does not reach `adv_tra_vert_impl`. Plan:
-`docs/plans/completed/2026-10-02-wsplit-smooth.md`; see L57, L58.
+so `compute_Wvel_split` runs there (its diagnostic counts faces with `w_i ≠ 0`), but it
+no longer dumps `w_split_e/w_split_i` (nothing read them); `tools/pressure_diff.py` keeps
+the FESOM2-side names in `SKIP_FIELDS` (printed as SKIP, never compared against FESOM2's
+hard split; the FESOM2 byte-gates are retired since bottom-at-vertices anyway). That
+driver calls `diff_tracers_ale` only, never `do_oce_adv_tra`, so it does not reach
+`adv_tra_vert_impl`. Plan: `docs/plans/completed/2026-10-02-wsplit-smooth.md`; see L57,
+L58.
 
 

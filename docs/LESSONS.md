@@ -2512,13 +2512,16 @@ for the smooth split; the tests are the specification (L54).
 - *A cap must be measured.* The 20-step pi cold start from rest has max `CFL_z` =
   2.76e-2 (owned faces above 0.005 / 0.01 / 0.02 / 0.04: 2568 / 499 / 26 / 0). At the
   default cap 1.0 a `wsplit` conserve config splits NOTHING and would have passed as a
-  no-op; with `FESOM3_WSPLIT_EXPECT_SPLIT=1` it exits 1 (the positive control). The gate
-  cap 0.005 (onset 0.0025) gives 8632 split faces, 500 at `f ≥ 0.5`, max `f` 0.82 and
-  thousands of faces on the capped branch; 0.01 would have left 26 faces at `f ≥ 0.5`, a
-  margin a small dynamics shift erases. `fesom_conserve` prints the statistics for every
-  config, with the counts at the breakpoints `mincfl` / `maxcfl` / `2·maxcfl` (where
-  `f > 0`, the cap starts, `f ≥ 0.5`) — they equal the `w_i ≠ 0` and `f ≥ 0.5` counts in
-  every run, as derived.
+  no-op; with `FESOM3_WSPLIT_EXPECT_SPLIT` set it exits 1 (the positive control, now the
+  ctest `fesom_conserve_zstar_wsplit_vacuous_np1`; the guard is value-based: ≥ N split
+  faces and ≥ 1 at `f ≥ 0.5`). The gate cap 0.005 (onset 0.0025) gives 8632 split faces,
+  1130 on the capped branch `CFL_z ≥ Cu_cut = 2·maxcfl − mincfl = 0.0075` (where `Cu_e`
+  saturates — NOT at `maxcfl` itself, where a face is still on the bend), 500 at
+  `f ≥ 0.5`, max `f` 0.82; 0.01 would have left 26 faces at `f ≥ 0.5`, a margin a small
+  dynamics shift erases. `fesom_conserve` prints one statistics line for every config
+  with exactly those three counts (`w_i ≠ 0` is by construction the count above
+  `mincfl`, `f ≥ 0.5` the count above `2·maxcfl`; a first version printed both members
+  of each pair and labelled the `> maxcfl` count "the cap" — the review caught it).
 
 **Lessons.**
 - **Before adding a "mode", check whether it is a corner of the parameter space.** The

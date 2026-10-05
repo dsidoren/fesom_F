@@ -44,11 +44,13 @@ import numpy as np
 
 MAGIC = b"FADVHDMP"
 
-# Dumped by both sides but NOT compared: FESOM3 splits w into w_e/w_i with the smooth
-# Shchepetkin limiting function (src/oce/oce_wsplit.F90, docs/plans/2026-10-02-wsplit-
-# smooth.md), FESOM2 with its hard switch at wsplit_maxcfl, so the split fields differ
-# wherever CFL_z > wsplit_mincfl by construction. They stay in the FESOM3 dump as
-# diagnostics (w, cfl_z and hnode_new -- the split's inputs -- are still gated).
+# Dumped by FESOM2 but NOT compared and no longer dumped by FESOM3: FESOM3 splits w into
+# w_e/w_i with the smooth Shchepetkin limiting function (src/oce/oce_wsplit.F90,
+# docs/plans/completed/2026-10-02-wsplit-smooth.md), FESOM2 with its hard switch at
+# wsplit_maxcfl, so the split fields differ wherever CFL_z > wsplit_mincfl by
+# construction. Listing them here keeps the FESOM2-side records out of the "MISSING in
+# F3" test (checked before it); w, cfl_z and hnode_new -- the split's inputs -- are
+# still gated.
 SKIP_FIELDS = {"w_split_e", "w_split_i"}
 
 
