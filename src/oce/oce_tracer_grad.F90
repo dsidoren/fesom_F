@@ -4,7 +4,7 @@ module oce_tracer_grad
     !
     ! tr_xy(1:2, nz, elem) is the horizontal gradient of the tracer field ttf,
     ! reconstructed per element from the linear shape-function coefficients
-    ! gradient_sca (built in mod_mesh_areas). It feeds fill_up_dn_grad (MUSCL).
+    ! gradient_sca (built in mod_mesh_areas). It feeds the MUSCL kernels (on the fly) and the horizontal diffusion.
     !
     ! Clean-architecture change vs FESOM2 (D7, plan "USE-globals -> explicit type
     ! arguments"): FESOM2 writes the module-global tr_xy (o_ARRAYS); here tr_xy is

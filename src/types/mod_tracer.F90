@@ -38,8 +38,8 @@ module mod_tracer
         ! MUSCL reconstruction
         integer,       allocatable, dimension(:)   :: nboundary_lay
         integer,       allocatable, dimension(:,:) :: edge_up_dn_tri
-        real(kind=MP), allocatable, dimension(:,:,:) :: edge_up_dn_grad
-        ! On-the-fly MUSCL gradients (docs/plans/2026-10-06-muscl-onthefly.md): the elemental
+        ! On-the-fly MUSCL gradients (replace FESOM2's stored per-edge edge_up_dn_grad;
+        ! docs/plans/completed/2026-10-06-muscl-onthefly.md): the elemental
         ! gradient of values over the FULL element halo and its Miura node average, rebuilt
         ! per tracer by init_tracers_AB; tr_xy is reused by the horizontal diffusion / Redi
         ! of the same tracer. Scratch: NOT serialized.
@@ -123,7 +123,6 @@ contains
         call write_bin_array(tw%fct_ttf_min,      unit, iostat, iomsg)
         call write_bin_array(tw%fct_plus,         unit, iostat, iomsg)
         call write_bin_array(tw%fct_minus,        unit, iostat, iomsg)
-        call write_bin_array(tw%edge_up_dn_grad,  unit, iostat, iomsg)
         call write_bin_array(tw%nboundary_lay,    unit, iostat, iomsg)
         call write_bin_array(tw%edge_up_dn_tri,   unit, iostat, iomsg)
     end subroutine write_t_tracer_work
@@ -143,7 +142,6 @@ contains
         call read_bin_array(tw%fct_ttf_min,      unit, iostat, iomsg)
         call read_bin_array(tw%fct_plus,         unit, iostat, iomsg)
         call read_bin_array(tw%fct_minus,        unit, iostat, iomsg)
-        call read_bin_array(tw%edge_up_dn_grad,  unit, iostat, iomsg)
         call read_bin_array(tw%nboundary_lay,    unit, iostat, iomsg)
         call read_bin_array(tw%edge_up_dn_tri,   unit, iostat, iomsg)
     end subroutine read_t_tracer_work

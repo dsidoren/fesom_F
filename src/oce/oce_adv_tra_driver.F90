@@ -40,7 +40,7 @@ module oce_adv_tra_driver
     use mod_partit,       only: t_partit
     use mod_part_bounds,  only: owned_bounds, is_multirank
     use mod_halo,         only: exchange_nod
-    use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl_otf, adv_tra_hor_mfct_otf
+    use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
     use oce_adv_tra_ver,  only: adv_tra_ver_upw1, adv_tra_ver_qr4c, adv_tra_vert_impl
     use oce_adv_tra_fct,  only: oce_tra_adv_fct
     use oce_adv_tra_flux, only: oce_tra_adv_flux2dtracer
@@ -164,9 +164,9 @@ contains
         ! horizontal advection (FCT: high-order antidiffusive; else: full high-order)
         select case (trim(tracers%data(tr_num)%tra_adv_hor))
         case ('MUSCL')
-            call adv_tra_hor_muscl_otf(vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, gnod, edge_up_dn_tri, nboundary_lay, o_init_zero=do_zero_flux, partit=partit)
+            call adv_tra_hor_muscl(vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, gnod, edge_up_dn_tri, nboundary_lay, o_init_zero=do_zero_flux, partit=partit)
         case ('MFCT')
-            call adv_tra_hor_mfct_otf (vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, gnod, edge_up_dn_tri, o_init_zero=do_zero_flux, partit=partit)
+            call adv_tra_hor_mfct (vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, gnod, edge_up_dn_tri, o_init_zero=do_zero_flux, partit=partit)
         case ('UPW1')
             call adv_tra_hor_upw1 (vel, ttfAB, mesh,       adv_flux_hor,                                 o_init_zero=do_zero_flux, partit=partit)
         case default

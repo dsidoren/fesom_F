@@ -232,7 +232,7 @@ program fesom_stepdump
     allocate(tracers%work%del_ttf         (nl-1, mesh%nod2D))
     allocate(tracers%work%del_ttf_advhoriz(nl-1, mesh%nod2D))
     allocate(tracers%work%del_ttf_advvert (nl-1, mesh%nod2D))
-    call muscl_adv_init(tracers%work, mesh)     ! nboundary_lay, edge_up_dn_tri, edge_up_dn_grad
+    call muscl_adv_init(tracers%work, mesh)     ! nboundary_lay, edge_up_dn_tri
 
     !===========================================================================
     ! forcing inputs (D7 explicit args; M2.10 forcing / M4 resolution will source them).

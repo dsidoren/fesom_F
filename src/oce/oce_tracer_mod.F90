@@ -9,9 +9,10 @@ module oce_tracer_mod
     !        AB2: valuesAB = -(0.5+eps)*valuesold(1) + (1.5+eps)*values
     !        AB3: valuesAB = (5*valuesold(2) - 16*valuesold(1) + 23*values)/12
     !   3. rolls the history valuesold
-    !   4. rebuilds the MUSCL up/downwind edge gradient edge_up_dn_grad, from the
-    !      ELEMENTAL gradient of `values` (NOT valuesAB — FESOM2 commented the AB
-    !      variant out at oce_tracer_mod.F90:126-127; see LESSONS L11).
+    !   4. rebuilds the ELEMENTAL gradient of `values` (NOT valuesAB — FESOM2 commented
+    !      the AB variant out at oce_tracer_mod.F90:126-127; see LESSONS L11) and its
+    !      Miura node average, from which the MUSCL kernels take the up/downwind
+    !      gradient on the fly (FESOM2 stores it per edge in edge_up_dn_grad).
     !
     ! The AB2 offset `eps` is FESOM2's o_PARAM `epsilon = 0.1` (oce_modules.F90:92),
     ! a runtime module VARIABLE there (not a parameter). It is kept non-parameter here
@@ -22,8 +23,8 @@ module oce_tracer_mod
     ! SCOPE / clean-architecture deviations (D7, "USE-globals -> explicit args"):
     !  * 1-rank only (myDim_* == global). FESOM2's halo exchanges of tr_xy / tr_z and
     !    the begin/end overlap are no-ops at 1 rank and are dropped; multi-rank is M1.5.
-    !  * tr_xy (FESOM2 o_ARRAYS global) is a local scratch here, passed explicitly to
-    !    fill_up_dn_grad. The redundant SECOND tracer_gradient_elements(values) call
+    !  * tr_xy (FESOM2 o_ARRAYS global) is twork%tr_xy here (also reused by the
+    !    horizontal diffusion of the same tracer). The redundant SECOND tracer_gradient_elements(values) call
     !    (FESOM2 line 142, "redefine to current timestep") is omitted: `values` is
     !    unchanged across init_tracers_AB, so it recomputes the identical tr_xy.
     !  * tracer_gradient_z -> tr_z (FESOM2 line 131) is omitted: tr_z is the vertical
@@ -100,8 +101,8 @@ contains
 
         ! elemental gradient of values over the FULL element halo + its Miura node average:
         ! the MUSCL kernels look the up/downwind gradients up on the fly from these two
-        ! (adv_tra_hor_muscl_otf / _mfct_otf; they replaced the stored per-edge array of
-        ! fill_up_dn_grad, test_muscl_onthefly pins the equivalence bitwise), and the
+        ! (adv_tra_hor_muscl / _mfct; they replace FESOM2's stored per-edge array, which
+        ! test_muscl_onthefly rebuilds with the oracle fill_up_dn_grad, bitwise), and the
         ! horizontal diffusion / Redi of this tracer reuses tr_xy (solve_tracers_ale).
         ! Persistent scratch, allocated on first use. Zeroed once: tracer_gradient_elements
         ! writes only wet levels, and the dry ones are never read.

@@ -105,10 +105,10 @@ for `nz in [ulevels_nod2D(n), nlevels_nod2D(n))`, over `n = 1..nNodL`.
 **Files:** `src/types/mod_tracer.F90`, `src/oce/oce_muscl_adv.F90`, `src/oce/oce_adv_tra_hor.F90`,
 `src/drivers/fesom_advhordump*.F90`, `test/test_types.F90`, `test/test_muscl_onthefly.F90`
 
-- [ ] drop `edge_up_dn_grad` (declaration, allocation, serialization), the old kernel variants;
+- [x] drop `edge_up_dn_grad` (declaration, allocation, serialization), the old kernel variants;
   `fill_up_dn_grad` survives only inside the test as the oracle
-- [ ] dump drivers: drop the field or rebuild it via the oracle
-- [ ] full ctest + gate (bit-identical)
+- [x] dump drivers: drop the field or rebuild it via the oracle
+- [x] full ctest + gate (bit-identical)
 
 ### Task 5: performance + docs
 

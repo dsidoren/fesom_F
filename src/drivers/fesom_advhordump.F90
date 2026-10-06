@@ -10,7 +10,8 @@ program fesom_advhordump
     !
     ! Pipeline (per FESOM2 do_oce_adv_tra horizontal path):
     !   muscl_adv_init -> nboundary_lay, edge_up_dn_tri
-    !   tracer_gradient_elements -> tr_xy ; fill_up_dn_grad -> edge_up_dn_grad
+    !   tracer_gradient_elements -> tr_xy ; muscl_node_grad -> gnod (the kernels take the
+    !   up/dn gradient on the fly); fill_up_dn_grad -> the FESOM2 edge_up_dn_grad record
     !   adv_tra_hor_upw1/_muscl -> adv_flux_hor (edge) ; scatter -> del_ttf_advhoriz
     !
     !   FESOM3_MESH_DIR    mesh dir   (default: pi)
@@ -25,7 +26,7 @@ program fesom_advhordump
     use mod_tracer,       only: t_tracer_work, t_tracer
     use mod_dyn,          only: t_dyn
     use oce_tracer_grad,  only: tracer_gradient_elements
-    use oce_muscl_adv,    only: muscl_adv_init, fill_up_dn_grad
+    use oce_muscl_adv,    only: muscl_adv_init, fill_up_dn_grad, muscl_node_grad
     use oce_adv_tra_hor,  only: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
     use oce_adv_tra_ver,  only: adv_tra_ver_upw1, adv_tra_ver_qr4c
     use oce_adv_tra_flux, only: oce_tra_adv_flux2dtracer
@@ -45,7 +46,7 @@ program fesom_advhordump
     type(t_mesh)        :: mesh
     type(t_tracer_work) :: twork
     integer :: nsw, e, n, nz, nl, u, nzmin, nzmax
-    real(kind=WP), allocatable :: vel(:,:,:), ttf(:,:), tr_xy(:,:,:), eudg(:,:,:)
+    real(kind=WP), allocatable :: vel(:,:,:), ttf(:,:), tr_xy(:,:,:), eudg(:,:,:), gnod(:,:,:)
     real(kind=WP), allocatable :: aflux_u(:,:), aflux_m(:,:)
     real(kind=WP), allocatable :: dttf_u(:,:), dttf_m(:,:), dttf_v(:,:), flux_v(:,:)
     real(kind=WP), allocatable :: wvel(:,:), aflux_vu(:,:), aflux_vq(:,:)
@@ -189,9 +190,9 @@ program fesom_advhordump
     ! Elemental tracer gradient, then per-edge up/downwind gradient
     allocate(tr_xy(2, nl-1, mesh%elem2D))
     call tracer_gradient_elements(ttf, tr_xy, mesh)
-    call fill_up_dn_grad(twork, tr_xy, mesh)
-    allocate(eudg(4, nl-1, mesh%edge2D))
-    eudg = real(twork%edge_up_dn_grad, WP)
+    allocate(eudg(4, nl-1, mesh%edge2D), gnod(2, nl-1, mesh%nod2D))
+    call fill_up_dn_grad(eudg, twork, tr_xy, mesh)     ! only for the FESOM2 dump record
+    call muscl_node_grad(gnod, tr_xy, mesh)
 
     allocate(aflux_u(nl-1, mesh%edge2D), aflux_m(nl-1, mesh%edge2D))
     allocate(dttf_u(nl-1, mesh%nod2D), dttf_m(nl-1, mesh%nod2D))
@@ -204,7 +205,7 @@ program fesom_advhordump
     call oce_tra_adv_flux2dtracer(dt, dttf_u, dttf_v, aflux_u, flux_v, mesh)
 
     ! --- MUSCL horizontal flux + scatter -> del_ttf_advhoriz ---
-    call adv_tra_hor_muscl(vel, ttf, mesh, num_ord, aflux_m, eudg, twork%nboundary_lay, o_init_zero=.true.)
+    call adv_tra_hor_muscl(vel, ttf, mesh, num_ord, aflux_m, tr_xy, gnod, twork%edge_up_dn_tri, twork%nboundary_lay, o_init_zero=.true.)
     dttf_m = 0.0_WP; dttf_v = 0.0_WP
     call oce_tra_adv_flux2dtracer(dt, dttf_m, dttf_v, aflux_m, flux_v, mesh)
 
@@ -245,7 +246,7 @@ program fesom_advhordump
 
     ! standalone MFCT high-order horizontal flux from ttf (num_ord=0.75): gates the
     ! MFCT kernel (no bottom clamp) independently of FCT (mirrors the MUSCL standalone).
-    call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, aflux_mfct, eudg, o_init_zero=.true.)
+    call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, aflux_mfct, tr_xy, gnod, twork%edge_up_dn_tri, o_init_zero=.true.)
 
     ! (1) low-order upwind horizontal flux from ttf -> adf_h
     call adv_tra_hor_upw1(vel, ttf, mesh, adf_h, o_init_zero=.true.)
@@ -278,7 +279,7 @@ program fesom_advhordump
     end do
     ! (exchange_nod(fct_LO) — no-op at 1 rank)
     ! (5) high-order antidiffusive horizontal flux: MFCT(ttfAB)-LO (opth, o_init_zero=.false.)
-    call adv_tra_hor_mfct(vel, ttfAB, mesh, opth, adf_h, eudg, o_init_zero=.false.)
+    call adv_tra_hor_mfct(vel, ttfAB, mesh, opth, adf_h, tr_xy, gnod, twork%edge_up_dn_tri, o_init_zero=.false.)
     ! (6) high-order antidiffusive vertical flux: QR4C(ttfAB)-LO (optv, o_init_zero=.false.)
     call adv_tra_ver_qr4c(wvel, ttfAB, mesh, optv, adf_v, o_init_zero=.false.)
     aflux_h_ho = adf_h; aflux_v_ho = adf_v          ! capture pre-clip antidiffusive fluxes
@@ -315,7 +316,7 @@ program fesom_advhordump
     allocate(tr%work%del_ttf         (nl-1, mesh%nod2D))
     allocate(tr%work%del_ttf_advhoriz(nl-1, mesh%nod2D))
     allocate(tr%work%del_ttf_advvert (nl-1, mesh%nod2D))
-    call muscl_adv_init(tr%work, mesh)     ! nboundary_lay, edge_up_dn_tri, edge_up_dn_grad
+    call muscl_adv_init(tr%work, mesh)     ! nboundary_lay, edge_up_dn_tri
     allocate(dyn%uv(2, nl-1, mesh%elem2D))
     allocate(dyn%w(nl, mesh%nod2D), dyn%w_e(nl, mesh%nod2D), dyn%w_i(nl, mesh%nod2D))
     dyn%uv = vel
@@ -361,7 +362,7 @@ program fesom_advhordump
     call wr_i1(u, 'nboundary_lay',          twork%nboundary_lay(1:mesh%nod2D))
     call wr_i2(u, 'edge_up_dn_tri',         twork%edge_up_dn_tri(1:2, 1:mesh%edge2D))
     call wr_r3(u, 'tr_xy',                  real(tr_xy, MP))
-    call wr_r3(u, 'edge_up_dn_grad',        twork%edge_up_dn_grad(1:4, 1:nl-1, 1:mesh%edge2D))
+    call wr_r3(u, 'edge_up_dn_grad',        real(eudg(1:4, 1:nl-1, 1:mesh%edge2D), MP))
     call wr_r2(u, 'adv_flux_hor_upw1',      real(aflux_u, MP))
     call wr_r2(u, 'del_ttf_advhoriz_upw1',  real(dttf_u, MP))
     call wr_r2(u, 'adv_flux_hor_muscl',     real(aflux_m, MP))
