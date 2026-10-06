@@ -1401,6 +1401,40 @@ ice step + `oce_fluxes` into a forced lifecycle, drop the prescribed fluxes, the
   shim. The `next_io_rank` np=1 fix is behavior-preserving (sequential I/O, value-identical) and arguably a real
   bug fix (the code's own TODO admits the recursion never ends at 1 rank).
 
+## MUSCL horizontal tracer advection: on-the-fly up/downwind gradients
+
+FESOM2 stores the per-edge up/downwind tracer gradient `edge_up_dn_grad(4, nl-1, nEdge)`
+(built every step by `fill_up_dn_grad`) and the MUSCL kernels read it. FESOM3 no longer
+keeps that array (design of the reference RK3 code `qq/oce_stepRK3.F90`, but bit-identical
+to the FESOM2 scheme):
+
+- `init_tracers_AB` builds, per tracer, `twork%tr_xy` (elemental gradient of `values`, full
+  element halo) and `twork%gnod` (the Miura node-averaged gradient, `muscl_node_grad`),
+  persistent scratch. `solve_tracers_ale` reuses `tr_xy` for the horizontal diffusion /
+  Redi of the same tracer (it used to recompute it).
+- `adv_tra_hor_muscl` / `adv_tra_hor_mfct` take `(tr_xy, gnod, edge_up_dn_tri)`: on the levels
+  shared by both edge nodes `[maxval(ulevels_nod2D_max), minval(nlevels_nod2D_min))` the
+  up/downwind triangle's `tr_xy`, elsewhere `gnod` (0 outside a node's wet range -- FESOM2's
+  never-written entries). One predictable branch per level.
+- `muscl_node_ranges` (called by `muscl_adv_init`, static) records per node the levels on which
+  an owned edge reads `gnod` (`gnod_lo/gnod_hi`); `muscl_node_grad` computes only those (on
+  core2 ~5x fewer node averages than "every wet level"). `gnod` is zeroed once at allocation.
+- Quirk kept from FESOM2: at a boundary edge `nl12 = 0`, so segments (D)/(E) start at level 1,
+  above a cavity roof; the edge velocity is 0 there, so no flux results.
+- `fill_up_dn_grad` survives as the ORACLE only (writes a caller-owned array): used by
+  `test_muscl_onthefly` and by the legacy dump drivers `fesom_advhordump(_mr)` for the FESOM2
+  `edge_up_dn_grad` record. The pre-refactor kernels live in the test (`module muscl_oracle`).
+
+Net: `test_muscl_onthefly` (np 1/2; pi as read and with synthesised cavities):
+part G rebuilds the old array from the lookup rule bitwise (positive control: the reference's
+zero increment differs); part F compares both kernels' fluxes with the pre-refactor kernels
+bitwise, both velocity signs (positive control `gnod = 0`); part T prints timing + memory.
+Gate: all 22 drift rows bit-identical. Measured on core2 (login node, one MFCT call incl. the
+gradient preparation): np 4 198 vs 218 ms, np 1 823 vs 884 ms (new vs old, ~9 % faster, not
+counting the saved second `tracer_gradient_elements` per tracer); memory -443 MiB in total
+(4x(nl-1)xnEdge dropped, 2x(nl-1)xnNod added) -- ~1 MiB per rank at 512 ranks.
+The test run on core2 needs `ulimit -s unlimited` (large comparison temporaries).
+
 ## Momentum advection options (`momadv_opt`)
 
 | value | scheme | where |

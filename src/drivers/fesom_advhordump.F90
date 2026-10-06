@@ -192,7 +192,8 @@ program fesom_advhordump
     call tracer_gradient_elements(ttf, tr_xy, mesh)
     allocate(eudg(4, nl-1, mesh%edge2D), gnod(2, nl-1, mesh%nod2D))
     call fill_up_dn_grad(eudg, twork, tr_xy, mesh)     ! only for the FESOM2 dump record
-    call muscl_node_grad(gnod, tr_xy, mesh)
+    gnod = 0.0_WP
+    call muscl_node_grad(gnod, tr_xy, twork%gnod_lo, twork%gnod_hi, mesh)
 
     allocate(aflux_u(nl-1, mesh%edge2D), aflux_m(nl-1, mesh%edge2D))
     allocate(dttf_u(nl-1, mesh%nod2D), dttf_m(nl-1, mesh%nod2D))

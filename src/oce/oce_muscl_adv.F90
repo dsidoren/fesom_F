@@ -30,6 +30,7 @@ module oce_muscl_adv
     implicit none
     private
     public :: muscl_adv_init, find_up_downwind_triangles, fill_up_dn_grad, muscl_node_grad
+    public :: muscl_node_ranges
 
 contains
 
@@ -69,7 +70,54 @@ contains
                     minval(mesh%nlevels(mesh%edge_tri(:, n))) - 1)
             end if
         end do
+
+        ! levels on which the MUSCL kernels read the node-averaged gradient (static)
+        call muscl_node_ranges(twork, mesh, partit)
     end subroutine muscl_adv_init
+
+    !---------------------------------------------------------------------------
+    subroutine muscl_node_ranges(twork, mesh, partit)
+        ! For every node, the levels on which an OWNED edge reads the Miura node average
+        ! gnod: an edge with both up/downwind triangles reads the triangles' gradient on
+        ! its shared range [nzmin_e, nzmax_e) (nzmin_e = maxval(ulevels_nod2D_max),
+        ! nzmax_e = minval(nlevels_nod2D_min) of its nodes) and gnod on the node's other
+        ! wet levels; an edge without them reads gnod on all of them. So node n needs gnod on
+        !     [ulevels_nod2D(n), gnod_lo(n))  and  [gnod_hi(n), nlevels_nod2D(n))
+        ! with gnod_lo = max_e nzmin_e, gnod_hi = min_e nzmax_e over its owned edges (the
+        ! whole wet range if one of them lacks a triangle; nothing if none is owned).
+        ! nzmin_e >= ulevels_nod2D(n) and nzmax_e <= nlevels_nod2D(n), so the two ranges
+        ! lie in the node's wet range. muscl_node_grad computes only these levels -- on a
+        ! flat-bottomed interior the shared ranges cover almost the whole column and the
+        ! node average is needed on a few levels only. Levels are static: call once (and
+        ! again only if the level structure is changed, as test_muscl_onthefly does).
+        type(t_tracer_work), intent(inout) :: twork
+        type(t_mesh),        intent(in)    :: mesh
+        type(t_partit),      intent(in), optional :: partit
+        integer :: edge, k, n, nzmin, nzmax, ednodes(2)
+        logical :: both
+        integer :: nNodO, nNodL, nEdgeO, nElemO
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        if (.not. allocated(twork%gnod_lo)) allocate(twork%gnod_lo(nNodL), twork%gnod_hi(nNodL))
+        ! no owned edge: nothing needed ([ulev, ulev) and [nlev, nlev) are empty)
+        twork%gnod_lo = mesh%ulevels_nod2D(1:nNodL)
+        twork%gnod_hi = mesh%nlevels_nod2D(1:nNodL)
+        do edge = 1, nEdgeO
+            ednodes = mesh%edges(:, edge)
+            both  = (twork%edge_up_dn_tri(1, edge) /= 0) .and. (twork%edge_up_dn_tri(2, edge) /= 0)
+            nzmin = maxval(mesh%ulevels_nod2D_max(ednodes))
+            nzmax = minval(mesh%nlevels_nod2D_min(ednodes))
+            do k = 1, 2
+                n = ednodes(k)
+                if (both) then
+                    twork%gnod_lo(n) = max(twork%gnod_lo(n), nzmin)
+                    twork%gnod_hi(n) = min(twork%gnod_hi(n), nzmax)
+                else
+                    twork%gnod_lo(n) = mesh%nlevels_nod2D(n)          ! the whole wet range
+                end if
+            end do
+        end do
+    end subroutine muscl_node_ranges
 
     !---------------------------------------------------------------------------
     subroutine find_up_downwind_triangles(twork, mesh, partit)
@@ -251,7 +299,7 @@ contains
         ! gradient eudg(1:4,nz,edge): (1,3)=upwind (x,y), (2,4)=downwind.
         ! NOT USED BY THE MODEL: FESOM2 stores this array in twork%edge_up_dn_grad; FESOM3
         ! looks the same values up on the fly in the MUSCL kernels (muscl_node_grad +
-        ! the kernels' updn). Kept as the ORACLE of that equivalence (test_muscl_onthefly)
+        ! the kernels' per-level lookup). Kept as the ORACLE of that equivalence (test_muscl_onthefly)
         ! and for the legacy FESOM2 dump drivers (fesom_advhordump*). eudg is zeroed here,
         ! so levels the fill does not write are 0, as in FESOM2's once-zeroed array.
         ! On shared levels take the gradient straight from edge_up_dn_tri; on
@@ -371,11 +419,15 @@ contains
     end subroutine fill_up_dn_grad
 
     !---------------------------------------------------------------------------
-    subroutine muscl_node_grad(gnod, tr_xy, mesh, partit)
+    subroutine muscl_node_grad(gnod, tr_xy, gnod_lo, gnod_hi, mesh, partit)
         ! Miura node-averaged tracer gradient, ONCE PER NODE:
         !   gnod(:,nz,n) = sum_{elem around n, wet at nz} tr_xy(:,nz,elem)*elem_area(elem)
         !                / sum_{same elems} elem_area(elem)
-        ! for nz in [ulevels_nod2D(n), nlevels_nod2D(n)), n = 1..nNodL (owned + halo).
+        ! for nz in [ulevels_nod2D(n), gnod_lo(n)) and [gnod_hi(n), nlevels_nod2D(n)),
+        ! n = 1..nNodL (owned + halo): the levels on which an owned edge reads it
+        ! (muscl_node_ranges). The other entries are NOT written: the caller zeroes gnod
+        ! once at allocation, so the kernels read 0 outside a node's wet range (FESOM2's
+        ! never-written entries), and the shared levels are never read.
         !
         ! WHY: fill_up_dn_grad uses exactly this average on the levels of an edge that are
         ! not shared by both up/downwind triangles and on edges without them, but evaluates
@@ -393,6 +445,7 @@ contains
         ! full-halo valid (exchange_elem_full), so no exchange of gnod is needed.
         real(kind=WP),  intent(inout) :: gnod(:,:,:)        ! (2, nl-1, nNodL)
         real(kind=WP),  intent(in)    :: tr_xy(:,:,:)       ! (2, nl-1, nElemF), full halo
+        integer,        intent(in)    :: gnod_lo(:), gnod_hi(:)   ! (nNodL), muscl_node_ranges
         type(t_mesh),   intent(in)    :: mesh
         type(t_partit), intent(in), optional :: partit
         integer       :: n, nz, k, elem
@@ -401,8 +454,8 @@ contains
 
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         do n = 1, nNodL
-            gnod(:, :, n) = 0.0_WP
             do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)-1
+                if (nz >= gnod_lo(n) .and. nz < gnod_hi(n)) cycle      ! not read
                 tvol = 0.0_WP; tx = 0.0_WP; ty = 0.0_WP
                 do k = 1, mesh%nod_in_elem2D_num(n)
                     elem = mesh%nod_in_elem2D(k, n)

@@ -2550,3 +2550,33 @@ for the smooth split; the tests are the specification (L54).
   Cu_max/Cu` is formed by cancellation, so the error of `Cu·(1−f)` scales as `eps·Cu`,
   not with ulps of `Cu_max`: the first "4 ulp of `Cu_max`" bound failed at `Cu ≈ 17.5`
   (measured 1.23 eps·Cu), the error-model bound `4·eps·Cu` passes with a 3x margin (W6).
+
+## L59 — Dropping a stored intermediate is not automatically faster: an on-the-fly lookup has to be shaped (one branch, only the needed values) before it beats a contiguous array, and only the bigger mesh tells
+
+**Context.** The reference RK3 code forms the MUSCL up/downwind gradient on the fly instead of
+storing FESOM2's per-edge array `edge_up_dn_grad(4, nl-1, nEdge)`. Ported bit-identically
+(the reference uses a zero increment where FESOM2 uses the Miura node average, so the node
+average had to become its own per-node array `gnod`), the first version was ~20 % SLOWER on
+core2 per MFCT call (299 vs 246 ms at np 4), although it moves less memory.
+
+**What it took.** Three measured steps on core2 (login node, np 4, old path 218 ms):
+1. a contained per-level lookup routine with three branches: slower (299 vs 246);
+2. a per-edge column buffer filled from slices: slower still on pi, ~233 on core2;
+3. one predictable `if (nz in shared range) tri else gnod` per level, no copy (233 -> ~220),
+   plus computing `gnod` only on the levels an owned edge reads (`muscl_node_ranges`,
+   static; 45 -> 11 ms): 198 ms, ~9 % faster than the stored array.
+
+**Lessons.**
+- **A stored array that is written once and read once per step is cheap if it is
+  contiguous;** replacing it with gathers only wins when the gathers are fewer and the
+  inner loop stays as simple as the old one. Measure before claiming "more efficient".
+- **pi is too small to decide performance:** the 13 MiB array sits in cache there, so the
+  old path looks better than it is; core2 changed the ranking. Time on the production mesh
+  (the test binary takes `FESOM3_MESH_DIR`; run it with `ulimit -s unlimited`).
+- **Compute only what is read.** "Every wet level of every node" was 4x more node averages
+  than the edges ever read; a static per-node range removed it without touching the result.
+- **The bit-identity test caught a wrong claim within minutes:** "every level the flux visits
+  lies inside both nodes' wet ranges" is false at boundary edges under a cavity (FESOM2's
+  `nl12 = 0` makes segment (D) start at level 1). Equivalence tests on synthesised cavities
+  are worth their set-up cost.
+

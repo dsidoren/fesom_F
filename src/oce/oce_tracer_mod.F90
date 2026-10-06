@@ -112,10 +112,12 @@ contains
         if (.not. allocated(tracers%work%tr_xy)) then
             allocate(tracers%work%tr_xy(2, mesh%nl-1, nElemA), tracers%work%gnod(2, mesh%nl-1, nNodL))
             tracers%work%tr_xy = 0.0_WP
+            tracers%work%gnod  = 0.0_WP     ! entries muscl_node_grad does not write stay 0
         end if
         call tracer_gradient_elements(tracers%data(tr_num)%values, tracers%work%tr_xy, mesh, partit)
         if (is_multirank(partit)) call exchange_elem_full(tracers%work%tr_xy, partit)
-        call muscl_node_grad(tracers%work%gnod, tracers%work%tr_xy, mesh, partit)
+        call muscl_node_grad(tracers%work%gnod, tracers%work%tr_xy, tracers%work%gnod_lo, &
+                             tracers%work%gnod_hi, mesh, partit)
     end subroutine init_tracers_AB
 
 end module oce_tracer_mod

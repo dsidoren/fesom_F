@@ -45,6 +45,9 @@ module mod_tracer
         ! of the same tracer. Scratch: NOT serialized.
         real(kind=WP), allocatable, dimension(:,:,:) :: tr_xy             ! (2, nl-1, nElemF)
         real(kind=WP), allocatable, dimension(:,:,:) :: gnod              ! (2, nl-1, nNodL)
+        ! levels on which an owned edge reads gnod (muscl_node_ranges, static):
+        ! [ulevels_nod2D(n), gnod_lo(n)) and [gnod_hi(n), nlevels_nod2D(n))
+        integer,       allocatable, dimension(:)     :: gnod_lo, gnod_hi   ! (nNodL)
         ! M4d Redi: vertical tracer gradient (tracer_gradient_z), recomputed per tracer; NOT
         ! serialized (allocated only when Redi). Feeds diff_part_hor_redi's K13/K23 slope terms.
         real(kind=WP), allocatable, dimension(:,:) :: tr_z              ! (nl, nod2D)

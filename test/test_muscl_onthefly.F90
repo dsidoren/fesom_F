@@ -250,6 +250,12 @@ program test_muscl_onthefly
     !   of part G. A nonzero edge velocity on every wet level and a tracer with structure
     !   in x, y and z make every reconstruction branch contribute. Positive control: the
     !   on-the-fly kernels with gnod = 0 (the reference RK3 rule) must differ.
+    !
+    ! PART T - timing, printed only (no assertion; the numbers are for the record, run the
+    !   binary on the core2 mesh with FESOM3_MESH_DIR for meaningful values): the old path
+    !   (fill_up_dn_grad + stored-array MFCT kernel) vs the new one (muscl_node_grad +
+    !   on-the-fly MFCT kernel), each component separately, max over ranks, and the memory
+    !   of the dropped per-edge array vs the new node array.
     use mpi
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     use mod_precision,     only: WP, MP
@@ -262,7 +268,7 @@ program test_muscl_onthefly
     use mod_part_bounds,   only: owned_bounds, is_multirank
     use mod_halo,          only: exchange_elem_full, exchange_nod
     use oce_tracer_grad,   only: tracer_gradient_elements
-    use oce_muscl_adv,     only: muscl_adv_init, fill_up_dn_grad, muscl_node_grad
+    use oce_muscl_adv,     only: muscl_adv_init, fill_up_dn_grad, muscl_node_grad, muscl_node_ranges
     use oce_adv_tra_hor,   only: adv_tra_hor_muscl, adv_tra_hor_mfct
     use muscl_oracle,      only: oracle_muscl, oracle_mfct
     implicit none
@@ -295,6 +301,7 @@ program test_muscl_onthefly
     if (partit%npes > 1) nElemF = partit%myDim_elem2D + partit%eDim_elem2D + partit%eXDim_elem2D
     nl = mesh%nl
     allocate(ttf(nl-1, nNodL), tr_xy(2, nl-1, nElemF), gnod(2, nl-1, nNodL))
+    gnod = 0.0_WP                                 ! as init_tracers_AB: written only where read
     call muscl_adv_init(twork, mesh, partit)      ! edge_up_dn_tri, nboundary_lay
     allocate(vel(2, nl-1, nElemF), eudg(4, nl-1, nEdgeO), f_old(nl-1, nEdgeO), f_new(nl-1, nEdgeO))
     allocate(gzero(2, nl-1, nNodL)); gzero = 0.0_WP
@@ -303,7 +310,10 @@ program test_muscl_onthefly
 
     call part_g('G1 pi as read      ')
     call part_f('F1 pi as read      ')
+    call part_t()
     call synth_cavity()
+    call muscl_node_ranges(twork, mesh, partit)   ! the level structure changed
+    gnod = 0.0_WP                                 ! as after allocation (stale G1 values out)
     call part_g('G2 pi with cavities')
     call part_f('F2 pi with cavities')
 
@@ -367,7 +377,7 @@ contains
 
         call build_gradient()
         call fill_up_dn_grad(eudg, twork, tr_xy, mesh, partit)    ! the oracle (zeroes eudg first)
-        call muscl_node_grad(gnod, tr_xy, mesh, partit)
+        call muscl_node_grad(gnod, tr_xy, twork%gnod_lo, twork%gnod_hi, mesh, partit)
 
         n_tri = 0; n_nod = 0; n_zero = 0; n_nan = 0; n_bad = 0; n_upper = 0; n_ctl = 0
         do edge = 1, nEdgeO
@@ -440,6 +450,47 @@ contains
             end do
         end do
     end subroutine build_flow
+
+    subroutine part_t()
+        integer, parameter :: nrep = 3
+        integer :: r, ierr
+        real(kind=WP) :: t(5), tmax(4)
+        integer(kind=8) :: b_edge, b_node, bb(2)
+        t(1) = MPI_Wtime()
+        do r = 1, nrep
+            call fill_up_dn_grad(eudg, twork, tr_xy, mesh, partit)
+        end do
+        t(2) = MPI_Wtime()
+        do r = 1, nrep
+            call oracle_mfct(vel, ttf, mesh, num_ord, f_old, eudg, o_init_zero=.true., partit=partit)
+        end do
+        t(3) = MPI_Wtime()
+        do r = 1, nrep
+            call muscl_node_grad(gnod, tr_xy, twork%gnod_lo, twork%gnod_hi, mesh, partit)
+        end do
+        t(4) = MPI_Wtime()
+        do r = 1, nrep
+            call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_new, tr_xy, gnod, twork%edge_up_dn_tri, &
+                                  o_init_zero=.true., partit=partit)
+        end do
+        t(5) = MPI_Wtime()
+        tmax = (t(2:5) - t(1:4))/real(nrep, WP)*1.0e3_WP
+        if (partit%npes > 1) call MPI_Allreduce(MPI_IN_PLACE, tmax, 4, MPI_DOUBLE_PRECISION, MPI_MAX, &
+                                                partit%MPI_COMM_FESOM, ierr)
+        bb(1) = 4_8*int(nl-1, 8)*int(nEdgeO, 8)*8_8
+        bb(2) = 2_8*int(nl-1, 8)*int(nNodL, 8)*8_8
+        if (partit%npes > 1) call MPI_Allreduce(MPI_IN_PLACE, bb, 2, MPI_INTEGER8, MPI_SUM, &
+                                                partit%MPI_COMM_FESOM, ierr)
+        b_edge = bb(1); b_node = bb(2)
+        if (partit%mype == 0) then
+            write(*,'(a,f9.2,a,f9.2,a,f9.2)') '  T old: fill_up_dn_grad ', tmax(1), ' ms  + MFCT kernel ', tmax(2), &
+                ' ms  = ', tmax(1) + tmax(2)
+            write(*,'(a,f9.2,a,f9.2,a,f9.2)') '  T new: muscl_node_grad ', tmax(3), ' ms  + MFCT kernel ', tmax(4), &
+                ' ms  = ', tmax(3) + tmax(4)
+            write(*,'(a,f8.1,a,f8.1,a)') '  T memory (all ranks): dropped edge_up_dn_grad ', real(b_edge)/2.0**20, &
+                ' MiB, new gnod ', real(b_node)/2.0**20, ' MiB (tr_xy existed before)'
+        end if
+    end subroutine part_t
 
     subroutine part_f(label)
         character(len=*), intent(in) :: label

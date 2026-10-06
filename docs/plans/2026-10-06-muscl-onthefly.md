@@ -112,9 +112,15 @@ for `nz in [ulevels_nod2D(n), nlevels_nod2D(n))`, over `n = 1..nNodL`.
 
 ### Task 5: performance + docs
 
-- [ ] core2 512 ranks, 1-2 model days, old vs new binary: tracer-advection and step time
-  (`FESOM3_TIMING_EVERY`), MaxRSS; bit-compare output after one day
-- [ ] HANDOFF, LESSONS entry; move this plan to `docs/plans/completed/`
+- [x] timing (deviation: no core2 job submitted -- runs are the user's; instead the test
+  binary's part T on the core2 mesh on the login node, one MFCT call incl. gradient
+  preparation, old vs new path): first version ~20 % slower (np 4 299 vs 246 ms); after
+  (a) one branch per level instead of a lookup routine / column copy and (b) `gnod` only on
+  the levels an owned edge reads (`muscl_node_ranges`): np 4 198 vs 218 ms (3 repeats),
+  np 1 823 vs 884 ms -- ~9 % faster, plus one saved `tracer_gradient_elements` per tracer;
+  memory -443 MiB total (~1 MiB/rank at 512). All still bit-identical (test parts G/F, gate).
+- [x] HANDOFF section "MUSCL horizontal tracer advection: on-the-fly up/downwind gradients",
+  LESSONS L59; plan moved to `docs/plans/completed/` (at the end)
 
 ## Post-Completion
 
