@@ -25,6 +25,7 @@ module oce_adv_tra_hor
     implicit none
     private
     public :: adv_tra_hor_upw1, adv_tra_hor_muscl, adv_tra_hor_mfct
+    public :: adv_tra_hor_muscl_otf, adv_tra_hor_mfct_otf
 
 contains
 
@@ -298,5 +299,247 @@ contains
             flux(nz,edge) = -0.5_WP*(1.0_WP-num_ord)*cHO - vflux*num_ord*0.5_WP*(Tmean1+Tmean2) - flux(nz,edge)
         end subroutine flux_ho
     end subroutine adv_tra_hor_mfct
+
+    !===========================================================================
+    subroutine adv_tra_hor_muscl_otf(vel, ttf, mesh, num_ord, flux, tr_xy, gnod, edge_up_dn_tri, nboundary_lay, o_init_zero, partit)
+        ! MUSCL horizontal flux (oce_adv_tra_hor.F90:261-542). num_ord = fraction of
+        ! 4th-order (centered) contribution; (1-num_ord) is 3rd-order upwind. The
+        ! per-node clamp c_lo = max(sign(1,nboundary_lay-nz),0) switches off the
+        ! linear-reconstruction increment below a node's boundary layer.
+        ! M2.12b: optional partit -> loop over OWNED edges (myDim_edge2D).
+        type(t_mesh),  intent(in)    :: mesh
+        real(kind=WP), intent(in)    :: num_ord
+        real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(in)    :: vel(2, mesh%nl-1, mesh%elem2D)
+        real(kind=WP), intent(inout) :: flux(mesh%nl-1, mesh%edge2D)
+        integer,       intent(in)    :: nboundary_lay(mesh%nod2D)
+        real(kind=WP), intent(in)    :: tr_xy(2, mesh%nl-1, mesh%elem2D)   ! elemental gradient, full halo
+        real(kind=WP), intent(in)    :: gnod(2, mesh%nl-1, mesh%nod2D)     ! muscl_node_grad (owned+halo)
+        integer,       intent(in)    :: edge_up_dn_tri(2, mesh%edge2D)
+        logical, optional, intent(in) :: o_init_zero
+        type(t_partit), intent(in), optional :: partit
+        logical       :: l_init_zero
+        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, vflux
+        integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
+        logical       :: both
+        integer       :: nzmin, nzmax
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        l_init_zero = .true.
+        if (present(o_init_zero)) l_init_zero = o_init_zero
+        if (l_init_zero) then
+            do edge = 1, nEdgeO
+                flux(:, edge) = 0.0_WP
+            end do
+        end if
+
+        do edge = 1, nEdgeO
+            enodes = mesh%edges(:, edge)
+            el     = mesh%edge_tri(:, edge)
+            ! on-the-fly up/downwind gradient: the shared-level range of the two edge nodes
+            both  = (edge_up_dn_tri(1, edge) /= 0) .and. (edge_up_dn_tri(2, edge) /= 0)
+            nzmin = maxval(mesh%ulevels_nod2D_max(enodes))
+            nzmax = minval(mesh%nlevels_nod2D_min(enodes))
+            nl1    = mesh%nlevels(el(1)) - 1
+            nu1    = mesh%ulevels(el(1))
+            deltaX1 = mesh%edge_cross_dxdy(1, edge)
+            deltaY1 = mesh%edge_cross_dxdy(2, edge)
+            nl2 = 0; nu2 = 0
+            if (el(2) > 0) then
+                deltaX2 = mesh%edge_cross_dxdy(3, edge)
+                deltaY2 = mesh%edge_cross_dxdy(4, edge)
+                nl2 = mesh%nlevels(el(2)) - 1
+                nu2 = mesh%ulevels(el(2))
+            end if
+            nl12 = min(nl1, nl2)
+            nu12 = max(nu1, nu2)
+            ! (A)
+            do nz = nu1, nu12-1
+                vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1))
+                call flux_ho(nz, clof(enodes(1),nz), clof(enodes(2),nz), vflux)
+            end do
+            ! (B)
+            if (nu2 > 0) then
+                do nz = nu2, nu12-1
+                    vflux = (vel(2,nz,el(2))*deltaX2 - vel(1,nz,el(2))*deltaY2) * mesh%helem(nz,el(2))
+                    call flux_ho(nz, clof(enodes(1),nz), clof(enodes(2),nz), vflux)
+                end do
+            end if
+            ! (C)
+            do nz = nu12, nl12
+                vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1)) &
+                      + ( vel(2,nz,el(2))*deltaX2 - vel(1,nz,el(2))*deltaY2) * mesh%helem(nz,el(2))
+                call flux_ho(nz, clof(enodes(1),nz), clof(enodes(2),nz), vflux)
+            end do
+            ! (D)
+            do nz = nl12+1, nl1
+                vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1))
+                call flux_ho(nz, clof(enodes(1),nz), clof(enodes(2),nz), vflux)
+            end do
+            ! (E)
+            do nz = nl12+1, nl2
+                vflux = (vel(2,nz,el(2))*deltaX2 - vel(1,nz,el(2))*deltaY2) * mesh%helem(nz,el(2))
+                call flux_ho(nz, clof(enodes(1),nz), clof(enodes(2),nz), vflux)
+            end do
+        end do
+
+    contains
+        real(kind=WP) function clof(node, nz)
+            integer, intent(in) :: node, nz
+            clof = real(max(sign(1, nboundary_lay(node)-nz), 0), WP)
+        end function clof
+        subroutine flux_ho(nz, clo1, clo2, vflux)
+            integer,       intent(in) :: nz
+            real(kind=WP), intent(in) :: clo1, clo2, vflux
+            real(kind=WP) :: Tmean1, Tmean2, cHO, g1(2), g2(2)
+            call updn(2, nz, g2)
+            call updn(1, nz, g1)
+            Tmean2 = ttf(nz, enodes(2)) - &
+                     (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
+                      mesh%edge_dxdy(1,edge)*g2(1) + &
+                      mesh%edge_dxdy(2,edge)*g2(2))/6.0_WP*clo2
+            Tmean1 = ttf(nz, enodes(1)) + &
+                     (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
+                      mesh%edge_dxdy(1,edge)*g1(1) + &
+                      mesh%edge_dxdy(2,edge)*g1(2))/6.0_WP*clo1
+            cHO = (vflux+abs(vflux))*Tmean1 + (vflux-abs(vflux))*Tmean2
+            flux(nz,edge) = -0.5_WP*(1.0_WP-num_ord)*cHO - vflux*num_ord*0.5_WP*(Tmean1+Tmean2) - flux(nz,edge)
+        end subroutine flux_ho
+        subroutine updn(k, nz, g)
+            ! the up/downwind gradient of side k at level nz (k = 1: upwind triangle /
+            ! edge node 1; k = 2: downwind / node 2), exactly the value fill_up_dn_grad
+            ! stored in edge_up_dn_grad(k / k+2, nz, edge) (test_muscl_onthefly part G):
+            ! the triangle's elemental gradient on the levels shared by both edge nodes,
+            ! the node's Miura average on its other wet levels, 0 elsewhere
+            integer,       intent(in)  :: k, nz
+            real(kind=WP), intent(out) :: g(2)
+            if (both .and. nz >= nzmin .and. nz < nzmax) then
+                g = tr_xy(:, nz, edge_up_dn_tri(k, edge))
+            else if (nz >= mesh%ulevels_nod2D(enodes(k)) .and. nz < mesh%nlevels_nod2D(enodes(k))) then
+                g = gnod(:, nz, enodes(k))
+            else
+                g = 0.0_WP
+            end if
+        end subroutine updn
+    end subroutine adv_tra_hor_muscl_otf
+
+    !===========================================================================
+    subroutine adv_tra_hor_mfct_otf(vel, ttf, mesh, num_ord, flux, tr_xy, gnod, edge_up_dn_tri, o_init_zero, partit)
+        ! MUSCL for the FCT path (oce_adv_tra_hor.F90:546-834). Same as
+        ! adv_tra_hor_muscl but WITHOUT the c_lo bottom-boundary clamp (the
+        ! reconstruction near bottom topography is not upwind; runs with FCT only).
+        ! M2.12b: optional partit -> loop over OWNED edges (myDim_edge2D).
+        type(t_mesh),  intent(in)    :: mesh
+        real(kind=WP), intent(in)    :: num_ord
+        real(kind=WP), intent(in)    :: ttf(mesh%nl-1, mesh%nod2D)
+        real(kind=WP), intent(in)    :: vel(2, mesh%nl-1, mesh%elem2D)
+        real(kind=WP), intent(inout) :: flux(mesh%nl-1, mesh%edge2D)
+        real(kind=WP), intent(in)    :: tr_xy(2, mesh%nl-1, mesh%elem2D)   ! elemental gradient, full halo
+        real(kind=WP), intent(in)    :: gnod(2, mesh%nl-1, mesh%nod2D)     ! muscl_node_grad (owned+halo)
+        integer,       intent(in)    :: edge_up_dn_tri(2, mesh%edge2D)
+        logical, optional, intent(in) :: o_init_zero
+        type(t_partit), intent(in), optional :: partit
+        logical       :: l_init_zero
+        real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, vflux
+        integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
+        logical       :: both
+        integer       :: nzmin, nzmax
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        l_init_zero = .true.
+        if (present(o_init_zero)) l_init_zero = o_init_zero
+        if (l_init_zero) then
+            do edge = 1, nEdgeO
+                flux(:, edge) = 0.0_WP
+            end do
+        end if
+
+        do edge = 1, nEdgeO
+            enodes = mesh%edges(:, edge)
+            el     = mesh%edge_tri(:, edge)
+            ! on-the-fly up/downwind gradient: the shared-level range of the two edge nodes
+            both  = (edge_up_dn_tri(1, edge) /= 0) .and. (edge_up_dn_tri(2, edge) /= 0)
+            nzmin = maxval(mesh%ulevels_nod2D_max(enodes))
+            nzmax = minval(mesh%nlevels_nod2D_min(enodes))
+            nl1    = mesh%nlevels(el(1)) - 1
+            nu1    = mesh%ulevels(el(1))
+            deltaX1 = mesh%edge_cross_dxdy(1, edge)
+            deltaY1 = mesh%edge_cross_dxdy(2, edge)
+            nl2 = 0; nu2 = 0
+            if (el(2) > 0) then
+                deltaX2 = mesh%edge_cross_dxdy(3, edge)
+                deltaY2 = mesh%edge_cross_dxdy(4, edge)
+                nl2 = mesh%nlevels(el(2)) - 1
+                nu2 = mesh%ulevels(el(2))
+            end if
+            nl12 = min(nl1, nl2)
+            nu12 = max(nu1, nu2)
+            ! (A)
+            do nz = nu1, nu12-1
+                vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1))
+                call flux_ho(nz, vflux)
+            end do
+            ! (B)
+            if (nu2 > 0) then
+                do nz = nu2, nu12-1
+                    vflux = (vel(2,nz,el(2))*deltaX2 - vel(1,nz,el(2))*deltaY2) * mesh%helem(nz,el(2))
+                    call flux_ho(nz, vflux)
+                end do
+            end if
+            ! (C)
+            do nz = nu12, nl12
+                vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1)) &
+                      + ( vel(2,nz,el(2))*deltaX2 - vel(1,nz,el(2))*deltaY2) * mesh%helem(nz,el(2))
+                call flux_ho(nz, vflux)
+            end do
+            ! (D)
+            do nz = nl12+1, nl1
+                vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1))
+                call flux_ho(nz, vflux)
+            end do
+            ! (E)
+            do nz = nl12+1, nl2
+                vflux = (vel(2,nz,el(2))*deltaX2 - vel(1,nz,el(2))*deltaY2) * mesh%helem(nz,el(2))
+                call flux_ho(nz, vflux)
+            end do
+        end do
+
+    contains
+        subroutine flux_ho(nz, vflux)
+            integer,       intent(in) :: nz
+            real(kind=WP), intent(in) :: vflux
+            real(kind=WP) :: Tmean1, Tmean2, cHO, g1(2), g2(2)
+            call updn(2, nz, g2)
+            call updn(1, nz, g1)
+            Tmean2 = ttf(nz, enodes(2)) - &
+                     (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
+                      mesh%edge_dxdy(1,edge)*g2(1) + &
+                      mesh%edge_dxdy(2,edge)*g2(2))/6.0_WP
+            Tmean1 = ttf(nz, enodes(1)) + &
+                     (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
+                      mesh%edge_dxdy(1,edge)*g1(1) + &
+                      mesh%edge_dxdy(2,edge)*g1(2))/6.0_WP
+            cHO = (vflux+abs(vflux))*Tmean1 + (vflux-abs(vflux))*Tmean2
+            flux(nz,edge) = -0.5_WP*(1.0_WP-num_ord)*cHO - vflux*num_ord*0.5_WP*(Tmean1+Tmean2) - flux(nz,edge)
+        end subroutine flux_ho
+        subroutine updn(k, nz, g)
+            ! the up/downwind gradient of side k at level nz (k = 1: upwind triangle /
+            ! edge node 1; k = 2: downwind / node 2), exactly the value fill_up_dn_grad
+            ! stored in edge_up_dn_grad(k / k+2, nz, edge) (test_muscl_onthefly part G):
+            ! the triangle's elemental gradient on the levels shared by both edge nodes,
+            ! the node's Miura average on its other wet levels, 0 elsewhere
+            integer,       intent(in)  :: k, nz
+            real(kind=WP), intent(out) :: g(2)
+            if (both .and. nz >= nzmin .and. nz < nzmax) then
+                g = tr_xy(:, nz, edge_up_dn_tri(k, edge))
+            else if (nz >= mesh%ulevels_nod2D(enodes(k)) .and. nz < mesh%nlevels_nod2D(enodes(k))) then
+                g = gnod(:, nz, enodes(k))
+            else
+                g = 0.0_WP
+            end if
+        end subroutine updn
+    end subroutine adv_tra_hor_mfct_otf
 
 end module oce_adv_tra_hor

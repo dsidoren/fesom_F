@@ -36,6 +36,13 @@ program test_muscl_onthefly
     !   the upper node-only range must occur (teeth).
     !   Positive control: the reference RK3 code's rule (0 instead of the node average)
     !   must produce mismatches.
+    !
+    ! PART F - the fluxes: adv_tra_hor_muscl / adv_tra_hor_mfct with the stored array vs
+    !   adv_tra_hor_muscl_otf / adv_tra_hor_mfct_otf with (tr_xy, gnod, edge_up_dn_tri),
+    !   every owned edge and level, both signs of the velocity, BITWISE, on both meshes
+    !   of part G. A nonzero edge velocity on every wet level and a tracer with structure
+    !   in x, y and z make every reconstruction branch contribute. Positive control: the
+    !   on-the-fly kernels with gnod = 0 (the reference RK3 rule) must differ.
     use mpi
     use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     use mod_precision,     only: WP, MP
@@ -49,6 +56,8 @@ program test_muscl_onthefly
     use mod_halo,          only: exchange_elem_full, exchange_nod
     use oce_tracer_grad,   only: tracer_gradient_elements
     use oce_muscl_adv,     only: muscl_adv_init, fill_up_dn_grad, muscl_node_grad
+    use oce_adv_tra_hor,   only: adv_tra_hor_muscl, adv_tra_hor_mfct, &
+                                 adv_tra_hor_muscl_otf, adv_tra_hor_mfct_otf
     implicit none
 
     character(len=512) :: mesh_dir
@@ -58,6 +67,8 @@ program test_muscl_onthefly
     integer :: nfail, nsw
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF, nl
     real(kind=WP), allocatable :: ttf(:,:), tr_xy(:,:,:), gnod(:,:,:)
+    real(kind=WP), allocatable :: vel(:,:,:), eudg(:,:,:), f_old(:,:), f_new(:,:), gzero(:,:,:)
+    real(kind=WP), parameter   :: num_ord = 0.25_WP      ! any mix of the 3rd/4th-order parts
     ! cavity synthesis (the constants of test_wsplit / test_wimpl_tra: same column set)
     integer, parameter :: cav_every    = 10      ! every 10th global node ...
     integer, parameter :: cav_ulev     = 3       ! ... gets its surface at level 3 ...
@@ -78,11 +89,17 @@ program test_muscl_onthefly
     nl = mesh%nl
     allocate(ttf(nl-1, nNodL), tr_xy(2, nl-1, nElemF), gnod(2, nl-1, nNodL))
     call muscl_adv_init(twork, mesh, partit)      ! edge_up_dn_tri (+ zeroed edge_up_dn_grad)
+    allocate(vel(2, nl-1, nElemF), eudg(4, nl-1, nEdgeO), f_old(nl-1, nEdgeO), f_new(nl-1, nEdgeO))
+    allocate(gzero(2, nl-1, nNodL)); gzero = 0.0_WP
+    allocate(mesh%helem(nl-1, nElemF))
+    call build_flow()
 
     call part_g('G1 pi as read      ')
+    call part_f('F1 pi as read      ')
     call synth_cavity()
     twork%edge_up_dn_grad = 0.0_MP                ! fresh oracle for the changed level ranges
     call part_g('G2 pi with cavities')
+    call part_f('F2 pi with cavities')
 
     if (partit%mype == 0) then
         if (nfail == 0) then
@@ -199,6 +216,57 @@ contains
         if (index(label, 'cavities') > 0) &
             call check_true(trim(label)//': upper node-only range populated', n_upper > 0)
     end subroutine part_g
+
+    !=========================================================================
+    ! PART F
+    !=========================================================================
+    subroutine build_flow()
+        ! element velocity with structure in both components and every level; helem any
+        ! positive thickness (the kernels only multiply the edge velocity by it)
+        integer :: e, nz
+        real(kind=WP) :: a
+        do e = 1, nElemF
+            a = 0.731_WP*real(mod(e, 97), WP)
+            do nz = 1, nl-1
+                vel(1, nz, e) = 0.3_WP*sin(a + 0.2_WP*real(nz, WP)) + 0.05_WP
+                vel(2, nz, e) = 0.2_WP*cos(1.7_WP*a - 0.1_WP*real(nz, WP))
+                mesh%helem(nz, e) = 10.0_MP + 2.0_MP*real(nz, MP)
+            end do
+        end do
+    end subroutine build_flow
+
+    subroutine part_f(label)
+        character(len=*), intent(in) :: label
+        integer :: isign, n_bad_m, n_bad_f, n_ctl, n_flux
+        ! part_g left tr_xy, gnod and the oracle array of this mesh in place
+        eudg = real(twork%edge_up_dn_grad(:, :, 1:nEdgeO), WP)
+        n_bad_m = 0; n_bad_f = 0; n_ctl = 0; n_flux = 0
+        do isign = 1, 2
+            if (isign == 2) vel = -vel
+            call adv_tra_hor_muscl(vel, ttf, mesh, num_ord, f_old, eudg, twork%nboundary_lay, &
+                                   o_init_zero=.true., partit=partit)
+            call adv_tra_hor_muscl_otf(vel, ttf, mesh, num_ord, f_new, tr_xy, gnod, twork%edge_up_dn_tri, &
+                                       twork%nboundary_lay, o_init_zero=.true., partit=partit)
+            n_bad_m = n_bad_m + count(transfer(f_old, 0_8, size(f_old)) /= transfer(f_new, 0_8, size(f_new)))
+            n_flux  = n_flux  + count(f_old /= 0.0_WP)
+            call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_old, eudg, o_init_zero=.true., partit=partit)
+            call adv_tra_hor_mfct_otf(vel, ttf, mesh, num_ord, f_new, tr_xy, gnod, twork%edge_up_dn_tri, &
+                                      o_init_zero=.true., partit=partit)
+            n_bad_f = n_bad_f + count(transfer(f_old, 0_8, size(f_old)) /= transfer(f_new, 0_8, size(f_new)))
+            ! positive control: the reference rule (no node average)
+            call adv_tra_hor_mfct_otf(vel, ttf, mesh, num_ord, f_new, tr_xy, gzero, twork%edge_up_dn_tri, &
+                                      o_init_zero=.true., partit=partit)
+            n_ctl = n_ctl + count(f_old /= f_new)
+        end do
+        vel = -vel                                   ! restore
+        n_bad_m = gsum(n_bad_m); n_bad_f = gsum(n_bad_f); n_ctl = gsum(n_ctl); n_flux = gsum(n_flux)
+        if (partit%mype == 0) write(*,'(2a,i0,a,i0,a,i0,a,i0)') '  ', label//': nonzero fluxes ', n_flux, &
+            '  bitwise mismatches muscl ', n_bad_m, '  mfct ', n_bad_f, '  positive control differs at ', n_ctl
+        call check_true(trim(label)//': adv_tra_hor_muscl_otf == stored-array kernel bitwise', n_bad_m == 0)
+        call check_true(trim(label)//': adv_tra_hor_mfct_otf == stored-array kernel bitwise', n_bad_f == 0)
+        call check_true(trim(label)//': fluxes nonzero (not vacuous)', n_flux > 0)
+        call check_true(trim(label)//': positive control (gnod = 0) differs', n_ctl > 0)
+    end subroutine part_f
 
     !=========================================================================
     ! Cavity columns, element-consistent

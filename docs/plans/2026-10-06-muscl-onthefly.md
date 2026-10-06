@@ -85,11 +85,11 @@ for `nz in [ulevels_nod2D(n), nlevels_nod2D(n))`, over `n = 1..nNodL`.
 
 **Files:** `src/oce/oce_adv_tra_hor.F90`, `test/test_muscl_onthefly.F90`
 
-- [ ] part F: old kernels (fill + `edge_up_dn_grad`) vs new kernels (`tr_xy`, `gnod`,
+- [x] part F: old kernels (fill + `edge_up_dn_grad`) vs new kernels (`tr_xy`, `gnod`,
   `edge_up_dn_tri`): `adv_tra_hor_muscl` and `_mfct` fluxes bitwise equal over all owned
   edges/levels, both velocity signs; positive control: `gnod = 0` (reference behaviour) differs
-- [ ] new kernel variants; per edge resolve the level ranges once outside the `nz` loop
-- [ ] tests np 1/2 + full ctest
+- [x] new kernel variants; per edge resolve the level ranges once outside the `nz` loop
+- [x] tests np 1/2 + full ctest
 
 ### Task 3: switch the production path, reuse `tr_xy` for diffusion
 
