@@ -74,12 +74,12 @@ for `nz in [ulevels_nod2D(n), nlevels_nod2D(n))`, over `n = 1..nNodL`.
 - Create: `test/test_muscl_onthefly.F90`
 - Modify: `test/CMakeLists.txt`
 
-- [ ] write `test_muscl_onthefly` part G: pi mesh np 1/2, a smooth+noisy tracer, elemental
+- [x] write `test_muscl_onthefly` part G: pi mesh np 1/2, a smooth+noisy tracer, elemental
   gradient + full exchange, run `fill_up_dn_grad` (oracle) and `muscl_node_grad`; for every
   owned edge/level where the fill wrote a node average, assert bitwise equality with `gnod`
   of the corresponding node; also a run with synthesised cavity columns
-- [ ] implement `muscl_node_grad(gnod, tr_xy, mesh, partit)`
-- [ ] run the test np 1/2 + full ctest
+- [x] implement `muscl_node_grad(gnod, tr_xy, mesh, partit)`
+- [x] run the test np 1/2 + full ctest
 
 ### Task 2: kernels with on-the-fly gradients
 

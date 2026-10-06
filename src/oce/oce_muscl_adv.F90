@@ -28,7 +28,7 @@ module oce_muscl_adv
     use mod_halo,        only: exchange_elem_full
     implicit none
     private
-    public :: muscl_adv_init, find_up_downwind_triangles, fill_up_dn_grad
+    public :: muscl_adv_init, find_up_downwind_triangles, fill_up_dn_grad, muscl_node_grad
 
 contains
 
@@ -365,5 +365,54 @@ contains
             end if
         end do
     end subroutine fill_up_dn_grad
+
+    !---------------------------------------------------------------------------
+    subroutine muscl_node_grad(gnod, tr_xy, mesh, partit)
+        ! Miura node-averaged tracer gradient, ONCE PER NODE:
+        !   gnod(:,nz,n) = sum_{elem around n, wet at nz} tr_xy(:,nz,elem)*elem_area(elem)
+        !                / sum_{same elems} elem_area(elem)
+        ! for nz in [ulevels_nod2D(n), nlevels_nod2D(n)), n = 1..nNodL (owned + halo).
+        !
+        ! WHY: fill_up_dn_grad uses exactly this average on the levels of an edge that are
+        ! not shared by both up/downwind triangles and on edges without them, but evaluates
+        ! it per EDGE, i.e. ~6 times per node, and stores the result in the 4-component
+        ! edge array edge_up_dn_grad. The average depends on (node, level) only, so it is
+        ! computed here once; the MUSCL kernels look it up on the fly together with tr_xy
+        ! of the up/downwind triangle (docs/plans/2026-10-06-muscl-onthefly.md).
+        ! The loop order over nod_in_elem2D, the wet test and the tx/tvol division are
+        ! fill_up_dn_grad's, so every value is bit-identical to the one the fill stores.
+        ! A level with no wet element around the node (a node deeper than all its
+        ! elements under bottom-at-vertices) gets 0 here; the fill stores 0/0 there.
+        ! Neither is ever read by the kernels: they only visit levels wet in one of the
+        ! edge's elements, which are elements around both edge nodes.
+        ! Halo nodes: nod_in_elem2D is complete for halo nodes and tr_xy/elem_area are
+        ! full-halo valid (exchange_elem_full), so no exchange of gnod is needed.
+        real(kind=WP),  intent(inout) :: gnod(:,:,:)        ! (2, nl-1, nNodL)
+        real(kind=WP),  intent(in)    :: tr_xy(:,:,:)       ! (2, nl-1, nElemF), full halo
+        type(t_mesh),   intent(in)    :: mesh
+        type(t_partit), intent(in), optional :: partit
+        integer       :: n, nz, k, elem
+        real(kind=WP) :: tvol, tx, ty
+        integer       :: nNodO, nNodL, nEdgeO, nElemO
+
+        call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
+        do n = 1, nNodL
+            gnod(:, :, n) = 0.0_WP
+            do nz = mesh%ulevels_nod2D(n), mesh%nlevels_nod2D(n)-1
+                tvol = 0.0_WP; tx = 0.0_WP; ty = 0.0_WP
+                do k = 1, mesh%nod_in_elem2D_num(n)
+                    elem = mesh%nod_in_elem2D(k, n)
+                    if (mesh%nlevels(elem)-1 < nz .or. nz < mesh%ulevels(elem)) cycle
+                    tvol = tvol + mesh%elem_area(elem)
+                    tx = tx + tr_xy(1, nz, elem)*mesh%elem_area(elem)
+                    ty = ty + tr_xy(2, nz, elem)*mesh%elem_area(elem)
+                end do
+                if (tvol > 0.0_WP) then
+                    gnod(1, nz, n) = tx/tvol
+                    gnod(2, nz, n) = ty/tvol
+                end if
+            end do
+        end do
+    end subroutine muscl_node_grad
 
 end module oce_muscl_adv
