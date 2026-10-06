@@ -1401,39 +1401,34 @@ ice step + `oce_fluxes` into a forced lifecycle, drop the prescribed fluxes, the
   shim. The `next_io_rank` np=1 fix is behavior-preserving (sequential I/O, value-identical) and arguably a real
   bug fix (the code's own TODO admits the recursion never ends at 1 rank).
 
-## MUSCL horizontal tracer advection: on-the-fly up/downwind gradients
+## MUSCL horizontal tracer advection: on-the-fly up/downwind reconstruction (reference RK3 rule)
 
-FESOM2 stores the per-edge up/downwind tracer gradient `edge_up_dn_grad(4, nl-1, nEdge)`
-(built every step by `fill_up_dn_grad`) and the MUSCL kernels read it. FESOM3 no longer
-keeps that array (design of the reference RK3 code `qq/oce_stepRK3.F90`, but bit-identical
-to the FESOM2 scheme):
+FESOM2 stores the per-edge up/downwind tracer gradient `edge_up_dn_grad(4, nl-1, nEdge)`,
+rebuilt every step by `fill_up_dn_grad` (triangle gradient on the levels shared by both edge
+nodes, a Miura node-averaged gradient on the others and at edges without both triangles).
+FESOM3 follows the reference RK3 code (`qq/oce_stepRK3.F90`, `t_hor_adv_muscl_RK3`) instead:
 
-- `init_tracers_AB` builds, per tracer, `twork%tr_xy` (elemental gradient of `values`, full
-  element halo) and `twork%gnod` (the Miura node-averaged gradient, `muscl_node_grad`),
-  persistent scratch. `solve_tracers_ale` reuses `tr_xy` for the horizontal diffusion /
-  Redi of the same tracer (it used to recompute it).
-- `adv_tra_hor_muscl` / `adv_tra_hor_mfct` take `(tr_xy, gnod, edge_up_dn_tri)`: on the levels
-  shared by both edge nodes `[maxval(ulevels_nod2D_max), minval(nlevels_nod2D_min))` the
-  up/downwind triangle's `tr_xy`, elsewhere `gnod` (0 outside a node's wet range -- FESOM2's
-  never-written entries). One predictable branch per level.
-- `muscl_node_ranges` (called by `muscl_adv_init`, static) records per node the levels on which
-  an owned edge reads `gnod` (`gnod_lo/gnod_hi`); `muscl_node_grad` computes only those (on
-  core2 ~5x fewer node averages than "every wet level"). `gnod` is zeroed once at allocation.
-- Quirk kept from FESOM2: at a boundary edge `nl12 = 0`, so segments (D)/(E) start at level 1,
-  above a cavity roof; the edge velocity is 0 there, so no flux results.
-- `fill_up_dn_grad` survives as the ORACLE only (writes a caller-owned array): used by
-  `test_muscl_onthefly` and by the legacy dump drivers `fesom_advhordump(_mr)` for the FESOM2
-  `edge_up_dn_grad` record. The pre-refactor kernels live in the test (`module muscl_oracle`).
+- `init_tracers_AB` builds `twork%tr_xy` (elemental gradient of `values`, full element halo),
+  persistent scratch; `solve_tracers_ale` reuses it for the horizontal diffusion / Redi.
+- `adv_tra_hor_muscl` / `adv_tra_hor_mfct(…, tr_xy, edge_up_dn_tri, …)`: side 1 takes `tr_xy` of
+  the upwind triangle, side 2 that of the downwind triangle, on the levels where that triangle
+  is wet; a missing or dry triangle gives a **zero** increment. No stored array, no node
+  average. Kept from FESOM3 (not from the reference): `edge_dxdy` with the folded metric, edge
+  flux output for FCT, cavities (`ulevels`), the `nboundary_lay` clamp of `adv_tra_hor_muscl`,
+  the gradient of `values` (not of the advected `valuesAB`, as FESOM2).
+- **Not bit-identical to FESOM2 any more**: identical on every (edge, level) where both edge
+  triangles exist and the level is shared by both edge nodes; different at coasts and
+  bathymetry / cavity steps (core2: 0.8 M of 10.9 M edge-levels, max |Δflux| 0.4 % of max
+  |flux|; pi 1.3-1.5 %).
+- `fill_up_dn_grad` survives only as FESOM2's reference (writes a caller-owned array):
+  `test_muscl_onthefly` part S and the legacy dump drivers `fesom_advhordump(_mr)`.
 
-Net: `test_muscl_onthefly` (np 1/2; pi as read and with synthesised cavities):
-part G rebuilds the old array from the lookup rule bitwise (positive control: the reference's
-zero increment differs); part F compares both kernels' fluxes with the pre-refactor kernels
-bitwise, both velocity signs (positive control `gnod = 0`); part T prints timing + memory.
-Gate: all 22 drift rows bit-identical. Measured on core2 (login node, one MFCT call incl. the
-gradient preparation): np 4 198 vs 218 ms, np 1 823 vs 884 ms (new vs old, ~9 % faster, not
-counting the saved second `tracer_gradient_elements` per tracer); memory -443 MiB in total
-(4x(nl-1)xnEdge dropped, 2x(nl-1)xnNod added) -- ~1 MiB per rank at 512 ranks.
-The test run on core2 needs `ulimit -s unlimited` (large comparison temporaries).
+Net: `test_muscl_onthefly` (np 1/2; pi as read and with synthesised cavities): part R = the
+production kernels equal the stored-array kernels fed with the reference rule, bitwise, both
+velocity signs; part S = equal to FESOM2 bitwise on the shared levels, different elsewhere
+(teeth); part T = timing. core2 (login node, one MFCT call incl. the gradient preparation):
+np 4 42 vs 74 ms, np 1 180 vs 316 ms (~43 % faster than FESOM2's fill + kernel); memory
+-535 MiB in total (~1 MiB/rank at 512). Run the test on core2 with `ulimit -s unlimited`.
 
 ## Momentum advection options (`momadv_opt`)
 

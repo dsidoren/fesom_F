@@ -1,8 +1,10 @@
 module muscl_oracle
-    ! THE ORACLE KERNELS: FESOM3's MUSCL / MFCT horizontal-flux kernels as they were before
-    ! the on-the-fly refactor (verbatim, commit 48cc272: they read the stored per-edge
-    ! up/downwind gradient edge_up_dn_grad built by fill_up_dn_grad). The model no longer
-    ! has them; test_muscl_onthefly part F compares the production kernels with these.
+    ! THE STORED-ARRAY KERNELS: FESOM3's MUSCL / MFCT horizontal-flux kernels as they were
+    ! before the on-the-fly refactor (verbatim, commit 48cc272: they read a per-edge
+    ! up/downwind gradient array edge_up_dn_grad). Fed with the array of a given rule they
+    ! give that rule's fluxes: test_muscl_onthefly uses them with the reference RK3 rule
+    ! (part R, the specification of the production kernels) and with FESOM2's fill_up_dn_grad
+    ! (part S, agreement with FESOM2 where the two rules coincide).
     use mod_precision,   only: WP
     use mod_mesh,        only: t_mesh
     use mod_partit,      only: t_partit
@@ -203,61 +205,33 @@ contains
 end module muscl_oracle
 
 program test_muscl_onthefly
-    ! MUSCL horizontal advection with on-the-fly up/downwind gradients
+    ! MUSCL horizontal advection with the up/downwind reconstruction formed ON THE FLY
     ! (docs/plans/completed/2026-10-06-muscl-onthefly.md).
     !
-    ! WHY THIS TEST EXISTS
-    ! --------------------
-    ! FESOM2's stored per-edge array edge_up_dn_grad(4, nl-1, nEdgeO), built by
-    ! fill_up_dn_grad, is replaced in FESOM3 by an on-the-fly lookup: the elemental gradient tr_xy of
-    ! the upwind/downwind triangle on the levels shared by both edge nodes, the Miura
-    ! node-averaged gradient gnod (muscl_node_grad, once per node) on the levels of one node
-    ! only and on edges without both triangles, and 0 where the fill never writes. The
-    ! refactor must be BIT-IDENTICAL; fill_up_dn_grad (kept in oce_muscl_adv for this
-    ! purpose only, writing a caller-owned array) and the pre-refactor kernels (module
-    ! muscl_oracle above) are the oracle.
+    ! THE RULE (the reference RK3 code, qq/oce_stepRK3.F90 t_hor_adv_muscl_RK3): for each
+    ! edge, side k = 1 takes the elemental gradient tr_xy of the UPWIND triangle
+    ! edge_up_dn_tri(1, edge), side k = 2 that of the DOWNWIND triangle, on the levels where
+    ! that triangle is wet (ulevels..nlevels-1); a missing or dry triangle gives a ZERO
+    ! increment. No stored per-edge array, no Miura node average. FESOM2 (fill_up_dn_grad)
+    ! uses the same triangle gradient on the levels shared by both edge nodes
+    ! [maxval(ulevels_nod2D_max), minval(nlevels_nod2D_min)) and a node-averaged gradient on
+    ! the others and at edges without both triangles -- so the two schemes coincide on the
+    ! shared levels and differ (by design) near coasts and bathymetry/cavity steps.
     !
-    ! THE LOOKUP RULE (side k = 1: upwind / edge node 1, components 1,3 of the old array;
-    ! k = 2: downwind / edge node 2, components 2,4), with
-    ! nzmin = maxval(ulevels_nod2D_max(edge nodes)), nzmax = minval(nlevels_nod2D_min(...)):
-    !   both up/dn triangles exist .and. nzmin <= nz < nzmax -> tr_xy(:,nz,edge_up_dn_tri(k))
-    !   else ulevels_nod2D(nk) <= nz < nlevels_nod2D(nk)      -> gnod(:,nz,nk)
-    !   else                                                  -> 0
-    ! (with both triangles the fill's node-only ranges [ulev(nk), nzmin) and
-    ! [nzmax, nlev(nk)) are exactly the complement of the shared range inside the node's
-    ! range, because nzmin >= ulev(nk) and nzmax <= nlev(nk); an empty shared range makes
-    ! the two node-only ranges overlap, which the fill resolves to the same average).
-    !
-    ! PART G - the rule reproduces the whole old array, every owned edge, every level
-    !   nz = 1..nl-1, both sides, both components, BITWISE, on
-    !   G1 the pi mesh as read (ulevels = 1), and
-    !   G2 pi with synthesised cavity columns (ulevels_nod2D = 3 on every 10th global node
-    !      with >= 14 levels; element ulevels and ulevels_nod2D_max rebuilt consistently,
-    !      exchanged at np 2), which populates the upper node-only ranges [ulev(nk), nzmin)
-    !      that do not exist without cavities.
-    !   Positions where the fill stores 0/0 (a level of a node with no wet element around
-    !   it) are compared as "oracle NaN <=> gnod 0" and counted; the kernels never read
-    !   them (part F, Task 2, pins that through the fluxes).
-    !   Every lookup class (triangle / node average / zero) must be populated, and in G2
-    !   the upper node-only range must occur (teeth).
-    !   Positive control: the reference RK3 code's rule (0 instead of the node average)
-    !   must produce mismatches.
-    !
-    ! PART F - the fluxes: the pre-refactor kernels oracle_muscl / oracle_mfct with the
-    !   stored array vs the production adv_tra_hor_muscl / adv_tra_hor_mfct with
-    !   (tr_xy, gnod, edge_up_dn_tri),
-    !   every owned edge and level, both signs of the velocity, BITWISE, on both meshes
-    !   of part G. A nonzero edge velocity on every wet level and a tracer with structure
-    !   in x, y and z make every reconstruction branch contribute. Positive control: the
-    !   on-the-fly kernels with gnod = 0 (the reference RK3 rule) must differ.
-    !
-    ! PART T - timing, printed only (no assertion; the numbers are for the record, run the
-    !   binary on the core2 mesh with FESOM3_MESH_DIR for meaningful values): the old path
-    !   (fill_up_dn_grad + stored-array MFCT kernel) vs the new one (muscl_node_grad +
-    !   on-the-fly MFCT kernel), each component separately, max over ranks, and the memory
-    !   of the dropped per-edge array vs the new node array.
+    ! PART R - the specification: adv_tra_hor_muscl / adv_tra_hor_mfct == the stored-array
+    !   kernels (module muscl_oracle) fed with the array built by the rule above, every owned
+    !   edge and level, both velocity signs, BITWISE; on pi as read (R1) and with synthesised
+    !   cavity columns (R2: ulevels_nod2D = 3 on every 10th global node with >= 14 levels,
+    !   element ulevels and ulevels_nod2D(_max) rebuilt consistently and exchanged).
+    ! PART S - agreement with FESOM2: the production fluxes equal FESOM2's (stored-array
+    !   kernels fed with fill_up_dn_grad) BITWISE on every (edge, level) where both edge
+    !   triangles exist and the level is shared; elsewhere they may differ, and must at some
+    !   (teeth: the scheme did change there). The size of the difference is printed.
+    ! PART T - timing, printed only: FESOM2's path (fill_up_dn_grad + stored-array MFCT
+    !   kernel) vs the on-the-fly MFCT kernel, max over ranks, and the memory of the dropped
+    !   array. Run the binary on the core2 mesh (FESOM3_MESH_DIR, ulimit -s unlimited) for
+    !   meaningful numbers.
     use mpi
-    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan
     use mod_precision,     only: WP, MP
     use mod_mesh,          only: t_mesh
     use mod_partit,        only: t_partit
@@ -268,7 +242,7 @@ program test_muscl_onthefly
     use mod_part_bounds,   only: owned_bounds, is_multirank
     use mod_halo,          only: exchange_elem_full, exchange_nod
     use oce_tracer_grad,   only: tracer_gradient_elements
-    use oce_muscl_adv,     only: muscl_adv_init, fill_up_dn_grad, muscl_node_grad, muscl_node_ranges
+    use oce_muscl_adv,     only: muscl_adv_init, fill_up_dn_grad
     use oce_adv_tra_hor,   only: adv_tra_hor_muscl, adv_tra_hor_mfct
     use muscl_oracle,      only: oracle_muscl, oracle_mfct
     implicit none
@@ -279,8 +253,8 @@ program test_muscl_onthefly
     type(t_tracer_work) :: twork
     integer :: nfail, nsw
     integer :: nNodO, nNodL, nEdgeO, nElemO, nElemF, nl
-    real(kind=WP), allocatable :: ttf(:,:), tr_xy(:,:,:), gnod(:,:,:)
-    real(kind=WP), allocatable :: vel(:,:,:), eudg(:,:,:), f_old(:,:), f_new(:,:), gzero(:,:,:)
+    real(kind=WP), allocatable :: ttf(:,:), tr_xy(:,:,:)
+    real(kind=WP), allocatable :: vel(:,:,:), eref(:,:,:), ef2(:,:,:), f_ref(:,:), f_new(:,:), f_f2(:,:)
     real(kind=WP), parameter   :: num_ord = 0.25_WP      ! any mix of the 3rd/4th-order parts
     ! cavity synthesis (the constants of test_wsplit / test_wimpl_tra: same column set)
     integer, parameter :: cav_every    = 10      ! every 10th global node ...
@@ -300,22 +274,21 @@ program test_muscl_onthefly
     nElemF = mesh%elem2D
     if (partit%npes > 1) nElemF = partit%myDim_elem2D + partit%eDim_elem2D + partit%eXDim_elem2D
     nl = mesh%nl
-    allocate(ttf(nl-1, nNodL), tr_xy(2, nl-1, nElemF), gnod(2, nl-1, nNodL))
-    gnod = 0.0_WP                                 ! as init_tracers_AB: written only where read
-    call muscl_adv_init(twork, mesh, partit)      ! edge_up_dn_tri, nboundary_lay
-    allocate(vel(2, nl-1, nElemF), eudg(4, nl-1, nEdgeO), f_old(nl-1, nEdgeO), f_new(nl-1, nEdgeO))
-    allocate(gzero(2, nl-1, nNodL)); gzero = 0.0_WP
+    allocate(ttf(nl-1, nNodL), tr_xy(2, nl-1, nElemF))
+    allocate(vel(2, nl-1, nElemF), eref(4, nl-1, nEdgeO), ef2(4, nl-1, nEdgeO))
+    allocate(f_ref(nl-1, nEdgeO), f_new(nl-1, nEdgeO), f_f2(nl-1, nEdgeO))
     allocate(mesh%helem(nl-1, nElemF))
+    call muscl_adv_init(twork, mesh, partit)      ! edge_up_dn_tri, nboundary_lay
     call build_flow()
 
-    call part_g('G1 pi as read      ')
-    call part_f('F1 pi as read      ')
+    call build_gradient()
+    call part_r('R1 pi as read      ')
+    call part_s('S1 pi as read      ')
     call part_t()
     call synth_cavity()
-    call muscl_node_ranges(twork, mesh, partit)   ! the level structure changed
-    gnod = 0.0_WP                                 ! as after allocation (stale G1 values out)
-    call part_g('G2 pi with cavities')
-    call part_f('F2 pi with cavities')
+    call build_gradient()
+    call part_r('R2 pi with cavities')
+    call part_s('S2 pi with cavities')
 
     if (partit%mype == 0) then
         if (nfail == 0) then
@@ -365,77 +338,6 @@ contains
         if (is_multirank(partit)) call exchange_elem_full(tr_xy, partit)
     end subroutine build_gradient
 
-    !=========================================================================
-    ! PART G
-    !=========================================================================
-    subroutine part_g(label)
-        character(len=*), intent(in) :: label
-        integer :: edge, nz, k, nk, nzmin, nzmax, comp, ednodes(2)
-        integer :: n_tri, n_nod, n_zero, n_nan, n_bad, n_upper, n_ctl
-        logical :: both
-        real(kind=WP) :: g(2), old(2)
-
-        call build_gradient()
-        call fill_up_dn_grad(eudg, twork, tr_xy, mesh, partit)    ! the oracle (zeroes eudg first)
-        call muscl_node_grad(gnod, tr_xy, twork%gnod_lo, twork%gnod_hi, mesh, partit)
-
-        n_tri = 0; n_nod = 0; n_zero = 0; n_nan = 0; n_bad = 0; n_upper = 0; n_ctl = 0
-        do edge = 1, nEdgeO
-            ednodes = mesh%edges(:, edge)
-            both  = (twork%edge_up_dn_tri(1, edge) /= 0) .and. (twork%edge_up_dn_tri(2, edge) /= 0)
-            nzmin = maxval(mesh%ulevels_nod2D_max(ednodes))
-            nzmax = minval(mesh%nlevels_nod2D_min(ednodes))
-            do k = 1, 2
-                nk = ednodes(k)
-                do nz = 1, nl-1
-                    ! the old array: side k stores x in component k, y in component k+2
-                    old(1) = eudg(k,   nz, edge)
-                    old(2) = eudg(k+2, nz, edge)
-                    ! the lookup rule (header)
-                    if (both .and. nz >= nzmin .and. nz < nzmax) then
-                        g = tr_xy(:, nz, twork%edge_up_dn_tri(k, edge))
-                        n_tri = n_tri + 1
-                    else if (nz >= mesh%ulevels_nod2D(nk) .and. nz < mesh%nlevels_nod2D(nk)) then
-                        g = gnod(:, nz, nk)
-                        n_nod = n_nod + 1
-                        if (both .and. nz < nzmin) n_upper = n_upper + 1
-                        ! positive control: the reference's 0 instead of the node average
-                        if (any(old /= 0.0_WP .and. .not. ieee_is_nan(old))) n_ctl = n_ctl + 1
-                    else
-                        g = 0.0_WP
-                        n_zero = n_zero + 1
-                    end if
-                    do comp = 1, 2
-                        if (ieee_is_nan(old(comp))) then
-                            ! fill's 0/0 at a level with no wet element: gnod stores 0 there
-                            n_nan = n_nan + 1
-                            if (g(comp) /= 0.0_WP) n_bad = n_bad + 1
-                        else if (transfer(g(comp), 0_8) /= transfer(old(comp), 0_8)) then
-                            n_bad = n_bad + 1
-                        end if
-                    end do
-                end do
-            end do
-        end do
-        n_tri = gsum(n_tri); n_nod = gsum(n_nod); n_zero = gsum(n_zero); n_nan = gsum(n_nan)
-        n_bad = gsum(n_bad); n_upper = gsum(n_upper); n_ctl = gsum(n_ctl)
-        if (partit%mype == 0) then
-            write(*,'(2a,i0,a,i0,a,i0,a,i0)') '  ', label//': entries from triangle ', n_tri, &
-                '  node average ', n_nod, '  zero ', n_zero, '  (of which upper node-only ', n_upper
-            write(*,'(a,i0,a,i0,a,i0)') '      mismatches (bitwise) ', n_bad, &
-                '  oracle 0/0 positions ', n_nan, '  positive control (0 for node avg) differs at ', n_ctl
-        end if
-        call check_true(trim(label)//': rule == fill_up_dn_grad bitwise', n_bad == 0)
-        call check_true(trim(label)//': every lookup class populated', &
-                        n_tri > 0 .and. n_nod > 0 .and. n_zero > 0)
-        call check_true(trim(label)//': positive control (reference zero) differs', n_ctl > 0)
-        if (index(label, 'cavities') > 0) &
-            call check_true(trim(label)//': upper node-only range populated', n_upper > 0)
-    end subroutine part_g
-
-    !=========================================================================
-    ! PART F
-    !=========================================================================
     subroutine build_flow()
         ! element velocity with structure in both components and every level; helem any
         ! positive thickness (the kernels only multiply the edge velocity by it)
@@ -451,78 +353,135 @@ contains
         end do
     end subroutine build_flow
 
+    !=========================================================================
+    ! the reference rule as a per-edge array (side k: x in component k, y in k+2)
+    !=========================================================================
+    subroutine build_ref_array()
+        integer :: edge, k, tri, nz
+        eref = 0.0_WP
+        do edge = 1, nEdgeO
+            do k = 1, 2
+                tri = twork%edge_up_dn_tri(k, edge)
+                if (tri <= 0) cycle
+                do nz = mesh%ulevels(tri), mesh%nlevels(tri)-1
+                    eref(k,   nz, edge) = tr_xy(1, nz, tri)
+                    eref(k+2, nz, edge) = tr_xy(2, nz, tri)
+                end do
+            end do
+        end do
+    end subroutine build_ref_array
+
+    !=========================================================================
+    ! PART R: production kernels == the reference rule, bitwise
+    !=========================================================================
+    subroutine part_r(label)
+        character(len=*), intent(in) :: label
+        integer :: isign, n_bad_m, n_bad_f, n_flux
+        call build_ref_array()
+        n_bad_m = 0; n_bad_f = 0; n_flux = 0
+        do isign = 1, 2
+            if (isign == 2) vel = -vel
+            call oracle_muscl(vel, ttf, mesh, num_ord, f_ref, eref, twork%nboundary_lay, &
+                              o_init_zero=.true., partit=partit)
+            call adv_tra_hor_muscl(vel, ttf, mesh, num_ord, f_new, tr_xy, twork%edge_up_dn_tri, &
+                                   twork%nboundary_lay, o_init_zero=.true., partit=partit)
+            n_bad_m = n_bad_m + count(transfer(f_ref, 0_8, size(f_ref)) /= transfer(f_new, 0_8, size(f_new)))
+            n_flux  = n_flux  + count(f_ref /= 0.0_WP)
+            call oracle_mfct(vel, ttf, mesh, num_ord, f_ref, eref, o_init_zero=.true., partit=partit)
+            call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_new, tr_xy, twork%edge_up_dn_tri, &
+                                  o_init_zero=.true., partit=partit)
+            n_bad_f = n_bad_f + count(transfer(f_ref, 0_8, size(f_ref)) /= transfer(f_new, 0_8, size(f_new)))
+        end do
+        vel = -vel                                   ! restore
+        n_bad_m = gsum(n_bad_m); n_bad_f = gsum(n_bad_f); n_flux = gsum(n_flux)
+        if (partit%mype == 0) write(*,'(2a,i0,a,i0,a,i0)') '  ', label//': nonzero fluxes ', n_flux, &
+            '  bitwise mismatches vs reference rule: muscl ', n_bad_m, '  mfct ', n_bad_f
+        call check_true(trim(label)//': adv_tra_hor_muscl == reference rule bitwise', n_bad_m == 0)
+        call check_true(trim(label)//': adv_tra_hor_mfct == reference rule bitwise', n_bad_f == 0)
+        call check_true(trim(label)//': fluxes nonzero (not vacuous)', n_flux > 0)
+    end subroutine part_r
+
+    !=========================================================================
+    ! PART S: agreement with FESOM2 on the shared levels
+    !=========================================================================
+    subroutine part_s(label)
+        character(len=*), intent(in) :: label
+        integer :: edge, nz, nzmin, nzmax, n_shared, n_bad_sh, n_diff_else
+        logical :: both
+        real(kind=WP) :: dmax, fmax
+        call fill_up_dn_grad(ef2, twork, tr_xy, mesh, partit)        ! FESOM2's array
+        call oracle_mfct(vel, ttf, mesh, num_ord, f_f2, ef2, o_init_zero=.true., partit=partit)
+        call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_new, tr_xy, twork%edge_up_dn_tri, &
+                              o_init_zero=.true., partit=partit)
+        n_shared = 0; n_bad_sh = 0; n_diff_else = 0; dmax = 0.0_WP
+        do edge = 1, nEdgeO
+            both  = (twork%edge_up_dn_tri(1, edge) /= 0) .and. (twork%edge_up_dn_tri(2, edge) /= 0)
+            nzmin = maxval(mesh%ulevels_nod2D_max(mesh%edges(:, edge)))
+            nzmax = minval(mesh%nlevels_nod2D_min(mesh%edges(:, edge)))
+            do nz = 1, nl-1
+                if (both .and. nz >= nzmin .and. nz < nzmax) then
+                    n_shared = n_shared + 1
+                    if (transfer(f_new(nz,edge), 0_8) /= transfer(f_f2(nz,edge), 0_8)) n_bad_sh = n_bad_sh + 1
+                else if (f_new(nz,edge) /= f_f2(nz,edge)) then
+                    n_diff_else = n_diff_else + 1
+                    dmax = max(dmax, abs(f_new(nz,edge) - f_f2(nz,edge)))
+                end if
+            end do
+        end do
+        fmax = maxval(abs(f_f2))
+        n_shared = gsum(n_shared); n_bad_sh = gsum(n_bad_sh); n_diff_else = gsum(n_diff_else)
+        dmax = gmaxr(dmax); fmax = gmaxr(fmax)
+        if (partit%mype == 0) write(*,'(2a,i0,a,i0,a,i0,a,es10.3)') '  ', label//': shared (edge,level) ', n_shared, &
+            '  differing from FESOM2 there ', n_bad_sh, '  elsewhere ', n_diff_else, &
+            '  max|diff|/max|flux| ', dmax/max(fmax, tiny(1.0_WP))
+        call check_true(trim(label)//': == FESOM2 on the shared levels bitwise', n_bad_sh == 0 .and. n_shared > 0)
+        call check_true(trim(label)//': differs from FESOM2 elsewhere (the scheme changed there)', n_diff_else > 0)
+    end subroutine part_s
+
+    function gmaxr(x) result(m)
+        real(kind=WP), intent(in) :: x
+        real(kind=WP) :: m
+        integer :: ierr
+        m = x
+        if (partit%npes > 1) call MPI_Allreduce(x, m, 1, MPI_DOUBLE_PRECISION, MPI_MAX, &
+                                                partit%MPI_COMM_FESOM, ierr)
+    end function gmaxr
+
+    !=========================================================================
+    ! PART T: timing (printed only)
+    !=========================================================================
     subroutine part_t()
         integer, parameter :: nrep = 3
         integer :: r, ierr
-        real(kind=WP) :: t(5), tmax(4)
-        integer(kind=8) :: b_edge, b_node, bb(2)
+        real(kind=WP) :: t(4), tmax(3)
+        integer(kind=8) :: bb
         t(1) = MPI_Wtime()
         do r = 1, nrep
-            call fill_up_dn_grad(eudg, twork, tr_xy, mesh, partit)
+            call fill_up_dn_grad(ef2, twork, tr_xy, mesh, partit)
         end do
         t(2) = MPI_Wtime()
         do r = 1, nrep
-            call oracle_mfct(vel, ttf, mesh, num_ord, f_old, eudg, o_init_zero=.true., partit=partit)
+            call oracle_mfct(vel, ttf, mesh, num_ord, f_f2, ef2, o_init_zero=.true., partit=partit)
         end do
         t(3) = MPI_Wtime()
         do r = 1, nrep
-            call muscl_node_grad(gnod, tr_xy, twork%gnod_lo, twork%gnod_hi, mesh, partit)
-        end do
-        t(4) = MPI_Wtime()
-        do r = 1, nrep
-            call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_new, tr_xy, gnod, twork%edge_up_dn_tri, &
+            call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_new, tr_xy, twork%edge_up_dn_tri, &
                                   o_init_zero=.true., partit=partit)
         end do
-        t(5) = MPI_Wtime()
-        tmax = (t(2:5) - t(1:4))/real(nrep, WP)*1.0e3_WP
-        if (partit%npes > 1) call MPI_Allreduce(MPI_IN_PLACE, tmax, 4, MPI_DOUBLE_PRECISION, MPI_MAX, &
+        t(4) = MPI_Wtime()
+        tmax = (t(2:4) - t(1:3))/real(nrep, WP)*1.0e3_WP
+        if (partit%npes > 1) call MPI_Allreduce(MPI_IN_PLACE, tmax, 3, MPI_DOUBLE_PRECISION, MPI_MAX, &
                                                 partit%MPI_COMM_FESOM, ierr)
-        bb(1) = 4_8*int(nl-1, 8)*int(nEdgeO, 8)*8_8
-        bb(2) = 2_8*int(nl-1, 8)*int(nNodL, 8)*8_8
-        if (partit%npes > 1) call MPI_Allreduce(MPI_IN_PLACE, bb, 2, MPI_INTEGER8, MPI_SUM, &
+        bb = 4_8*int(nl-1, 8)*int(nEdgeO, 8)*8_8
+        if (partit%npes > 1) call MPI_Allreduce(MPI_IN_PLACE, bb, 1, MPI_INTEGER8, MPI_SUM, &
                                                 partit%MPI_COMM_FESOM, ierr)
-        b_edge = bb(1); b_node = bb(2)
         if (partit%mype == 0) then
-            write(*,'(a,f9.2,a,f9.2,a,f9.2)') '  T old: fill_up_dn_grad ', tmax(1), ' ms  + MFCT kernel ', tmax(2), &
-                ' ms  = ', tmax(1) + tmax(2)
-            write(*,'(a,f9.2,a,f9.2,a,f9.2)') '  T new: muscl_node_grad ', tmax(3), ' ms  + MFCT kernel ', tmax(4), &
-                ' ms  = ', tmax(3) + tmax(4)
-            write(*,'(a,f8.1,a,f8.1,a)') '  T memory (all ranks): dropped edge_up_dn_grad ', real(b_edge)/2.0**20, &
-                ' MiB, new gnod ', real(b_node)/2.0**20, ' MiB (tr_xy existed before)'
+            write(*,'(a,f9.2,a,f9.2,a,f9.2)') '  T FESOM2: fill_up_dn_grad ', tmax(1), ' ms + MFCT kernel ', tmax(2), &
+                ' ms = ', tmax(1) + tmax(2)
+            write(*,'(a,f9.2,a)') '  T on the fly: MFCT kernel ', tmax(3), ' ms (tr_xy is built in both paths)'
+            write(*,'(a,f8.1,a)') '  T memory (all ranks): dropped edge_up_dn_grad ', real(bb)/2.0**20, ' MiB'
         end if
     end subroutine part_t
-
-    subroutine part_f(label)
-        character(len=*), intent(in) :: label
-        integer :: isign, n_bad_m, n_bad_f, n_ctl, n_flux
-        ! part_g left tr_xy, gnod and the oracle array eudg of this mesh in place
-        n_bad_m = 0; n_bad_f = 0; n_ctl = 0; n_flux = 0
-        do isign = 1, 2
-            if (isign == 2) vel = -vel
-            call oracle_muscl(vel, ttf, mesh, num_ord, f_old, eudg, twork%nboundary_lay, &
-                                   o_init_zero=.true., partit=partit)
-            call adv_tra_hor_muscl(vel, ttf, mesh, num_ord, f_new, tr_xy, gnod, twork%edge_up_dn_tri, &
-                                       twork%nboundary_lay, o_init_zero=.true., partit=partit)
-            n_bad_m = n_bad_m + count(transfer(f_old, 0_8, size(f_old)) /= transfer(f_new, 0_8, size(f_new)))
-            n_flux  = n_flux  + count(f_old /= 0.0_WP)
-            call oracle_mfct(vel, ttf, mesh, num_ord, f_old, eudg, o_init_zero=.true., partit=partit)
-            call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_new, tr_xy, gnod, twork%edge_up_dn_tri, &
-                                      o_init_zero=.true., partit=partit)
-            n_bad_f = n_bad_f + count(transfer(f_old, 0_8, size(f_old)) /= transfer(f_new, 0_8, size(f_new)))
-            ! positive control: the reference rule (no node average)
-            call adv_tra_hor_mfct(vel, ttf, mesh, num_ord, f_new, tr_xy, gzero, twork%edge_up_dn_tri, &
-                                      o_init_zero=.true., partit=partit)
-            n_ctl = n_ctl + count(f_old /= f_new)
-        end do
-        vel = -vel                                   ! restore
-        n_bad_m = gsum(n_bad_m); n_bad_f = gsum(n_bad_f); n_ctl = gsum(n_ctl); n_flux = gsum(n_flux)
-        if (partit%mype == 0) write(*,'(2a,i0,a,i0,a,i0,a,i0)') '  ', label//': nonzero fluxes ', n_flux, &
-            '  bitwise mismatches muscl ', n_bad_m, '  mfct ', n_bad_f, '  positive control differs at ', n_ctl
-        call check_true(trim(label)//': adv_tra_hor_muscl == pre-refactor kernel bitwise', n_bad_m == 0)
-        call check_true(trim(label)//': adv_tra_hor_mfct == pre-refactor kernel bitwise', n_bad_f == 0)
-        call check_true(trim(label)//': fluxes nonzero (not vacuous)', n_flux > 0)
-        call check_true(trim(label)//': positive control (gnod = 0) differs', n_ctl > 0)
-    end subroutine part_f
 
     !=========================================================================
     ! Cavity columns, element-consistent
@@ -549,7 +508,7 @@ contains
         ! FESOM2's cavity convention: a node's surface is the SHALLOWEST surface of its
         ! elements (ulevels_nod2D = minval(ulevels around)), so a node whose elements all
         ! touch a cavity vertex moves down too; without this its top levels would have no
-        ! wet element (the fill would then divide 0/0)
+        ! wet element (FESOM2's fill would then divide 0/0)
         do n = 1, nNodO
             k = mesh%nod_in_elem2D_num(n)
             mesh%ulevels_nod2D(n)     = minval(mesh%ulevels(mesh%nod_in_elem2D(1:k, n)))

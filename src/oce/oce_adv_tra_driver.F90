@@ -70,7 +70,7 @@ contains
         real(kind=WP), pointer :: ttf(:,:), ttfAB(:,:), fct_LO(:,:)
         real(kind=WP), pointer :: adv_flux_hor(:,:), adv_flux_ver(:,:), dttf_h(:,:), dttf_v(:,:)
         real(kind=WP), pointer :: fct_ttf_min(:,:), fct_ttf_max(:,:), fct_plus(:,:), fct_minus(:,:)
-        real(kind=WP), pointer :: tr_xy(:,:,:), gnod(:,:,:)
+        real(kind=WP), pointer :: tr_xy(:,:,:)
         integer,       pointer :: edge_up_dn_tri(:,:)
         integer,       pointer :: nboundary_lay(:)
         real(kind=WP), pointer :: pwvel(:,:)
@@ -90,7 +90,6 @@ contains
         adv_flux_ver    => tracers%work%adv_flux_ver
         adv_flux_hor    => tracers%work%adv_flux_hor
         tr_xy           => tracers%work%tr_xy
-        gnod            => tracers%work%gnod
         edge_up_dn_tri  => tracers%work%edge_up_dn_tri
         nboundary_lay   => tracers%work%nboundary_lay
         fct_ttf_min     => tracers%work%fct_ttf_min
@@ -164,9 +163,9 @@ contains
         ! horizontal advection (FCT: high-order antidiffusive; else: full high-order)
         select case (trim(tracers%data(tr_num)%tra_adv_hor))
         case ('MUSCL')
-            call adv_tra_hor_muscl(vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, gnod, edge_up_dn_tri, nboundary_lay, o_init_zero=do_zero_flux, partit=partit)
+            call adv_tra_hor_muscl(vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, edge_up_dn_tri, nboundary_lay, o_init_zero=do_zero_flux, partit=partit)
         case ('MFCT')
-            call adv_tra_hor_mfct (vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, gnod, edge_up_dn_tri, o_init_zero=do_zero_flux, partit=partit)
+            call adv_tra_hor_mfct (vel, ttfAB, mesh, opth, adv_flux_hor, tr_xy, edge_up_dn_tri, o_init_zero=do_zero_flux, partit=partit)
         case ('UPW1')
             call adv_tra_hor_upw1 (vel, ttfAB, mesh,       adv_flux_hor,                                 o_init_zero=do_zero_flux, partit=partit)
         case default

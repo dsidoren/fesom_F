@@ -126,3 +126,16 @@ for `nz in [ulevels_nod2D(n), nlevels_nod2D(n))`, over `n = 1..nNodL`.
 
 - Production run decisions remain the user's. Gradient of `ttfAB` instead of `values`, or the
   reference's zero increment at boundaries, are possible later scheme changes (not refactors).
+
+## Follow-up (2026-10-06): the reference RK3 rule
+
+The user asked for the reference implementation proper ("nearly same implementation" as
+`qq/oce_stepRK3.F90`): the up/downwind triangle's `tr_xy` where that triangle is wet, a zero
+increment otherwise. `gnod`, `muscl_node_grad`, `muscl_node_ranges` removed; the kernels take
+`(tr_xy, edge_up_dn_tri)`. **Results change** at coasts and bathymetry/cavity steps (core2:
+0.8 M of 10.9 M edge-levels, max |Δflux| 0.4 % of max |flux|); identical to FESOM2 on the
+shared levels. `test_muscl_onthefly` rewritten: part R (production == reference rule,
+bitwise), part S (== FESOM2 on shared levels bitwise, differs elsewhere), part T (timing).
+core2 timing: np 4 42 vs 74 ms, np 1 180 vs 316 ms (~43 % faster than FESOM2's path).
+Gate: conservation OK; drift rows no longer bit-identical to the FESOM2-rule log (expected).
+

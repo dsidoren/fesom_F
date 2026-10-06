@@ -10,9 +10,9 @@ module oce_tracer_mod
     !        AB3: valuesAB = (5*valuesold(2) - 16*valuesold(1) + 23*values)/12
     !   3. rolls the history valuesold
     !   4. rebuilds the ELEMENTAL gradient of `values` (NOT valuesAB — FESOM2 commented
-    !      the AB variant out at oce_tracer_mod.F90:126-127; see LESSONS L11) and its
-    !      Miura node average, from which the MUSCL kernels take the up/downwind
-    !      gradient on the fly (FESOM2 stores it per edge in edge_up_dn_grad).
+    !      the AB variant out at oce_tracer_mod.F90:126-127; see LESSONS L11), from which
+    !      the MUSCL kernels take the up/downwind reconstruction on the fly (FESOM2
+    !      stores a per-edge array edge_up_dn_grad instead).
     !
     ! The AB2 offset `eps` is FESOM2's o_PARAM `epsilon = 0.1` (oce_modules.F90:92),
     ! a runtime module VARIABLE there (not a parameter). It is kept non-parameter here
@@ -38,7 +38,6 @@ module oce_tracer_mod
     use mod_part_bounds,  only: owned_bounds, is_multirank
     use mod_halo,         only: exchange_elem_full
     use oce_tracer_grad,  only: tracer_gradient_elements
-    use oce_muscl_adv,    only: muscl_node_grad
     implicit none
     private
     public :: init_tracers_AB
@@ -50,7 +49,7 @@ contains
         ! run over OWNED+HALO nodes (values/valuesold are halo-consistent so valuesAB is
         ! valid at the halo the HO kernels read). tr_xy is built on OWNED elements then
         ! exchanged over the FULL element halo (FESOM2 init_tracers_AB:128-132): the MUSCL
-        ! kernels and muscl_node_grad read it at the halo elements of a halo node's
+        ! kernels read it at the up/downwind triangles of owned edges (halo elements of a halo node's
         ! element list.
         integer,        intent(in)    :: tr_num
         type(t_mesh),   intent(in)    :: mesh
@@ -99,25 +98,20 @@ contains
             end do
         end if
 
-        ! elemental gradient of values over the FULL element halo + its Miura node average:
-        ! the MUSCL kernels look the up/downwind gradients up on the fly from these two
-        ! (adv_tra_hor_muscl / _mfct; they replace FESOM2's stored per-edge array, which
-        ! test_muscl_onthefly rebuilds with the oracle fill_up_dn_grad, bitwise), and the
-        ! horizontal diffusion / Redi of this tracer reuses tr_xy (solve_tracers_ale).
-        ! Persistent scratch, allocated on first use. Zeroed once: tracer_gradient_elements
-        ! writes only wet levels, and the dry ones are never read.
+        ! elemental gradient of values over the FULL element halo: the MUSCL kernels take
+        ! the up/downwind reconstruction from it on the fly (the reference RK3 rule, no
+        ! stored per-edge array), and the horizontal diffusion / Redi of this tracer reuses
+        ! it (solve_tracers_ale). Persistent scratch, allocated on first use. Zeroed once:
+        ! tracer_gradient_elements writes only wet levels, and the dry ones are never read.
         nElemA = mesh%elem2D
         if (is_multirank(partit)) &
             nElemA = partit%myDim_elem2D + partit%eDim_elem2D + partit%eXDim_elem2D
         if (.not. allocated(tracers%work%tr_xy)) then
-            allocate(tracers%work%tr_xy(2, mesh%nl-1, nElemA), tracers%work%gnod(2, mesh%nl-1, nNodL))
+            allocate(tracers%work%tr_xy(2, mesh%nl-1, nElemA))
             tracers%work%tr_xy = 0.0_WP
-            tracers%work%gnod  = 0.0_WP     ! entries muscl_node_grad does not write stay 0
         end if
         call tracer_gradient_elements(tracers%data(tr_num)%values, tracers%work%tr_xy, mesh, partit)
         if (is_multirank(partit)) call exchange_elem_full(tracers%work%tr_xy, partit)
-        call muscl_node_grad(tracers%work%gnod, tracers%work%tr_xy, tracers%work%gnod_lo, &
-                             tracers%work%gnod_hi, mesh, partit)
     end subroutine init_tracers_AB
 
 end module oce_tracer_mod

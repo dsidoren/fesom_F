@@ -38,16 +38,12 @@ module mod_tracer
         ! MUSCL reconstruction
         integer,       allocatable, dimension(:)   :: nboundary_lay
         integer,       allocatable, dimension(:,:) :: edge_up_dn_tri
-        ! On-the-fly MUSCL gradients (replace FESOM2's stored per-edge edge_up_dn_grad;
-        ! docs/plans/completed/2026-10-06-muscl-onthefly.md): the elemental
-        ! gradient of values over the FULL element halo and its Miura node average, rebuilt
-        ! per tracer by init_tracers_AB; tr_xy is reused by the horizontal diffusion / Redi
-        ! of the same tracer. Scratch: NOT serialized.
+        ! Elemental gradient of values over the FULL element halo, rebuilt per tracer by
+        ! init_tracers_AB: the MUSCL kernels form the up/downwind reconstruction from it on
+        ! the fly (no stored per-edge edge_up_dn_grad; docs/plans/completed/
+        ! 2026-10-06-muscl-onthefly.md), the horizontal diffusion / Redi of the same tracer
+        ! reuses it. Scratch: NOT serialized.
         real(kind=WP), allocatable, dimension(:,:,:) :: tr_xy             ! (2, nl-1, nElemF)
-        real(kind=WP), allocatable, dimension(:,:,:) :: gnod              ! (2, nl-1, nNodL)
-        ! levels on which an owned edge reads gnod (muscl_node_ranges, static):
-        ! [ulevels_nod2D(n), gnod_lo(n)) and [gnod_hi(n), nlevels_nod2D(n))
-        integer,       allocatable, dimension(:)     :: gnod_lo, gnod_hi   ! (nNodL)
         ! M4d Redi: vertical tracer gradient (tracer_gradient_z), recomputed per tracer; NOT
         ! serialized (allocated only when Redi). Feeds diff_part_hor_redi's K13/K23 slope terms.
         real(kind=WP), allocatable, dimension(:,:) :: tr_z              ! (nl, nod2D)

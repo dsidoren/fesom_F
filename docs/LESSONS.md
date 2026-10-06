@@ -2551,32 +2551,30 @@ for the smooth split; the tests are the specification (L54).
   not with ulps of `Cu_max`: the first "4 ulp of `Cu_max`" bound failed at `Cu ≈ 17.5`
   (measured 1.23 eps·Cu), the error-model bound `4·eps·Cu` passes with a 3x margin (W6).
 
-## L59 — Dropping a stored intermediate is not automatically faster: an on-the-fly lookup has to be shaped (one branch, only the needed values) before it beats a contiguous array, and only the bigger mesh tells
+## L59 — The cost was the RULE, not the storage: keeping FESOM2's node-averaged fallback made the on-the-fly MUSCL barely faster; adopting the reference RK3 rule (triangle gradient or zero) made it ~43 % faster
 
-**Context.** The reference RK3 code forms the MUSCL up/downwind gradient on the fly instead of
-storing FESOM2's per-edge array `edge_up_dn_grad(4, nl-1, nEdge)`. Ported bit-identically
-(the reference uses a zero increment where FESOM2 uses the Miura node average, so the node
-average had to become its own per-node array `gnod`), the first version was ~20 % SLOWER on
-core2 per MFCT call (299 vs 246 ms at np 4), although it moves less memory.
-
-**What it took.** Three measured steps on core2 (login node, np 4, old path 218 ms):
-1. a contained per-level lookup routine with three branches: slower (299 vs 246);
-2. a per-edge column buffer filled from slices: slower still on pi, ~233 on core2;
-3. one predictable `if (nz in shared range) tri else gnod` per level, no copy (233 -> ~220),
-   plus computing `gnod` only on the levels an owned edge reads (`muscl_node_ranges`,
-   static; 45 -> 11 ms): 198 ms, ~9 % faster than the stored array.
+**Context.** Goal: drop FESOM2's stored per-edge MUSCL gradient `edge_up_dn_grad` as the
+reference RK3 code does (`qq/oce_stepRK3.F90`). First attempt: keep results bit-identical,
+so the Miura node average FESOM2 uses at coasts / bathymetry steps became its own per-node
+array `gnod`. Measured on core2: the first version was ~20 % SLOWER than the stored array;
+after shaping the lookup (one branch per level) and computing `gnod` only where read it was
+~9 % faster. The user then asked for the reference implementation proper: triangle gradient
+where the up/downwind triangle is wet, ZERO increment otherwise -- no node average at all.
+That kernel is ~43 % faster than FESOM2's fill + kernel (np 4: 42 vs 74 ms), and the
+results differ from FESOM2 only at coast/step levels (core2: max |Δflux| 0.4 % of max).
 
 **Lessons.**
-- **A stored array that is written once and read once per step is cheap if it is
-  contiguous;** replacing it with gathers only wins when the gathers are fewer and the
-  inner loop stays as simple as the old one. Measure before claiming "more efficient".
-- **pi is too small to decide performance:** the 13 MiB array sits in cache there, so the
-  old path looks better than it is; core2 changed the ranking. Time on the production mesh
-  (the test binary takes `FESOM3_MESH_DIR`; run it with `ulimit -s unlimited`).
-- **Compute only what is read.** "Every wet level of every node" was 4x more node averages
-  than the edges ever read; a static per-node range removed it without touching the result.
-- **The bit-identity test caught a wrong claim within minutes:** "every level the flux visits
-  lies inside both nodes' wet ranges" is false at boundary edges under a cavity (FESOM2's
-  `nl12 = 0` makes segment (D) start at level 1). Equivalence tests on synthesised cavities
-  are worth their set-up cost.
-
+- **Profile what the stored array encodes, not just that it is stored.** The expensive part
+  was the node-averaged fallback (gathers over the node's elements, per edge in FESOM2 /
+  per node in the bit-identical port), not the array itself.
+- **Bit-identity is a choice with a price; state it as one.** Equivalence pinned the old
+  rule's cost into the new code. When the user wants the reference scheme, test it EXACTLY
+  instead: the production kernels must equal the stored-array kernels fed with the new
+  rule's array (bitwise), and must equal FESOM2 bitwise where the two rules coincide, and
+  differ elsewhere (teeth) -- test_muscl_onthefly parts R and S.
+- **pi is too small to decide performance:** the 13 MiB array sits in cache there; core2
+  changed the ranking of the intermediate versions. Time on the production mesh (the test
+  binary takes `FESOM3_MESH_DIR`; run it with `ulimit -s unlimited`).
+- **A bit-identity test on synthesised cavities caught a wrong claim within minutes:**
+  FESOM2's `nl12 = 0` at boundary edges makes segment (D) start at level 1, above a cavity
+  roof (the velocity is 0 there).

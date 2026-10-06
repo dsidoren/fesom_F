@@ -4,13 +4,13 @@ module oce_adv_tra_hor
     !   adv_tra_hor_upw1  (64-257)  low-order upwind
     !   adv_tra_hor_muscl (261-542) MUSCL (3rd/4th-order, bottom-stable via nboundary_lay)
     !   adv_tra_hor_mfct  (546-834) MUSCL for the FCT path (no bottom-boundary clamp)
-    ! The MUSCL kernels look the up/downwind tracer gradient up ON THE FLY: tr_xy of the
-    ! up/downwind triangle on the levels shared by both edge nodes [s0, s1], the Miura
-    ! node average gnod (muscl_node_grad) on all others (gnod is 0 outside a node's wet
-    ! range) -- bit-identical to FESOM2's stored per-edge array edge_up_dn_grad, which
-    ! FESOM3 no longer keeps (docs/plans/completed/2026-10-06-muscl-onthefly.md;
-    ! test_muscl_onthefly). One predictable branch per level: a per-edge column copy
-    ! and a per-level 3-way lookup routine were both slower on core2 than the stored array.
+    ! The MUSCL kernels form the up/downwind reconstruction ON THE FLY, as the reference RK3
+    ! code (qq/oce_stepRK3.F90, t_hor_adv_muscl_RK3): the elemental gradient tr_xy of the
+    ! upwind / downwind triangle (edge_up_dn_tri) where that triangle is wet at the level,
+    ! a zero increment where it is missing or dry. FESOM2 instead stores a per-edge array
+    ! edge_up_dn_grad with a Miura node-averaged gradient on those levels; FESOM3 dropped
+    ! both (docs/plans/completed/2026-10-06-muscl-onthefly.md). Identical to FESOM2 on the
+    ! levels where both edge nodes share both triangles (test_muscl_onthefly part R).
     !
     ! Each returns an EDGE flux that contributes with +sign to the 1st edge node and
     ! -sign to the 2nd (the driver scatters it to nodes). o_init_zero=.true. zeroes
@@ -119,7 +119,7 @@ contains
 
 
     !===========================================================================
-    subroutine adv_tra_hor_muscl(vel, ttf, mesh, num_ord, flux, tr_xy, gnod, edge_up_dn_tri, nboundary_lay, o_init_zero, partit)
+    subroutine adv_tra_hor_muscl(vel, ttf, mesh, num_ord, flux, tr_xy, edge_up_dn_tri, nboundary_lay, o_init_zero, partit)
         ! MUSCL horizontal flux (oce_adv_tra_hor.F90:261-542). num_ord = fraction of
         ! 4th-order (centered) contribution; (1-num_ord) is 3rd-order upwind. The
         ! per-node clamp c_lo = max(sign(1,nboundary_lay-nz),0) switches off the
@@ -132,7 +132,6 @@ contains
         real(kind=WP), intent(inout) :: flux(mesh%nl-1, mesh%edge2D)
         integer,       intent(in)    :: nboundary_lay(mesh%nod2D)
         real(kind=WP), intent(in)    :: tr_xy(2, mesh%nl-1, mesh%elem2D)   ! elemental gradient, full halo
-        real(kind=WP), intent(in)    :: gnod(2, mesh%nl-1, mesh%nod2D)     ! muscl_node_grad (owned+halo)
         integer,       intent(in)    :: edge_up_dn_tri(2, mesh%edge2D)
         logical, optional, intent(in) :: o_init_zero
         type(t_partit), intent(in), optional :: partit
@@ -140,9 +139,7 @@ contains
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        logical       :: both
-        integer       :: nzmin, nzmax
-        integer       :: s0, s1, tri1, tri2      ! per-edge shared-level range and up/dn triangles
+        integer       :: tri1, tri2, u1, l1, u2, l2   ! up/dn triangles and their wet level ranges
 
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         l_init_zero = .true.
@@ -156,10 +153,16 @@ contains
         do edge = 1, nEdgeO
             enodes = mesh%edges(:, edge)
             el     = mesh%edge_tri(:, edge)
-            ! on-the-fly up/downwind gradient: the shared-level range of the two edge nodes
-            both  = (edge_up_dn_tri(1, edge) /= 0) .and. (edge_up_dn_tri(2, edge) /= 0)
-            nzmin = maxval(mesh%ulevels_nod2D_max(enodes))
-            nzmax = minval(mesh%nlevels_nod2D_min(enodes))
+            ! up/downwind triangle of this edge and the levels on which it is wet; a missing
+            ! triangle gets an empty range (u = 1, l = 0)
+            tri1 = edge_up_dn_tri(1, edge); u1 = 1; l1 = 0
+            tri2 = edge_up_dn_tri(2, edge); u2 = 1; l2 = 0
+            if (tri1 > 0) then
+                u1 = mesh%ulevels(tri1); l1 = mesh%nlevels(tri1) - 1
+            end if
+            if (tri2 > 0) then
+                u2 = mesh%ulevels(tri2); l2 = mesh%nlevels(tri2) - 1
+            end if
             nl1    = mesh%nlevels(el(1)) - 1
             nu1    = mesh%ulevels(el(1))
             deltaX1 = mesh%edge_cross_dxdy(1, edge)
@@ -173,13 +176,6 @@ contains
             end if
             nl12 = min(nl1, nl2)
             nu12 = max(nu1, nu2)
-            ! levels shared by both edge nodes take the up/downwind triangle's gradient,
-            ! all others the node average (gnod is 0 outside a node's wet range)
-            s0 = 1; s1 = 0                                  ! empty shared range
-            if (both) then
-                s0 = nzmin; s1 = nzmax-1
-                tri1 = edge_up_dn_tri(1, edge); tri2 = edge_up_dn_tri(2, edge)
-            end if
             ! (A)
             do nz = nu1, nu12-1
                 vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1))
@@ -219,11 +215,11 @@ contains
             integer,       intent(in) :: nz
             real(kind=WP), intent(in) :: clo1, clo2, vflux
             real(kind=WP) :: Tmean1, Tmean2, cHO, g1(2), g2(2)
-            if (nz >= s0 .and. nz <= s1) then
-                g1 = tr_xy(:, nz, tri1); g2 = tr_xy(:, nz, tri2)
-            else
-                g1 = gnod(:, nz, enodes(1)); g2 = gnod(:, nz, enodes(2))
-            end if
+            ! the reference RK3 rule (qq/oce_stepRK3.F90 t_hor_adv_muscl_RK3): the
+            ! up/downwind triangle's elemental gradient where that triangle is wet, else 0
+            g1 = 0.0_WP; g2 = 0.0_WP
+            if (nz >= u1 .and. nz <= l1) g1 = tr_xy(:, nz, tri1)
+            if (nz >= u2 .and. nz <= l2) g2 = tr_xy(:, nz, tri2)
             Tmean2 = ttf(nz, enodes(2)) - &
                      (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
                       mesh%edge_dxdy(1,edge)*g2(1) + &
@@ -238,7 +234,7 @@ contains
     end subroutine adv_tra_hor_muscl
 
     !===========================================================================
-    subroutine adv_tra_hor_mfct(vel, ttf, mesh, num_ord, flux, tr_xy, gnod, edge_up_dn_tri, o_init_zero, partit)
+    subroutine adv_tra_hor_mfct(vel, ttf, mesh, num_ord, flux, tr_xy, edge_up_dn_tri, o_init_zero, partit)
         ! MUSCL for the FCT path (oce_adv_tra_hor.F90:546-834). Same as
         ! adv_tra_hor_muscl but WITHOUT the c_lo bottom-boundary clamp (the
         ! reconstruction near bottom topography is not upwind; runs with FCT only).
@@ -249,7 +245,6 @@ contains
         real(kind=WP), intent(in)    :: vel(2, mesh%nl-1, mesh%elem2D)
         real(kind=WP), intent(inout) :: flux(mesh%nl-1, mesh%edge2D)
         real(kind=WP), intent(in)    :: tr_xy(2, mesh%nl-1, mesh%elem2D)   ! elemental gradient, full halo
-        real(kind=WP), intent(in)    :: gnod(2, mesh%nl-1, mesh%nod2D)     ! muscl_node_grad (owned+halo)
         integer,       intent(in)    :: edge_up_dn_tri(2, mesh%edge2D)
         logical, optional, intent(in) :: o_init_zero
         type(t_partit), intent(in), optional :: partit
@@ -257,9 +252,7 @@ contains
         real(kind=WP) :: deltaX1, deltaY1, deltaX2, deltaY2, vflux
         integer       :: el(2), enodes(2), nz, edge, nu12, nl12, nl1, nl2, nu1, nu2
         integer       :: nNodO, nNodL, nEdgeO, nElemO
-        logical       :: both
-        integer       :: nzmin, nzmax
-        integer       :: s0, s1, tri1, tri2      ! per-edge shared-level range and up/dn triangles
+        integer       :: tri1, tri2, u1, l1, u2, l2   ! up/dn triangles and their wet level ranges
 
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
         l_init_zero = .true.
@@ -273,10 +266,16 @@ contains
         do edge = 1, nEdgeO
             enodes = mesh%edges(:, edge)
             el     = mesh%edge_tri(:, edge)
-            ! on-the-fly up/downwind gradient: the shared-level range of the two edge nodes
-            both  = (edge_up_dn_tri(1, edge) /= 0) .and. (edge_up_dn_tri(2, edge) /= 0)
-            nzmin = maxval(mesh%ulevels_nod2D_max(enodes))
-            nzmax = minval(mesh%nlevels_nod2D_min(enodes))
+            ! up/downwind triangle of this edge and the levels on which it is wet; a missing
+            ! triangle gets an empty range (u = 1, l = 0)
+            tri1 = edge_up_dn_tri(1, edge); u1 = 1; l1 = 0
+            tri2 = edge_up_dn_tri(2, edge); u2 = 1; l2 = 0
+            if (tri1 > 0) then
+                u1 = mesh%ulevels(tri1); l1 = mesh%nlevels(tri1) - 1
+            end if
+            if (tri2 > 0) then
+                u2 = mesh%ulevels(tri2); l2 = mesh%nlevels(tri2) - 1
+            end if
             nl1    = mesh%nlevels(el(1)) - 1
             nu1    = mesh%ulevels(el(1))
             deltaX1 = mesh%edge_cross_dxdy(1, edge)
@@ -290,13 +289,6 @@ contains
             end if
             nl12 = min(nl1, nl2)
             nu12 = max(nu1, nu2)
-            ! levels shared by both edge nodes take the up/downwind triangle's gradient,
-            ! all others the node average (gnod is 0 outside a node's wet range)
-            s0 = 1; s1 = 0                                  ! empty shared range
-            if (both) then
-                s0 = nzmin; s1 = nzmax-1
-                tri1 = edge_up_dn_tri(1, edge); tri2 = edge_up_dn_tri(2, edge)
-            end if
             ! (A)
             do nz = nu1, nu12-1
                 vflux = (-vel(2,nz,el(1))*deltaX1 + vel(1,nz,el(1))*deltaY1) * mesh%helem(nz,el(1))
@@ -332,11 +324,11 @@ contains
             integer,       intent(in) :: nz
             real(kind=WP), intent(in) :: vflux
             real(kind=WP) :: Tmean1, Tmean2, cHO, g1(2), g2(2)
-            if (nz >= s0 .and. nz <= s1) then
-                g1 = tr_xy(:, nz, tri1); g2 = tr_xy(:, nz, tri2)
-            else
-                g1 = gnod(:, nz, enodes(1)); g2 = gnod(:, nz, enodes(2))
-            end if
+            ! the reference RK3 rule (qq/oce_stepRK3.F90 t_hor_adv_muscl_RK3): the
+            ! up/downwind triangle's elemental gradient where that triangle is wet, else 0
+            g1 = 0.0_WP; g2 = 0.0_WP
+            if (nz >= u1 .and. nz <= l1) g1 = tr_xy(:, nz, tri1)
+            if (nz >= u2 .and. nz <= l2) g2 = tr_xy(:, nz, tri2)
             Tmean2 = ttf(nz, enodes(2)) - &
                      (2.0_WP*(ttf(nz, enodes(2))-ttf(nz, enodes(1))) + &
                       mesh%edge_dxdy(1,edge)*g2(1) + &
