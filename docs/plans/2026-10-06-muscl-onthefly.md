@@ -96,9 +96,9 @@ for `nz in [ulevels_nod2D(n), nlevels_nod2D(n))`, over `n = 1..nNodL`.
 **Files:** `src/types/mod_tracer.F90`, `src/oce/oce_tracer_mod.F90`,
 `src/oce/oce_adv_tra_driver.F90`, `src/oce/oce_ale_tracer.F90`
 
-- [ ] persistent `twork%tr_xy`, `twork%gnod`; `init_tracers_AB` computes them (no fill)
-- [ ] driver passes them to the new kernels; `solve_tracers_ale` reuses `twork%tr_xy`
-- [ ] full ctest + gate: all drift rows bit-identical to the previous gate log
+- [x] persistent `twork%tr_xy`, `twork%gnod`; `init_tracers_AB` computes them (no fill)
+- [x] driver passes them to the new kernels; `solve_tracers_ale` reuses `twork%tr_xy`
+- [x] full ctest + gate: all drift rows bit-identical to the previous gate log
 
 ### Task 4: remove the stored array
 

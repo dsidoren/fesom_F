@@ -38,7 +38,7 @@ module oce_ale_tracer
                                   mix_scheme_nmb, ref_sss, ref_sss_local
     use mod_config,         only: use_sw_pene
     use oce_tracer_mod,     only: init_tracers_AB
-    use oce_tracer_grad,    only: tracer_gradient_elements, tracer_gradient_z
+    use oce_tracer_grad,    only: tracer_gradient_z
     use oce_adv_tra_driver, only: do_oce_adv_tra
     implicit none
     private
@@ -120,14 +120,13 @@ contains
         type(t_partit), intent(in), optional  :: partit
         integer :: tr_num, node, elem, nzmin, nzmax
         integer :: nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF
-        real(kind=WP), allocatable :: tr_xy(:,:,:)
         real(kind=WP), dimension(:,:), pointer :: Svalues
 
-        ! M2.12c-3: tr_xy is sized to the LOCAL element count (mesh%elem2D holds the GLOBAL
-        ! count in the partitioned mesh). tracer_gradient_elements writes OWNED elements;
-        ! diff_part_hor_redi reads tr_xy only at the (owned) triangles of owned edges.
+        ! The elemental tracer gradient for the horizontal diffusion / Redi is
+        ! tracers%work%tr_xy, built by init_tracers_AB (called inside advect_tracer) from
+        ! the same values (advection writes only del_ttf), so it is not recomputed here;
+        ! diff_part_hor_redi reads it only at the (owned) triangles of owned edges.
         call local_dims(mesh, partit, nNodO, nNodL, nEdgeO, nEdgeL, nElemO, nElemL, nElemF)
-        allocate(tr_xy(2, mesh%nl-1, nElemF))
 
         ! M4c GM bolus ADD (FESOM2 oce_ale_tracer.F90:199-211): advect with the residual-mean
         ! velocity UV + fer_uv / Wvel + fer_w. Added over owned+halo (advection reads the halo;
@@ -151,12 +150,12 @@ contains
         do tr_num = 1, tracers%num_tracers
             ! advection: del_ttf = advhoriz + advvert (del_ttf zeroed in init_tracers_AB)
             call advect_tracer(dt, tr_num, dynamics, tracers, mesh, partit)
-            ! elemental gradient of the pre-diffusion tracer (advection left values = T^n)
-            call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh, partit)
+            ! elemental gradient of the pre-diffusion tracer (advection left values = T^n):
+            ! tracers%work%tr_xy from init_tracers_AB of this tracer (see above)
             ! M4d Redi: vertical gradient tr_z of the same T^n (feeds diff_part_hor_redi K13/K23)
             if (Redi) call tracer_gradient_z(tracers%data(tr_num)%values, tracers%work%tr_z, mesh, partit)
             ! horizontal diffusion + ALE reconstruct + implicit vertical-diffusion TDMA
-            call diff_tracers_ale(tr_num, dt, dynamics, tracers, mesh, tr_xy, Ki, &
+            call diff_tracers_ale(tr_num, dt, dynamics, tracers, mesh, tracers%work%tr_xy, Ki, &
                                   heat_flux, water_flux, virtual_salt, relax_salt, &
                                   real_salt_flux, is_nonlinfs, partit)
             ! relax_to_clim (clim_relax=0): no-op. exchange_nod(values) (FESOM2 :268): the
@@ -188,7 +187,6 @@ contains
             where (Svalues(nzmin:nzmax,node) <  3.0_WP) Svalues(nzmin:nzmax,node) =  3.0_WP
         end do
 
-        deallocate(tr_xy)
     end subroutine solve_tracers_ale
 
     !===========================================================================

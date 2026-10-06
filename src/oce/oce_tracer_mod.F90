@@ -37,7 +37,7 @@ module oce_tracer_mod
     use mod_part_bounds,  only: owned_bounds, is_multirank
     use mod_halo,         only: exchange_elem_full
     use oce_tracer_grad,  only: tracer_gradient_elements
-    use oce_muscl_adv,    only: fill_up_dn_grad
+    use oce_muscl_adv,    only: muscl_node_grad
     implicit none
     private
     public :: init_tracers_AB
@@ -48,15 +48,15 @@ contains
         ! M2.12b: optional partit. The del_ttf zero / AB interpolation / history roll
         ! run over OWNED+HALO nodes (values/valuesold are halo-consistent so valuesAB is
         ! valid at the halo the HO kernels read). tr_xy is built on OWNED elements then
-        ! exchanged over the FULL element halo (FESOM2 init_tracers_AB:128-132) before
-        ! fill_up_dn_grad reads it at the halo elements of a halo node's element list.
+        ! exchanged over the FULL element halo (FESOM2 init_tracers_AB:128-132): the MUSCL
+        ! kernels and muscl_node_grad read it at the halo elements of a halo node's
+        ! element list.
         integer,        intent(in)    :: tr_num
         type(t_mesh),   intent(in)    :: mesh
         type(t_tracer), intent(inout) :: tracers
         type(t_partit), intent(in), optional :: partit
         integer :: n, nz
         integer :: nNodO, nNodL, nEdgeO, nElemO, nElemA
-        real(kind=WP), allocatable :: tr_xy(:,:,:)
 
         call owned_bounds(mesh, nNodO, nNodL, nEdgeO, nElemO, partit)
 
@@ -98,17 +98,23 @@ contains
             end do
         end if
 
-        ! rebuild the MUSCL up/downwind edge gradient from grad(values). tr_xy spans
-        ! the FULL element halo at multi-rank so fill_up_dn_grad can read it at the halo
-        ! elements reached through a halo node's element list.
+        ! elemental gradient of values over the FULL element halo + its Miura node average:
+        ! the MUSCL kernels look the up/downwind gradients up on the fly from these two
+        ! (adv_tra_hor_muscl_otf / _mfct_otf; they replaced the stored per-edge array of
+        ! fill_up_dn_grad, test_muscl_onthefly pins the equivalence bitwise), and the
+        ! horizontal diffusion / Redi of this tracer reuses tr_xy (solve_tracers_ale).
+        ! Persistent scratch, allocated on first use. Zeroed once: tracer_gradient_elements
+        ! writes only wet levels, and the dry ones are never read.
         nElemA = mesh%elem2D
         if (is_multirank(partit)) &
             nElemA = partit%myDim_elem2D + partit%eDim_elem2D + partit%eXDim_elem2D
-        allocate(tr_xy(2, mesh%nl-1, nElemA))
-        call tracer_gradient_elements(tracers%data(tr_num)%values, tr_xy, mesh, partit)
-        if (is_multirank(partit)) call exchange_elem_full(tr_xy, partit)
-        call fill_up_dn_grad(tracers%work, tr_xy, mesh, partit)
-        deallocate(tr_xy)
+        if (.not. allocated(tracers%work%tr_xy)) then
+            allocate(tracers%work%tr_xy(2, mesh%nl-1, nElemA), tracers%work%gnod(2, mesh%nl-1, nNodL))
+            tracers%work%tr_xy = 0.0_WP
+        end if
+        call tracer_gradient_elements(tracers%data(tr_num)%values, tracers%work%tr_xy, mesh, partit)
+        if (is_multirank(partit)) call exchange_elem_full(tracers%work%tr_xy, partit)
+        call muscl_node_grad(tracers%work%gnod, tracers%work%tr_xy, mesh, partit)
     end subroutine init_tracers_AB
 
 end module oce_tracer_mod
