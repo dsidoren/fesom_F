@@ -434,7 +434,7 @@ contains
         ! it per EDGE, i.e. ~6 times per node, and stores the result in the 4-component
         ! edge array edge_up_dn_grad. The average depends on (node, level) only, so it is
         ! computed here once; the MUSCL kernels look it up on the fly together with tr_xy
-        ! of the up/downwind triangle (docs/plans/2026-10-06-muscl-onthefly.md).
+        ! of the up/downwind triangle (docs/plans/completed/2026-10-06-muscl-onthefly.md).
         ! The loop order over nod_in_elem2D, the wet test and the tx/tvol division are
         ! fill_up_dn_grad's, so every value is bit-identical to the one the fill stores.
         ! A level with no wet element around the node (a node deeper than all its

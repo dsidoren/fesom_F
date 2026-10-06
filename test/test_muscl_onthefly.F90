@@ -204,7 +204,7 @@ end module muscl_oracle
 
 program test_muscl_onthefly
     ! MUSCL horizontal advection with on-the-fly up/downwind gradients
-    ! (docs/plans/2026-10-06-muscl-onthefly.md).
+    ! (docs/plans/completed/2026-10-06-muscl-onthefly.md).
     !
     ! WHY THIS TEST EXISTS
     ! --------------------
